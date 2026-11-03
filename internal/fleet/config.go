@@ -41,6 +41,9 @@ type Connector struct {
 	UseStaticCredentials bool     `json:"use_static_credentials"`
 	Keepalive            Duration `json:"keepalive"`
 	Timeout              Duration `json:"timeout"`
+	// UseExternalAddr connects to the VM's public address, for a manager
+	// outside the VMs' network.
+	UseExternalAddr bool `json:"use_external_addr"`
 }
 
 func (c Class) validate(name string) error {

@@ -87,7 +87,7 @@ func startPool(ctx context.Context, name string, c Class, log hclog.Logger) (*po
 		taskscaler.WithCapacityPerInstance(1),
 		taskscaler.WithMaxUseCount(1),
 		taskscaler.WithMaxInstances(c.MaxInstances),
-		taskscaler.WithInstanceUpFunc(dockerReady(log)),
+		taskscaler.WithInstanceUpFunc(dockerReady(c.Connector.UseExternalAddr, log)),
 		taskscaler.WithDeleteInstancesOnShutdown(),
 	)
 	if err != nil {
@@ -144,12 +144,13 @@ func (b *Backend) Create(ctx context.Context, class string) (VM, error) {
 
 	// Each call asks the plugin again, so plugins that issue short-lived
 	// keys hand out a fresh one for every connection.
+	external := p.class.Connector.UseExternalAddr
 	connect := func(ctx context.Context) (proxy.Target, error) {
 		info, err := acq.InstanceConnectInfo(ctx)
 		if err != nil {
 			return proxy.Target{}, err
 		}
-		return proxy.Target{Info: info}, nil
+		return target(info, external), nil
 	}
 	return VM{ID: id, Class: class, Instance: acq.InstanceID(), Connect: connect}, nil
 }
@@ -230,7 +231,7 @@ func sweep(ctx context.Context, group provider.InstanceGroup, log hclog.Logger) 
 // dockerReady admits an instance once Docker answers over SSH. Instances
 // that existed before fleetci started may have run a job already, so they
 // are removed instead.
-func dockerReady(log hclog.Logger) taskscaler.UpFunc {
+func dockerReady(external bool, log hclog.Logger) taskscaler.UpFunc {
 	return func(_ taskscaler.Taskscaler, inst taskscaler.UpFuncInstance) error {
 		if inst.Cause == fleeting.CausePreexisted {
 			return errors.New("instance existed before fleetci started; removing it")
@@ -239,7 +240,7 @@ func dockerReady(log hclog.Logger) taskscaler.UpFunc {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
 
-		client, err := proxy.Dial(ctx, proxy.Target{Info: inst.Info})
+		client, err := proxy.Dial(ctx, target(inst.Info, external))
 		if err != nil {
 			return err
 		}
@@ -258,6 +259,15 @@ func dockerReady(log hclog.Logger) taskscaler.UpFunc {
 			}
 		}
 	}
+}
+
+// target picks the address to dial. As in fleeting's connector, a VM
+// without an external address is reached at its internal one.
+func target(info provider.ConnectInfo, external bool) proxy.Target {
+	if external && info.ExternalAddr != "" {
+		info.InternalAddr = info.ExternalAddr
+	}
+	return proxy.Target{Info: info}
 }
 
 func run(c *ssh.Client, cmd string) error {
