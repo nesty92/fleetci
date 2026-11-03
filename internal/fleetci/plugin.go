@@ -1,8 +1,8 @@
 // Package fleetci is the fleeting plugin gitlab-runner loads. To the runner
 // it is a group of one instance: an SSH gateway on loopback inside this
-// process. Behind it are the nesting API, which creates one VM per job sized
-// by the job's class, and the proxy that carries the runner's VM connection
-// to that VM.
+// process. Behind it are the nesting API, which takes one VM per job from
+// the job's class, and the proxy that carries the runner's VM connection to
+// that VM. Each class is its own fleeting plugin and taskscaler.
 package fleetci
 
 import (
@@ -20,7 +20,7 @@ import (
 	"gitlab.com/gitlab-org/fleeting/fleeting/provider"
 	"gitlab.com/gitlab-org/fleeting/nesting/api"
 
-	"github.com/nesty92/fleetci/internal/dockervm"
+	"github.com/nesty92/fleetci/internal/fleet"
 	"github.com/nesty92/fleetci/internal/gateway"
 )
 
@@ -35,10 +35,9 @@ type Config struct {
 	Listen string `json:"listen"`
 	// NestingPath must match vm_isolation.nesting_host. Default
 	// /fleetci/nesting.sock.
-	NestingPath  string                   `json:"nesting_path"`
-	DefaultClass string                   `json:"default_class"`
-	Classes      map[string]dockervm.Size `json:"classes"`
-	Docker       dockervm.Settings        `json:"docker"`
+	NestingPath  string                 `json:"nesting_path"`
+	DefaultClass string                 `json:"default_class"`
+	Classes      map[string]fleet.Class `json:"classes"`
 }
 
 type InstanceGroup struct {
@@ -70,13 +69,17 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 	g.log = log
 	g.settings = settings
 
-	backend, err := dockervm.New(g.Docker, log)
+	// Each class starts its own fleeting plugin and taskscaler.
+	backend, err := fleet.New(ctx, g.Classes, log)
 	if err != nil {
 		return provider.ProviderInfo{}, err
 	}
-	if err := backend.DeleteAll(ctx); err != nil {
-		return provider.ProviderInfo{}, fmt.Errorf("removing leftover vms: %w", err)
-	}
+	started := false
+	defer func() {
+		if !started {
+			_ = backend.Shutdown(context.WithoutCancel(ctx))
+		}
+	}()
 
 	// The nesting API listens on a socket only this user can reach. The
 	// runner gets to it through the gateway, never directly.
@@ -89,7 +92,7 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 		return provider.ProviderInfo{}, err
 	}
 
-	hv := NewHypervisor(g.Config, backend, log)
+	hv := NewHypervisor(g.DefaultClass, backend, log)
 	g.gw, err = gateway.New(gateway.Config{
 		Listen:        g.Listen,
 		NestingPath:   g.NestingPath,
@@ -114,11 +117,13 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 
 	if err := waitForSocket(ctx, socket); err != nil {
 		stop()
+		<-g.stopped
 		return provider.ProviderInfo{}, err
 	}
+	started = true
 
 	log.Info("fleetci ready", "gateway", g.gw.Addr(), "classes", len(g.Classes), "default_class", g.DefaultClass)
-	return provider.ProviderInfo{ID: "fleetci/docker", MaxSize: 1}, nil
+	return provider.ProviderInfo{ID: "fleetci/gateway", MaxSize: 1}, nil
 }
 
 func waitForSocket(ctx context.Context, path string) error {

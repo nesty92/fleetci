@@ -2,7 +2,6 @@ package fleetci
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -12,7 +11,7 @@ import (
 
 	"gitlab.com/gitlab-org/fleeting/nesting/hypervisor"
 
-	"github.com/nesty92/fleetci/internal/dockervm"
+	"github.com/nesty92/fleetci/internal/fleet"
 	"github.com/nesty92/fleetci/internal/proxy"
 )
 
@@ -21,12 +20,20 @@ import (
 // arrives as "class-".
 const namePrefix = "class-"
 
+// Backend hands out one VM per job.
+type Backend interface {
+	Has(class string) bool
+	Create(ctx context.Context, class string) (fleet.VM, error)
+	Delete(ctx context.Context, id string) error
+	Shutdown(ctx context.Context) error
+}
+
 // Hypervisor serves the nesting API: one fresh VM per job, of the class the
 // job asked for.
 type Hypervisor struct {
-	cfg     Config
-	backend *dockervm.Backend
-	log     hclog.Logger
+	defaultClass string
+	backend      Backend
+	log          hclog.Logger
 
 	mu  sync.Mutex
 	vms map[string]*vmEntry
@@ -39,24 +46,23 @@ type vmEntry struct {
 
 var _ hypervisor.Hypervisor = (*Hypervisor)(nil)
 
-func NewHypervisor(cfg Config, backend *dockervm.Backend, log hclog.Logger) *Hypervisor {
-	return &Hypervisor{cfg: cfg, backend: backend, log: log, vms: map[string]*vmEntry{}}
+func NewHypervisor(defaultClass string, backend Backend, log hclog.Logger) *Hypervisor {
+	return &Hypervisor{defaultClass: defaultClass, backend: backend, log: log, vms: map[string]*vmEntry{}}
 }
 
 // ClassFor maps a VM name from the runner to a class.
-func (h *Hypervisor) ClassFor(name string) (string, dockervm.Size, error) {
-	key, ok := strings.CutPrefix(name, namePrefix)
+func (h *Hypervisor) ClassFor(name string) (string, error) {
+	class, ok := strings.CutPrefix(name, namePrefix)
 	if !ok {
-		return "", dockervm.Size{}, fmt.Errorf("vm name %q must start with %q", name, namePrefix)
+		return "", fmt.Errorf("vm name %q must start with %q", name, namePrefix)
 	}
-	if key == "" {
-		key = h.cfg.DefaultClass
+	if class == "" {
+		class = h.defaultClass
 	}
-	size, ok := h.cfg.Classes[key]
-	if !ok {
-		return "", dockervm.Size{}, fmt.Errorf("unknown class %q", key)
+	if !h.backend.Has(class) {
+		return "", fmt.Errorf("unknown class %q", class)
 	}
-	return key, size, nil
+	return class, nil
 }
 
 // Get finds a VM for the gateway.
@@ -78,20 +84,17 @@ func (h *Hypervisor) Init(_ context.Context, config []byte) error {
 }
 
 func (h *Hypervisor) Create(ctx context.Context, name string) (hypervisor.VirtualMachine, error) {
-	class, size, err := h.ClassFor(name)
+	class, err := h.ClassFor(name)
 	if err != nil {
 		return nil, err
 	}
-	vm, err := h.backend.Create(ctx, class, size)
+	vm, err := h.backend.Create(ctx, class)
 	if err != nil {
 		return nil, err
 	}
-
-	target := vm.Target
-	pv := proxy.NewVM(vm.ID, func(context.Context) (proxy.Target, error) { return target, nil }, h.log)
 
 	h.mu.Lock()
-	h.vms[vm.ID] = &vmEntry{name: name, proxy: pv}
+	h.vms[vm.ID] = &vmEntry{name: name, proxy: proxy.NewVM(vm.ID, vm.Connect, h.log)}
 	h.mu.Unlock()
 
 	// The address is the VM's id, which only the gateway understands. The
@@ -121,8 +124,7 @@ func (h *Hypervisor) List(context.Context) ([]hypervisor.VirtualMachine, error) 
 	return vms, nil
 }
 
-// Shutdown removes every VM. Each one served a single job, so none is worth
-// keeping.
+// Shutdown releases every VM; the backend then removes them all.
 func (h *Hypervisor) Shutdown(ctx context.Context) error {
 	h.mu.Lock()
 	ids := make([]string, 0, len(h.vms))
@@ -131,10 +133,8 @@ func (h *Hypervisor) Shutdown(ctx context.Context) error {
 	}
 	h.mu.Unlock()
 
-	var errs []error
 	for _, id := range ids {
-		errs = append(errs, h.Delete(ctx, id))
+		_ = h.Delete(ctx, id)
 	}
-	errs = append(errs, h.backend.DeleteAll(ctx))
-	return errors.Join(errs...)
+	return h.backend.Shutdown(ctx)
 }

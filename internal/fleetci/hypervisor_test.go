@@ -1,35 +1,39 @@
 package fleetci
 
 import (
+	"context"
 	"testing"
 
 	"github.com/hashicorp/go-hclog"
 
-	"github.com/nesty92/fleetci/internal/dockervm"
+	"github.com/nesty92/fleetci/internal/fleet"
 )
 
+type fakeBackend map[string]bool
+
+func (f fakeBackend) Has(class string) bool { return f[class] }
+func (fakeBackend) Create(context.Context, string) (fleet.VM, error) {
+	return fleet.VM{}, nil
+}
+func (fakeBackend) Delete(context.Context, string) error { return nil }
+func (fakeBackend) Shutdown(context.Context) error       { return nil }
+
 func TestClassFor(t *testing.T) {
-	h := NewHypervisor(Config{
-		DefaultClass: "small",
-		Classes: map[string]dockervm.Size{
-			"small": {CPUs: "1", Memory: "1g"},
-			"large": {CPUs: "4", Memory: "4g"},
-		},
-	}, nil, hclog.NewNullLogger())
+	h := NewHypervisor("small", fakeBackend{"small": true, "large": true}, hclog.NewNullLogger())
 
 	for name, want := range map[string]string{
 		"class-large": "large",
 		"class-small": "small",
 		"class-":      "small", // FLEETCI_CLASS unset
 	} {
-		got, _, err := h.ClassFor(name)
+		got, err := h.ClassFor(name)
 		if err != nil || got != want {
 			t.Errorf("ClassFor(%q) = %q, %v; want %q", name, got, err, want)
 		}
 	}
 
 	for _, name := range []string{"class-huge", "ubuntu:24.04", ""} {
-		if _, _, err := h.ClassFor(name); err == nil {
+		if _, err := h.ClassFor(name); err == nil {
 			t.Errorf("ClassFor(%q) succeeded; want error", name)
 		}
 	}

@@ -1,0 +1,91 @@
+//go:build docker
+
+// Run with: go test -tags docker ./internal/fleet/
+// Needs Docker and the hack/m0 VM image (hack/m0/up.sh builds it).
+package fleet
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/hashicorp/go-hclog"
+
+	"github.com/nesty92/fleetci/internal/proxy"
+)
+
+func TestClassWithDockerPlugin(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	bin := filepath.Join(t.TempDir(), "fleeting-plugin-dockervm")
+	if out, err := exec.Command("go", "build", "-o", bin, "../../cmd/fleeting-plugin-dockervm").CombinedOutput(); err != nil {
+		t.Fatalf("building plugin: %v\n%s", err, out)
+	}
+
+	const network = "fleetci-test"
+	_ = exec.Command("docker", "network", "create", network).Run()
+	t.Cleanup(func() { _ = exec.Command("docker", "network", "rm", network).Run() })
+
+	group := "test-" + randomHex(3)
+	pluginCfg, _ := json.Marshal(map[string]string{
+		"name": group, "image": "fleetci-m0-vm", "network": network, "cpus": "1", "memory": "1g",
+	})
+
+	log := hclog.New(&hclog.LoggerOptions{Level: hclog.Info, Output: os.Stderr})
+	b, err := New(ctx, map[string]Class{
+		"small": {
+			Plugin:       bin,
+			PluginConfig: pluginCfg,
+			Connector:    Connector{Username: "fleetci", Timeout: Duration(time.Minute)},
+			MaxInstances: 2,
+			IdleCount:    1,
+		},
+	}, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Shutdown(context.Background())
+
+	vm, err := b.Create(ctx, "small")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Two connections, each with a fresh key from ConnectInfo.
+	for i := range 2 {
+		target, err := vm.Connect(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, err := proxy.Dial(ctx, target)
+		if err != nil {
+			t.Fatalf("connection %d: %v", i, err)
+		}
+		s, _ := c.NewSession()
+		out, err := s.Output("docker info --format '{{.NCPU}}' && cat /sys/fs/cgroup/cpu.max")
+		c.Close()
+		if err != nil {
+			t.Fatalf("connection %d: %v: %s", i, err, out)
+		}
+		t.Logf("connection %d: %s", i, strings.Join(strings.Fields(string(out)), " "))
+	}
+
+	// Released after one use, the instance goes away.
+	if err := b.Delete(ctx, vm.ID); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Minute)
+	for time.Now().Before(deadline) {
+		if exec.Command("docker", "inspect", vm.Instance).Run() != nil {
+			return
+		}
+		time.Sleep(time.Second)
+	}
+	t.Fatalf("instance %s was not removed after its one use", vm.Instance)
+}

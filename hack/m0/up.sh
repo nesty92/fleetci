@@ -1,5 +1,5 @@
 #!/bin/sh
-# Prepares the local proof: the VM image, its network, the plugin binary and
+# Prepares the local proof: the VM image, its network, the plugin binaries and
 # gitlab-runner's config.toml. The runner token is read from
 # ~/.config/fleetci/m0-runner.token and only written into the 0600 config.
 set -eu
@@ -12,7 +12,7 @@ NET=fleetci-m0
 umask 077
 mkdir -p "$DATA/work" "$DATA/bin"
 
-(cd "$REPO" && go build -o "$DATA/bin/" ./cmd/fleeting-plugin-fleetci)
+(cd "$REPO" && go build -o "$DATA/bin/" ./cmd/fleeting-plugin-fleetci ./cmd/fleeting-plugin-dockervm)
 docker build -q -t fleetci-m0-vm "$HERE/vm" >/dev/null
 docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null
 
@@ -40,15 +40,34 @@ log_level = "info"
     max_instances = 1
     [runners.autoscaler.plugin_config]
       default_class = "small"
-      [runners.autoscaler.plugin_config.docker]
-        image = "fleetci-m0-vm"
-        network = "$NET"
+      # small keeps one VM booted and waiting; large boots per job.
       [runners.autoscaler.plugin_config.classes.small]
-        cpus = "1"
-        memory = "2g"
+        plugin = "$DATA/bin/fleeting-plugin-dockervm"
+        max_instances = 4
+        idle_count = 1
+        idle_time = "20m"
+        [runners.autoscaler.plugin_config.classes.small.plugin_config]
+          name = "small"
+          image = "fleetci-m0-vm"
+          network = "$NET"
+          cpus = "1"
+          memory = "2g"
+        [runners.autoscaler.plugin_config.classes.small.connector_config]
+          username = "fleetci"
+          timeout = "2m"
       [runners.autoscaler.plugin_config.classes.large]
-        cpus = "4"
-        memory = "6g"
+        plugin = "$DATA/bin/fleeting-plugin-dockervm"
+        max_instances = 2
+        idle_count = 0
+        [runners.autoscaler.plugin_config.classes.large.plugin_config]
+          name = "large"
+          image = "fleetci-m0-vm"
+          network = "$NET"
+          cpus = "4"
+          memory = "6g"
+        [runners.autoscaler.plugin_config.classes.large.connector_config]
+          username = "fleetci"
+          timeout = "2m"
     [runners.autoscaler.connector_config]
       timeout = "2m"
     [[runners.autoscaler.policy]]
