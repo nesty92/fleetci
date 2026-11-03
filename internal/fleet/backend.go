@@ -16,6 +16,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"gitlab.com/gitlab-org/fleeting/fleeting"
+	"gitlab.com/gitlab-org/fleeting/fleeting/provider"
 	"gitlab.com/gitlab-org/fleeting/taskscaler"
 
 	"github.com/nesty92/fleetci/internal/proxy"
@@ -177,12 +178,53 @@ func (b *Backend) Shutdown(ctx context.Context) error {
 			go func() {
 				defer wg.Done()
 				p.ts.Shutdown(ctx)
+				sweep(ctx, p.runner.InstanceGroup(), b.log.With("class", p.name))
 				p.runner.Kill()
 			}()
 		}
 		wg.Wait()
 	})
 	return nil
+}
+
+// sweep removes whatever the plugin still lists once taskscaler has stopped.
+// taskscaler removes only the instances it has seen running, so one that
+// was still booting would be left behind. A class's group belongs to fleetci
+// alone and each VM serves one job, so nothing in it is worth keeping.
+//
+// It runs after taskscaler's shutdown has called the plugin's Shutdown; the
+// fleeting plugins fleetci uses (aws, dockervm) keep working after it.
+func sweep(ctx context.Context, group provider.InstanceGroup, log hclog.Logger) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
+	for {
+		var ids []string
+		err := group.Update(ctx, func(id string, state provider.State) {
+			if state != provider.StateDeleting && state != provider.StateDeleted {
+				ids = append(ids, id)
+			}
+		})
+		if err != nil {
+			log.Warn("listing instances at shutdown", "err", err)
+			return
+		}
+		if len(ids) == 0 {
+			return
+		}
+
+		log.Info("removing instances left at shutdown", "instances", ids)
+		if _, err := group.Decrease(ctx, ids); err != nil {
+			log.Warn("removing instances at shutdown", "err", err)
+		}
+
+		select {
+		case <-ctx.Done():
+			log.Warn("instances may be left behind", "instances", ids)
+			return
+		case <-time.After(2 * time.Second):
+		}
+	}
 }
 
 // dockerReady admits an instance once Docker answers over SSH. Instances

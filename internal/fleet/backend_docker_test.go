@@ -76,16 +76,55 @@ func TestClassWithDockerPlugin(t *testing.T) {
 		t.Logf("connection %d: %s", i, strings.Join(strings.Fields(string(out)), " "))
 	}
 
+	// Hold the VM like a running job, until the replacement idle VM is up.
+	for wait := time.Now().Add(time.Minute); ; {
+		out, _ := exec.Command("docker", "ps", "--filter", "label=fleetci.group="+group, "--filter", "status=running", "-q").Output()
+		if len(strings.Fields(string(out))) >= 2 {
+			break
+		}
+		if time.Now().After(wait) {
+			t.Fatal("no replacement idle VM while the job held its VM")
+		}
+		time.Sleep(time.Second)
+	}
+	time.Sleep(5 * time.Second)
+
 	// Released after one use, the instance goes away.
 	if err := b.Delete(ctx, vm.ID); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(time.Minute)
-	for time.Now().Before(deadline) {
-		if exec.Command("docker", "inspect", vm.Instance).Run() != nil {
-			return
+	for exec.Command("docker", "inspect", vm.Instance).Run() == nil {
+		if time.Now().After(deadline) {
+			t.Fatalf("instance %s was not removed after its one use", vm.Instance)
 		}
 		time.Sleep(time.Second)
 	}
-	t.Fatalf("instance %s was not removed after its one use", vm.Instance)
+
+	// Shut down while a VM is still booting: taking the idle VM makes
+	// taskscaler boot a replacement, and shutdown must remove it too.
+	vm2, err := b.Create(ctx, "small")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for wait := time.Now().Add(time.Minute); ; {
+		out, _ := exec.Command("docker", "ps", "-aq", "--filter", "label=fleetci.group="+group).Output()
+		if len(strings.Fields(string(out))) >= 2 {
+			break
+		}
+		if time.Now().After(wait) {
+			t.Fatal("no replacement VM was started")
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if err := b.Delete(ctx, vm2.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := exec.Command("docker", "ps", "-aq", "--filter", "label=fleetci.group="+group).Output()
+	if n := len(strings.Fields(string(out))); n != 0 {
+		t.Errorf("%d VMs left after shutdown", n)
+	}
 }
