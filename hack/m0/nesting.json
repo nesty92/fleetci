@@ -1,0 +1,9 @@
+{
+  "image": "fleetci-m0-vm",
+  "network": "fleetci-m0",
+  "default_class": "small",
+  "classes": {
+    "small": { "cpus": "1", "memory": "2g" },
+    "large": { "cpus": "4", "memory": "6g" }
+  }
+}

@@ -1,0 +1,9 @@
+Port 22
+PermitRootLogin no
+AllowUsers fleetci
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+AllowTcpForwarding yes
+AllowStreamLocalForwarding yes
+X11Forwarding no
+PermitTunnel no
