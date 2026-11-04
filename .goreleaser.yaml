@@ -1,0 +1,40 @@
+# Release binaries for fleetci. release-please creates the tag and the
+# GitHub release; this adds the binaries and checksums to it.
+version: 2
+project_name: fleetci
+
+builds:
+  - id: fleetci
+    main: ./cmd/fleetci
+    binary: fleetci
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X main.version={{ .Version }} -X main.revision={{ .ShortCommit }}
+  - id: plugin
+    main: ./cmd/fleeting-plugin-fleetci
+    binary: fleeting-plugin-fleetci
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X main.version={{ .Version }} -X main.revision={{ .ShortCommit }} -X main.builtAt={{ .Date }}
+
+# Plain binaries, named like fleeting-plugin-aws's releases, so a setup
+# script downloads one file: fleetci-linux-amd64, fleeting-plugin-fleetci-linux-arm64.
+archives:
+  - formats: [binary]
+    name_template: "{{ .Binary }}-{{ .Os }}-{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+# release-please writes the notes.
+changelog:
+  disable: true
+
+release:
+  mode: keep-existing

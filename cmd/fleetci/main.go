@@ -26,6 +26,12 @@ import (
 
 const defaultConfig = "/etc/fleetci/fleetci.toml"
 
+// Set at release build time.
+var (
+	version  = "dev"
+	revision = ""
+)
+
 func main() {
 	if len(os.Args) < 2 {
 		usage(os.Stderr)
@@ -41,6 +47,9 @@ func main() {
 		if err == nil && !ok {
 			os.Exit(1)
 		}
+	case "version", "--version":
+		fmt.Println("fleetci", version, revision)
+		return
 	case "-h", "--help", "help":
 		usage(os.Stdout)
 		return
@@ -58,6 +67,7 @@ func usage(w io.Writer) {
 	fmt.Fprint(w, `Usage:
   fleetci runner-config [flags]   print gitlab-runner's [[runners]] entry for fleetci.toml
   fleetci check [flags]           check fleetci.toml, every class, GitHub access and config.toml
+  fleetci version
 
 Run "fleetci <command> -h" for its flags. Both read fleetci.toml from -config,
 $FLEETCI_CONFIG or `+defaultConfig+`.

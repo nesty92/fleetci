@@ -52,6 +52,23 @@ A job asking for a class fleetci lacks, or for other labels besides
 carry actions/runner in `~/actions-runner-<version>` (both kits do); otherwise
 it is downloaded for each job.
 
+## Install
+
+Each [release](https://github.com/nesty92/fleetci/releases) has plain binaries
+for Linux and macOS (amd64, arm64) and a `checksums.txt`:
+
+```sh
+v=0.1.0 arch=linux-amd64
+base=https://github.com/nesty92/fleetci/releases/download/v$v
+curl -fsSLO "$base/fleetci-$arch" -fsSLO "$base/fleeting-plugin-fleetci-$arch" -fsSLO "$base/checksums.txt"
+sha256sum --ignore-missing -c checksums.txt
+install -m 755 "fleetci-$arch" /usr/local/bin/fleetci
+install -m 755 "fleeting-plugin-fleetci-$arch" /usr/local/bin/fleeting-plugin-fleetci
+```
+
+Each class's own fleeting plugin (such as `fleeting-plugin-aws`) is installed
+as usual, on the PATH or by path in `fleetci.toml`.
+
 ## Setup
 
 Write `fleetci.toml` (below), then let fleetci write gitlab-runner's side and

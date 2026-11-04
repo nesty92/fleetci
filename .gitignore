@@ -3,3 +3,4 @@ hack/aws/.terraform/
 hack/aws/*.tfstate*
 hack/aws/terraform.tfvars
 hack/aws/tfplan
+dist/

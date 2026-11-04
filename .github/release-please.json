@@ -1,0 +1,12 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "bootstrap-sha": "ab7c53b4029d7c1b424013b5411c3ebbb6d2887f",
+  "packages": {
+    ".": {
+      "release-type": "go",
+      "package-name": "fleetci",
+      "bump-minor-pre-major": true,
+      "changelog-path": "CHANGELOG.md"
+    }
+  }
+}
