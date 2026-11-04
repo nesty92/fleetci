@@ -17,61 +17,61 @@ import (
 type Class struct {
 	// Plugin is the fleeting plugin's path or name, as in the runner's
 	// [runners.autoscaler] plugin.
-	Plugin string `json:"plugin"`
-	// PluginConfig is passed to the plugin as it is.
-	PluginConfig json.RawMessage `json:"plugin_config"`
+	Plugin string `json:"plugin" toml:"plugin"`
+	// PluginConfig is passed to the plugin as it is, as JSON.
+	PluginConfig RawConfig `json:"plugin_config" toml:"plugin_config"`
 	// Connector is how to log in to this class's VMs.
-	Connector Connector `json:"connector_config"`
+	Connector Connector `json:"connector_config" toml:"connector_config"`
 
 	// MaxInstances caps the VMs of this class, running jobs and idle.
-	MaxInstances int `json:"max_instances"`
+	MaxInstances int `json:"max_instances" toml:"max_instances"`
 	// IdleCount is how many VMs to keep booted and waiting for a job. It
 	// is shorthand for one policy that applies at all times.
-	IdleCount int `json:"idle_count"`
+	IdleCount int `json:"idle_count" toml:"idle_count"`
 	// IdleTime is how long an unused idle VM is kept. Default 10m.
-	IdleTime Duration `json:"idle_time"`
+	IdleTime Duration `json:"idle_time" toml:"idle_time"`
 	// Policy sets warm VMs by time of day, as gitlab-runner's
 	// [[runners.autoscaler.policy]] does. Of the policies whose periods
 	// match, the last one applies; when none matches, no VMs are kept warm.
-	Policy []Policy `json:"policy"`
+	Policy []Policy `json:"policy" toml:"policy"`
 	// AcquireTimeout is how long a job waits for a VM. Default 10m.
-	AcquireTimeout Duration `json:"acquire_timeout"`
+	AcquireTimeout Duration `json:"acquire_timeout" toml:"acquire_timeout"`
 }
 
 // Connector mirrors the runner's connector_config.
 type Connector struct {
-	OS                   string   `json:"os"`
-	Arch                 string   `json:"arch"`
-	ProtocolPort         int      `json:"protocol_port"`
-	Username             string   `json:"username"`
-	KeyPath              string   `json:"key_path"`
-	UseStaticCredentials bool     `json:"use_static_credentials"`
-	Keepalive            Duration `json:"keepalive"`
-	Timeout              Duration `json:"timeout"`
+	OS                   string   `json:"os" toml:"os"`
+	Arch                 string   `json:"arch" toml:"arch"`
+	ProtocolPort         int      `json:"protocol_port" toml:"protocol_port"`
+	Username             string   `json:"username" toml:"username"`
+	KeyPath              string   `json:"key_path" toml:"key_path"`
+	UseStaticCredentials bool     `json:"use_static_credentials" toml:"use_static_credentials"`
+	Keepalive            Duration `json:"keepalive" toml:"keepalive"`
+	Timeout              Duration `json:"timeout" toml:"timeout"`
 	// UseExternalAddr connects to the VM's public address, for a manager
 	// outside the VMs' network.
-	UseExternalAddr bool `json:"use_external_addr"`
+	UseExternalAddr bool `json:"use_external_addr" toml:"use_external_addr"`
 }
 
 // Policy is one entry of a class's policy list.
 type Policy struct {
 	// Periods are cron expressions ("* 8-18 * * mon-fri"); none means
 	// always.
-	Periods []string `json:"periods"`
+	Periods []string `json:"periods" toml:"periods"`
 	// Timezone for Periods, such as "Europe/Warsaw". Default local time.
-	Timezone string `json:"timezone"`
+	Timezone string `json:"timezone" toml:"timezone"`
 	// IdleCount is how many VMs to keep booted and waiting.
-	IdleCount int `json:"idle_count"`
+	IdleCount int `json:"idle_count" toml:"idle_count"`
 	// IdleTime is how long an unused idle VM is kept. Default 10m.
-	IdleTime Duration `json:"idle_time"`
+	IdleTime Duration `json:"idle_time" toml:"idle_time"`
 	// ScaleFactor keeps running jobs × ScaleFactor VMs warm when that is
 	// more than IdleCount.
-	ScaleFactor float64 `json:"scale_factor"`
+	ScaleFactor float64 `json:"scale_factor" toml:"scale_factor"`
 	// ScaleFactorLimit caps running jobs × ScaleFactor.
-	ScaleFactorLimit int `json:"scale_factor_limit"`
+	ScaleFactorLimit int `json:"scale_factor_limit" toml:"scale_factor_limit"`
 	// PreemptiveMode is read only to reject it: it governs gitlab-runner's
 	// job reservations, which fleetci's classes don't make.
-	PreemptiveMode *bool `json:"preemptive_mode"`
+	PreemptiveMode *bool `json:"preemptive_mode" toml:"preemptive_mode"`
 }
 
 const defaultIdleTime = 10 * time.Minute
@@ -155,6 +155,44 @@ func (c Connector) settings() (provider.Settings, error) {
 		cc.Key = key
 	}
 	return provider.Settings{ConnectorConfig: cc}, nil
+}
+
+// RawConfig is a fleeting plugin's config, kept as JSON for the plugin. From
+// TOML it is any table, converted to JSON.
+type RawConfig json.RawMessage
+
+func (r RawConfig) MarshalJSON() ([]byte, error) {
+	if len(r) == 0 {
+		return []byte("null"), nil
+	}
+	return r, nil
+}
+
+func (r *RawConfig) UnmarshalJSON(b []byte) error {
+	*r = append((*r)[:0], b...)
+	return nil
+}
+
+func (r *RawConfig) UnmarshalTOML(v any) error {
+	if _, ok := v.(map[string]any); !ok {
+		return fmt.Errorf("plugin_config must be a table, not %T", v)
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	*r = b
+	return nil
+}
+
+// UnmarshalText reads "90s" or "10m" from TOML.
+func (d *Duration) UnmarshalText(b []byte) error {
+	v, err := time.ParseDuration(string(b))
+	if err != nil {
+		return err
+	}
+	*d = Duration(v)
+	return nil
 }
 
 // Duration reads "90s" or "10m" from config. The runner hands

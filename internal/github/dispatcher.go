@@ -29,27 +29,27 @@ import (
 // Config is plugin_config's [github] table.
 type Config struct {
 	// Repos are the repositories to serve, as "owner/name".
-	Repos []string `json:"repos"`
+	Repos []string `json:"repos" toml:"repos"`
 	// TokenFile holds a token that may register runners on Repos: a
 	// fine-grained token with "Administration: write", or a classic one
 	// with "repo".
-	TokenFile string `json:"token_file"`
+	TokenFile string `json:"token_file" toml:"token_file"`
 	// LabelPrefix starts the runs-on labels fleetci serves. Default
 	// "fleetci".
-	LabelPrefix string `json:"label_prefix"`
+	LabelPrefix string `json:"label_prefix" toml:"label_prefix"`
 	// PollInterval is how often queued jobs are listed. Default 10s.
-	PollInterval fleet.Duration `json:"poll_interval"`
+	PollInterval fleet.Duration `json:"poll_interval" toml:"poll_interval"`
 	// IdleTimeout removes a runner that has not started a job by then, such
 	// as one whose job was cancelled while its VM booted. Default 10m.
-	IdleTimeout fleet.Duration `json:"idle_timeout"`
+	IdleTimeout fleet.Duration `json:"idle_timeout" toml:"idle_timeout"`
 	// RunnerVersion is the actions/runner release to run. Default
 	// DefaultRunnerVersion.
-	RunnerVersion string `json:"runner_version"`
+	RunnerVersion string `json:"runner_version" toml:"runner_version"`
 	// RunnerGroupID is the runner group to register in. Default 1, the
 	// default group.
-	RunnerGroupID int64 `json:"runner_group_id"`
+	RunnerGroupID int64 `json:"runner_group_id" toml:"runner_group_id"`
 	// APIURL is GitHub's REST API. Default https://api.github.com.
-	APIURL string `json:"api_url"`
+	APIURL string `json:"api_url" toml:"api_url"`
 }
 
 // DefaultRunnerVersion is the actions/runner release used when the config

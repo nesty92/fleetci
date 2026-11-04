@@ -32,7 +32,7 @@ func TestClassFromRunnerJSON(t *testing.T) {
 		t.Errorf("connector: %+v", c.Connector)
 	}
 	var pc map[string]string
-	if err := json.Unmarshal(c.PluginConfig, &pc); err != nil || pc["name"] != "fleetci-test-2vcpu-1gb" {
+	if err := json.Unmarshal([]byte(c.PluginConfig), &pc); err != nil || pc["name"] != "fleetci-test-2vcpu-1gb" {
 		t.Errorf("plugin_config passed on as %s", c.PluginConfig)
 	}
 

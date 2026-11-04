@@ -36,16 +36,16 @@ type Config struct {
 	// ConfigFile is a TOML file holding the settings below, with short
 	// table names. When set, plugin_config holds nothing else (but listen
 	// and nesting_path).
-	ConfigFile string `json:"config_file"`
+	ConfigFile string `json:"config_file" toml:"config_file"`
 	// Listen is the gateway's loopback address. Default 127.0.0.1:0.
-	Listen string `json:"listen"`
+	Listen string `json:"listen" toml:"listen"`
 	// NestingPath must match vm_isolation.nesting_host. Default
 	// /fleetci/nesting.sock.
-	NestingPath  string                 `json:"nesting_path"`
-	DefaultClass string                 `json:"default_class"`
-	Classes      map[string]fleet.Class `json:"classes"`
+	NestingPath  string                 `json:"nesting_path" toml:"nesting_path"`
+	DefaultClass string                 `json:"default_class" toml:"default_class"`
+	Classes      map[string]fleet.Class `json:"classes" toml:"classes"`
 	// GitHub, when set, also runs GitHub Actions jobs on the classes.
-	GitHub *github.Config `json:"github"`
+	GitHub *github.Config `json:"github" toml:"github"`
 }
 
 type InstanceGroup struct {

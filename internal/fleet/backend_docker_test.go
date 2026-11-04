@@ -41,7 +41,7 @@ func TestClassWithDockerPlugin(t *testing.T) {
 	b, err := New(ctx, map[string]Class{
 		"1vcpu-2gb": {
 			Plugin:       bin,
-			PluginConfig: pluginCfg,
+			PluginConfig: RawConfig(pluginCfg),
 			Connector:    Connector{Username: "fleetci", Timeout: Duration(time.Minute)},
 			MaxInstances: 2,
 			IdleCount:    1,

@@ -67,7 +67,7 @@ func TestConfigFile(t *testing.T) {
 		t.Errorf("2vcpu-4gb: %+v", small)
 	}
 	var pc map[string]string
-	if err := json.Unmarshal(small.PluginConfig, &pc); err != nil || pc["region"] != "eu-north-1" {
+	if err := json.Unmarshal([]byte(small.PluginConfig), &pc); err != nil || pc["region"] != "eu-north-1" {
 		t.Errorf("plugin_config %s", small.PluginConfig)
 	}
 
@@ -92,9 +92,11 @@ func TestConfigFileErrors(t *testing.T) {
 	}{
 		"misspelled key": {
 			file: "default_class = \"a\"\n[classes.a]\nplugin = \"p\"\nmax_instances = 1\nidle_cont = 1\n",
-			want: `unknown field "idle_cont"`,
+			want: "unknown keys: classes.a.idle_cont",
 		},
-		"bad toml": {file: "classes = [", want: "config_file"},
+		"bad toml":                  {file: "default_class = \"a\"\nclasses = [", want: "line 2"},
+		"bad duration":              {file: "[classes.a]\nplugin = \"p\"\nmax_instances = 1\nidle_time = \"ten minutes\"\n", want: "idle_time"},
+		"plugin_config not a table": {file: "[classes.a]\nplugin = \"p\"\nmax_instances = 1\nplugin_config = \"x\"\n", want: "must be a table"},
 		"classes in both places": {
 			file: "default_class = \"a\"\n",
 			cfg:  func(p string) Config { return Config{ConfigFile: p, DefaultClass: "a"} },

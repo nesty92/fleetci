@@ -1,11 +1,10 @@
 package fleetci
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -29,20 +28,25 @@ func (c *Config) loadFile() error {
 		return errors.New("with config_file, put default_class, classes and github in that file, not in plugin_config")
 	}
 
-	var raw map[string]any
-	if _, err := toml.DecodeFile(c.ConfigFile, &raw); err != nil {
-		return fmt.Errorf("config_file: %w", err)
-	}
-	b, err := json.Marshal(raw)
-	if err != nil {
-		return fmt.Errorf("config_file: %w", err)
-	}
-
 	var f Config
-	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&f); err != nil {
+	md, err := toml.DecodeFile(c.ConfigFile, &f)
+	if err != nil {
+		var perr toml.ParseError
+		if errors.As(err, &perr) {
+			return fmt.Errorf("config_file %s:\n%s", c.ConfigFile, perr.ErrorWithPosition())
+		}
 		return fmt.Errorf("config_file %s: %w", c.ConfigFile, err)
+	}
+	// A plugin_config table is the plugin's to check; anything else unknown
+	// is a misspelling.
+	var unknown []string
+	for _, key := range md.Undecoded() {
+		if !slices.Contains(key, "plugin_config") {
+			unknown = append(unknown, key.String())
+		}
+	}
+	if len(unknown) > 0 {
+		return fmt.Errorf("config_file %s: unknown keys: %s", c.ConfigFile, strings.Join(unknown, ", "))
 	}
 	if f.ConfigFile != "" {
 		return errors.New("config_file can't point at another config_file")
