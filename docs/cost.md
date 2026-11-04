@@ -162,6 +162,31 @@ wait is not. Even a 20–40 s boot is long for a 10 s check. A warm VM
 per job on a shared VM, as `ubuntu-slim` does, would remove it without paying
 for idle time, but gives up a VM per job.
 
+## Spot across clouds
+
+The same Linux 2-core job (5.39 VM minutes with a 30 s boot, disk included)
+on 2-vCPU spot VMs near Stockholm, 2026-11-04. Each cloud has an official
+fleeting plugin (AWS, Azure, Google Cloud), so each can back a fleetci class.
+
+| Cloud, region | Type | vCPU / GB | Per hour | Per job | Against GitHub |
+|---|---|---|---|---|---|
+| Azure, Sweden Central | D2pls_v5 spot (Arm) | 2 / 4 | $0.0135 | $0.0015 | 21× cheaper |
+| Azure, Sweden Central | D2als_v6 spot | 2 / 4 | $0.0159 | $0.0017 | 19× cheaper |
+| Azure, Sweden Central | D2as_v5 spot | 2 / 8 | $0.0170 | $0.0018 | 18× cheaper |
+| GCP, europe-north1 | e2-highcpu-2 spot | 2 / 2 | $0.0157 | $0.0017 | 19× cheaper |
+| GCP, europe-north1 | e2-standard-2 spot | 2 / 8 | $0.0213 | $0.0022 | 15× cheaper |
+| AWS, eu-north-1 | m7g.large spot (Arm) | 2 / 8 | $0.0182 | $0.0019 | 17× cheaper |
+| AWS, eu-north-1 | c7a.large spot | 2 / 4 | $0.0234 | $0.0024 | 13× cheaper |
+| AWS, eu-north-1 | m7i.large spot | 2 / 8 | $0.0342 | $0.0034 | 10× cheaper |
+| OVH | d2-4, shared vCPU, on-demand | 2 / 4 | €0.0198 | $0.0020 | 16× cheaper |
+
+Compute is cheapest on Azure spot today, with GCP close behind, and AWS's
+Intel type is the dearest of the three. The differences are a tenth of a cent
+per job; network decides more. AWS, Azure and GCP all charge for NAT and
+egress, while OVH includes traffic. Spot prices change daily and differ
+between regions and zones: GCP's n4-standard-2 is $0.0436/h in Finland and
+$0.0137/h in Belgium.
+
 ## Against other CI services and OVHcloud
 
 The same workload, one Linux 2-core job (5.37 billed minutes where a service
@@ -277,4 +302,6 @@ bills whether or not jobs run, so warm hours count.
 - [GitLab compute minutes](https://about.gitlab.com/pricing/faq-compute-minutes/) and [hosted runners on Linux](https://docs.gitlab.com/ci/runners/hosted_runners/linux/)
 - CI service rates: [cicdpipelinecost.com platform comparison](https://cicdpipelinecost.com/platform-comparison), [craci.com runner comparison](https://craci.com/compare/github-actions-runner-providers)
 - OVHcloud: [Public Cloud prices](https://www.ovhcloud.com/en-ie/public-cloud/prices/), [price changes](https://blog.ovhcloud.com/en/posts/pricing-evolution-of-public-cloud-bare-metal-and-vps-at-ovhcloud/) and [the October 2026 update](https://blog.ovhcloud.com/en/posts/public-cloud-pricing-update-october-2026/), [billing per second](https://help.ovhcloud.com/csm/en-public-cloud-compute-billing-options?id=kb_article_view&sysparm_article=KB0050466), [nested virtualization](https://support.us.ovhcloud.com/hc/en-us/articles/22118850832787-Public-Cloud-FAQ), [dedicated servers H2 2026 prices](https://blog.ovhcloud.com/en/posts/dedicated-servers-pricing-update-h2-2026/)
+- Azure: the [Retail Prices API](https://prices.azure.com/api/retail/prices), queried 2026-11-04
+- GCP spot: [gcloud-compute.com](https://gcloud-compute.com/e2-standard-2.html), a third-party table built from Google's SKUs; Google's own [Spot VM pricing](https://cloud.google.com/spot-vms/pricing)
 - [EC2 Mac instances](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-mac-instances.html) and [dedicated host pricing](https://aws.amazon.com/ec2/dedicated-hosts/pricing)
