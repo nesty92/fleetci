@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"slices"
 	"strconv"
@@ -52,6 +53,12 @@ type Config struct {
 	RunnerGroupID int64 `json:"runner_group_id" toml:"runner_group_id"`
 	// APIURL is GitHub's REST API. Default https://api.github.com.
 	APIURL string `json:"api_url" toml:"api_url"`
+	// CacheURL sends actions/cache, the setup-* caches and buildx's
+	// type=gha to a github-actions-cache-server (falcondev-oss) at this
+	// URL instead of GitHub, for example one backed by S3 in the VMs'
+	// region. The runner is patched on the VM to accept it; other
+	// requests (artifacts) the server passes on to GitHub.
+	CacheURL string `json:"cache_url" toml:"cache_url"`
 }
 
 // DefaultRunnerVersion is the actions/runner release used when the config
@@ -112,8 +119,18 @@ func New(cfg Config, defaultClass string, backend Backend, start StartFunc, log 
 	if cfg.APIURL == "" {
 		cfg.APIURL = "https://api.github.com"
 	}
+	if cfg.CacheURL != "" {
+		u, err := url.Parse(cfg.CacheURL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || strings.ContainsAny(cfg.CacheURL, "'\"\\ $`") {
+			return nil, fmt.Errorf("github cache_url %q: want an http(s) URL", cfg.CacheURL)
+		}
+		// The cache client appends paths to it.
+		if !strings.HasSuffix(cfg.CacheURL, "/") {
+			cfg.CacheURL += "/"
+		}
+	}
 	if start == nil {
-		start = SSHStart(cfg.RunnerVersion, log)
+		start = SSHStart(cfg.RunnerVersion, cfg.CacheURL, log)
 	}
 	return &Dispatcher{
 		cfg:          cfg,

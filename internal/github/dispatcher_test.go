@@ -192,6 +192,9 @@ func TestNewChecksConfig(t *testing.T) {
 		"bad repo":     {Repos: []string{"just-a-name"}, TokenFile: tokenFile},
 		"no token":     {Repos: []string{"o/r"}},
 		"missing file": {Repos: []string{"o/r"}, TokenFile: tokenFile + ".missing"},
+		"cache scheme": {Repos: []string{"o/r"}, TokenFile: tokenFile, CacheURL: "ftp://cache/"},
+		"cache quote":  {Repos: []string{"o/r"}, TokenFile: tokenFile, CacheURL: "http://cache/'$(id)"},
+		"cache host":   {Repos: []string{"o/r"}, TokenFile: tokenFile, CacheURL: "http:///x"},
 	} {
 		if _, err := New(c, "x", &fakeBackend{}, nil, hclog.NewNullLogger()); err == nil {
 			t.Errorf("%s: accepted", name)
@@ -249,5 +252,17 @@ func TestDispatcherRetriesFailedRunner(t *testing.T) {
 	defer backend.mu.Unlock()
 	if len(backend.deleted) != maxTries {
 		t.Errorf("%d vms removed; want %d", len(backend.deleted), maxTries)
+	}
+}
+
+func TestNewCacheURLGetsTrailingSlash(t *testing.T) {
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	_ = os.WriteFile(tokenFile, []byte("x"), 0o600)
+	d, err := New(Config{Repos: []string{"o/r"}, TokenFile: tokenFile, CacheURL: "http://10.0.0.5:3000"}, "x", &fakeBackend{}, nil, hclog.NewNullLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.cfg.CacheURL != "http://10.0.0.5:3000/" {
+		t.Errorf("cache_url %q", d.cfg.CacheURL)
 	}
 }

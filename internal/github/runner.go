@@ -29,6 +29,13 @@ if [ ! -x "$dir/run.sh" ]; then
   curl -fsSL "https://github.com/actions/runner/releases/download/v%[1]s/actions-runner-linux-$arch-%[1]s.tar.gz" | tar -xz -C "$dir"
 fi
 cd "$dir"
+cache='%[2]s'
+if [ -n "$cache" ]; then
+  # The runner sets ACTIONS_RESULTS_URL for each job from GitHub's answer.
+  # Renaming the variable it writes (same length, UTF-16) keeps ours.
+  sed -i 's/A\x00C\x00T\x00I\x00O\x00N\x00S\x00_\x00R\x00E\x00S\x00U\x00L\x00T\x00S\x00_\x00U\x00R\x00L\x00/A\x00C\x00T\x00I\x00O\x00N\x00S\x00_\x00R\x00E\x00S\x00U\x00L\x00T\x00S\x00_\x00O\x00R\x00L\x00/g' bin/Runner.Worker.dll
+  export ACTIONS_RESULTS_URL="$cache"
+fi
 if ! ls /usr/lib*/libicuuc.so.* /usr/lib/*/libicuuc.so.* 2>/dev/null | grep -q .; then
   if command -v dnf >/dev/null 2>&1; then sudo dnf install -y -q libicu >/dev/null
   else sudo ./bin/installdependencies.sh >/dev/null
@@ -38,7 +45,8 @@ exec ./run.sh --jitconfig "$jit"
 `
 
 // SSHStart runs the runner on the VM over SSH and logs its output.
-func SSHStart(version string, log hclog.Logger) StartFunc {
+// With cacheURL set, jobs use that cache server instead of GitHub's.
+func SSHStart(version, cacheURL string, log hclog.Logger) StartFunc {
 	return func(ctx context.Context, vm fleet.VM, jit string) error {
 		target, err := vm.Connect(ctx)
 		if err != nil {
@@ -63,7 +71,7 @@ func SSHStart(version string, log hclog.Logger) StartFunc {
 		s.Stdin = strings.NewReader(jit + "\n")
 		s.Stdout = out
 		s.Stderr = out
-		if err := s.Run(fmt.Sprintf(runScript, version)); err != nil {
+		if err := s.Run(fmt.Sprintf(runScript, version, cacheURL)); err != nil {
 			return fmt.Errorf("runner exited: %w", err)
 		}
 		return nil

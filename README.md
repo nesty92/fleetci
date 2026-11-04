@@ -60,6 +60,22 @@ A job asking for a class fleetci lacks, or for other labels besides
 carry actions/runner in `~/actions-runner-<version>` (both kits do); otherwise
 it is downloaded for each job.
 
+### Cache on your own storage
+
+By default `actions/cache`, the caches built into `setup-node`, `setup-go`
+and the like, and buildx's `type=gha` upload to GitHub, through your NAT, with
+10 GB per repo. With `[github] cache_url` they go to a
+[github-actions-cache-server](https://github.com/falcondev-oss/github-actions-cache-server)
+instead, for example one on S3 in the VMs' region. No workflow changes. On
+each VM fleetci patches the runner so it keeps the `ACTIONS_RESULTS_URL` it is
+given, and points it at the server; the server passes everything that isn't
+cache (artifacts) to GitHub. It speaks the v2 cache protocol, which
+`actions/cache` v4 and later use.
+
+Install `zstd` on every image. The cache key includes the compression,
+so a VM without zstd (gzip) misses what a VM with it saved.
+`hack/cache/up.sh` runs the server on RustFS for the kits.
+
 ## Install
 
 On AWS, [terraform-aws-gitlab-runner-autoscaler](https://github.com/nesty92/terraform-aws-gitlab-runner-autoscaler)
@@ -214,6 +230,7 @@ idle_time = "20m"
 [github]
 repos = ["owner/name"]
 token_file = "github.token"          # fine-grained, Administration: write
+cache_url = "http://10.0.1.5:3000/"  # optional: Actions cache server, see above
 ```
 
 Each class needs an instance group of its own (an Auto Scaling group, say):
