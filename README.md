@@ -25,8 +25,8 @@ Name classes after what they give, such as `2vcpu-4gb` or `8vcpu-32gb-arm`,
 so a job's class says what it gets without opening the runner's config.
 
 Each `.fleetci-<class>` sets the runner tag and `FLEETCI_CLASS` together;
-`.fleetci` alone gets the default class. Both kits write the include to
-`fleetci.yml` next to the runner config ([hack/ci-template.sh](hack/ci-template.sh)).
+`.fleetci` alone gets the default class. `fleetci ci-include` writes the
+include from `fleetci.toml`.
 A misspelled class fails when the pipeline is created
 (`unknown keys in extends`), before any VM boots. GitLab does not pass a job's
 tags to the runner, so the class can't be a tag alone.
@@ -54,8 +54,12 @@ it is downloaded for each job.
 
 ## Install
 
-Each [release](https://github.com/nesty92/fleetci/releases) has plain binaries
-for Linux and macOS (amd64, arm64) and a `checksums.txt`:
+On AWS, [terraform-aws-gitlab-runner-autoscaler](https://github.com/nesty92/terraform-aws-gitlab-runner-autoscaler)
+does all of this when given a `fleetci` input. By hand, from nothing to a
+first job:
+
+**1. Binaries.** Each [release](https://github.com/nesty92/fleetci/releases)
+has plain binaries for Linux and macOS (amd64, arm64) and a `checksums.txt`:
 
 ```sh
 v=0.1.0 arch=linux-amd64
@@ -66,26 +70,74 @@ install -m 755 "fleetci-$arch" /usr/local/bin/fleetci
 install -m 755 "fleeting-plugin-fleetci-$arch" /usr/local/bin/fleeting-plugin-fleetci
 ```
 
-Each class's own fleeting plugin (such as `fleeting-plugin-aws`) is installed
-as usual, on the PATH or by path in `fleetci.toml`.
-
-## Setup
-
-Write `fleetci.toml` (below), then let fleetci write gitlab-runner's side and
-check the whole install:
+Each class also needs its own fleeting plugin, on the PATH or by path in
+`fleetci.toml`. `gitlab-runner fleeting install` only sees the plugins named
+in `config.toml`, not fleetci's classes, so download it from its release,
+such as [fleeting-plugin-aws](https://gitlab.com/gitlab-org/fleeting/plugins/aws/-/releases):
 
 ```sh
-fleetci runner-config -config /etc/fleetci/fleetci.toml -token-file runner.token \
-  >> /etc/gitlab-runner/config.toml
-fleetci check -config /etc/fleetci/fleetci.toml
+curl -fsSL -o /usr/local/bin/fleeting-plugin-aws \
+  https://gitlab.com/gitlab-org/fleeting/plugins/aws/-/releases/v1.3.1/downloads/fleeting-plugin-aws-linux-amd64
+chmod +x /usr/local/bin/fleeting-plugin-aws
 ```
 
-`runner-config` prints the `[[runners]]` entry: every value in it follows from
-`fleetci.toml`, so regenerate it rather than edit it. `check` changes nothing;
-it reports, one line each:
+**2. One instance group per class**, such as an Auto Scaling group set up as
+its fleeting plugin asks (for AWS: min and desired 0, scale-in protection,
+`AZRebalance` suspended). Nothing else may scale it. Its VM image needs:
+
+- Docker, and an SSH user in the `docker` group (the class's
+  `connector_config.username`);
+- for GitHub Actions jobs, libicu and ideally actions/runner unpacked in
+  `~/actions-runner-<version>`.
+
+fleetci waits for cloud-init to finish and for Docker to answer before it
+hands a VM to a job. [hack/aws](hack/aws) has a working launch template and
+boot script.
+
+**3. A GitLab runner** registered with the tag `fleetci` and "Run untagged
+jobs" off (project or group → Settings → CI/CD → Runners → New runner). Keep
+its token in a file, such as `/etc/fleetci/runner.token`.
+
+**4. `fleetci.toml`**, one class per group; see [Configuration](#configuration).
+
+**5. gitlab-runner's side**, written by fleetci:
+
+```sh
+# a new config.toml, holding only this runner:
+fleetci runner-config -global -token-file /etc/fleetci/runner.token > /etc/gitlab-runner/config.toml
+# or beside other runners (then raise concurrent by the classes' max_instances):
+fleetci runner-config -token-file /etc/fleetci/runner.token >> /etc/gitlab-runner/config.toml
+```
+
+**6. GitHub Actions (optional):** a fine-grained token for the repos, with
+*Actions: Read* and *Administration: Read and write*, in a file named by
+`[github] token_file`.
+
+**7. Check everything**, then start gitlab-runner:
+
+```sh
+fleetci check     # every class, GitHub access and config.toml; changes nothing
+gitlab-runner run # or: systemctl restart gitlab-runner
+```
+
+**8. In each GitLab project**, commit the include and pick classes with
+`extends:`:
+
+```sh
+fleetci ci-include > .gitlab/fleetci.yml
+```
+
+All three commands read `/etc/fleetci/fleetci.toml` unless given `-config`
+or `$FLEETCI_CONFIG`.
+
+### What `fleetci check` checks
+
+It changes nothing, so it is safe while fleetci runs, and reports one line
+each:
 
 - `fleetci.toml` loads and is valid;
-- each class's plugin starts, its credentials work and its group exists;
+- each class's plugin starts, its credentials work and its group exists, and
+  no two classes share a group;
 - the GitHub token can list each repo's jobs and runners;
 - `config.toml` has fleetci's entry, naming each missing or wrong setting
   with the line to write.
@@ -156,5 +208,6 @@ waits for a VM, default 10m). Unknown keys are errors; relative paths are
 relative to the file. Each class's `plugin_config` goes to its fleeting plugin
 as it is.
 
-Status: proof of concept, running locally. See [hack/m0](hack/m0/README.md)
-to try it on one machine.
+Status: early. [hack/m0](hack/m0/README.md) runs everything on one machine
+with containers as VMs; [hack/aws](hack/aws/README.md) on two Auto Scaling
+groups.

@@ -62,8 +62,7 @@ TOML
 "$DATA/bin/fleetci" runner-config -global -config "$DATA/fleetci.toml" \
   -name fleetci-aws -token-file "$TOKEN_FILE" -plugin "$DATA/bin/fleeting-plugin-fleetci" > "$DATA/config.toml"
 chmod 600 "$DATA/config.toml" "$DATA/fleetci.toml"
-# shellcheck disable=SC2046 # class names have no spaces
-"$REPO/hack/ci-template.sh" fleetci "$default" $(printf '%s' "$out" | jq -r '.groups.value | keys[]') > "$DATA/fleetci.yml"
+"$DATA/bin/fleetci" ci-include -config "$DATA/fleetci.toml" > "$DATA/fleetci.yml"
 chmod 644 "$DATA/fleetci.yml"
 
 "$DATA/bin/fleetci" check -config "$DATA/fleetci.toml" -runner-config "$DATA/config.toml" ||

@@ -8,6 +8,7 @@ require (
 	gitlab.com/gitlab-org/fleeting/fleeting v0.0.0-20261102084746-4085ca1ae366
 	gitlab.com/gitlab-org/fleeting/nesting v0.5.0
 	gitlab.com/gitlab-org/fleeting/taskscaler v0.0.0-20261103060922-6d4e8d9a9815
+	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/crypto v0.57.0
 )
 

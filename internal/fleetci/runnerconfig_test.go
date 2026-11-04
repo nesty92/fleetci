@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/BurntSushi/toml"
+	"go.yaml.in/yaml/v3"
 )
 
 func loadSample(t *testing.T) Config {
@@ -87,5 +88,23 @@ func TestCheckRunnerConfigFindings(t *testing.T) {
 
 	if _, err := c.CheckRunnerConfig(writeFile(t, "concurrent = 1\n")); err == nil || !strings.Contains(err.Error(), "no [[runners]] entry") {
 		t.Errorf("config without fleetci's entry: %v", err)
+	}
+}
+
+func TestCIInclude(t *testing.T) {
+	c := loadSample(t)
+	out := c.CIInclude("fleetci")
+	var parsed map[string]map[string]any
+	if err := yaml.Unmarshal([]byte(out), &parsed); err != nil {
+		t.Fatalf("not YAML: %v\n%s", err, out)
+	}
+	if tags := parsed[".fleetci"]["tags"].([]any); len(tags) != 1 || tags[0] != "fleetci" {
+		t.Errorf(".fleetci tags %v", tags)
+	}
+	for _, class := range []string{"2vcpu-4gb", "8vcpu-16gb"} {
+		job := parsed[".fleetci-"+class]
+		if job["extends"] != ".fleetci" || job["variables"].(map[string]any)["FLEETCI_CLASS"] != class {
+			t.Errorf(".fleetci-%s: %v", class, job)
+		}
 	}
 }

@@ -41,6 +41,8 @@ func main() {
 	switch os.Args[1] {
 	case "runner-config":
 		err = runnerConfig(os.Args[2:], os.Stdout)
+	case "ci-include":
+		err = ciInclude(os.Args[2:], os.Stdout)
 	case "check":
 		var ok bool
 		ok, err = check(os.Args[2:], os.Stdout)
@@ -67,6 +69,7 @@ func usage(w io.Writer) {
 	fmt.Fprint(w, `Usage:
   fleetci runner-config [flags]   print gitlab-runner's [[runners]] entry for fleetci.toml
   fleetci check [flags]           check fleetci.toml, every class, GitHub access and config.toml
+  fleetci ci-include [flags]      print a GitLab CI include with one hidden job per class
   fleetci version
 
 Run "fleetci <command> -h" for its flags. Both read fleetci.toml from -config,
@@ -114,6 +117,22 @@ func runnerConfig(args []string, out io.Writer) error {
 		return err
 	}
 	_, err = io.WriteString(out, s)
+	return err
+}
+
+func ciInclude(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("ci-include", flag.ExitOnError)
+	path := configFlag(fs)
+	tag := fs.String("tag", "fleetci", "the tag fleetci's runner is registered with")
+	_ = fs.Parse(args)
+	c, err := fleetci.Load(*path)
+	if err != nil {
+		return err
+	}
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	_, err = io.WriteString(out, c.CIInclude(*tag))
 	return err
 }
 
