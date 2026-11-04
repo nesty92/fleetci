@@ -128,3 +128,35 @@ func TestClassWithDockerPlugin(t *testing.T) {
 		t.Errorf("%d VMs left after shutdown", n)
 	}
 }
+
+// Two classes on one group would each remove the other's VMs, so the second
+// is refused before its taskscaler starts.
+func TestClassesNeedTheirOwnGroup(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	bin := filepath.Join(t.TempDir(), "fleeting-plugin-dockervm")
+	if out, err := exec.Command("go", "build", "-o", bin, "../../cmd/fleeting-plugin-dockervm").CombinedOutput(); err != nil {
+		t.Fatalf("building plugin: %v\n%s", err, out)
+	}
+	cfg := func(group string) RawConfig {
+		b, _ := json.Marshal(map[string]string{"name": group, "image": "fleetci-m0-vm", "network": "bridge", "cpus": "1", "memory": "1g"})
+		return b
+	}
+	class := func(group string) Class {
+		return Class{Plugin: bin, PluginConfig: cfg(group), Connector: Connector{Username: "fleetci"}, MaxInstances: 1}
+	}
+	group := "test-" + randomHex(3)
+	log := hclog.NewNullLogger()
+
+	_, err := New(ctx, map[string]Class{"a": class(group), "b": class(group)}, log)
+	if err == nil || !strings.Contains(err.Error(), `as class "a" does`) {
+		t.Fatalf("shared group accepted: %v", err)
+	}
+
+	b, err := New(ctx, map[string]Class{"a": class(group), "b": class(group + "-b")}, log)
+	if err != nil {
+		t.Fatalf("separate groups refused: %v", err)
+	}
+	_ = b.Shutdown(ctx)
+}

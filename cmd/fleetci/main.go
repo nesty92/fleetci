@@ -131,6 +131,8 @@ func check(args []string, out io.Writer) (bool, error) {
 	log := hclog.New(&hclog.LoggerOptions{Level: hclog.Error, Output: os.Stderr})
 	names := slices.Sorted(maps.Keys(c.Classes))
 	results := make([]func(), len(names))
+	groupOf := make(map[string]string, len(names))
+	var mu sync.Mutex
 	var wg sync.WaitGroup
 	for i, name := range names {
 		wg.Add(1)
@@ -144,12 +146,27 @@ func check(args []string, out io.Writer) (bool, error) {
 				results[i] = func() { r.fail(label, err) }
 				return
 			}
+			mu.Lock()
+			groupOf[name] = res.Group
+			mu.Unlock()
 			results[i] = func() { r.pass(label, describe(c.Classes[name].Plugin, res)) }
 		}()
 	}
 	wg.Wait()
 	for _, show := range results {
 		show()
+	}
+	// Two classes on one group would each remove the other's VMs.
+	byGroup := map[string][]string{}
+	for _, name := range names {
+		if g := groupOf[name]; g != "" {
+			byGroup[g] = append(byGroup[g], name)
+		}
+	}
+	for _, g := range slices.Sorted(maps.Keys(byGroup)) {
+		if classes := byGroup[g]; len(classes) > 1 {
+			r.fail("group "+g, fmt.Errorf("shared by classes %s; each class needs a group of its own", strings.Join(classes, ", ")))
+		}
 	}
 
 	if c.GitHub != nil {

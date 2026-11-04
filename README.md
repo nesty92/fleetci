@@ -127,6 +127,12 @@ repos = ["owner/name"]
 token_file = "github.token"          # fine-grained, Administration: write
 ```
 
+Each class needs an instance group of its own (an Auto Scaling group, say):
+each class's scaler removes VMs in its group that it didn't start, so two
+classes sharing one would remove each other's. fleetci refuses to start, and
+`fleetci check` fails, when two classes name the same group. Nothing else
+should scale those groups either, such as another runner.
+
 A class without `policy` can set `idle_count` and `idle_time` directly, for
 one policy at all times. Every class takes `acquire_timeout` (how long a job
 waits for a VM, default 10m). Unknown keys are errors; relative paths are

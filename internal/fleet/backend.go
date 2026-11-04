@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -52,12 +53,14 @@ type Backend struct {
 // New starts every class's plugin and taskscaler.
 func New(ctx context.Context, classes map[string]Class, log hclog.Logger) (*Backend, error) {
 	b := &Backend{log: log, pools: map[string]*pool{}, vms: map[string]*pool{}}
-	for name, c := range classes {
+	groups := map[string]string{} // group id → class
+	for _, name := range slices.Sorted(maps.Keys(classes)) {
+		c := classes[name]
 		if err := c.validate(name); err != nil {
 			_ = b.Shutdown(ctx)
 			return nil, err
 		}
-		p, err := startPool(ctx, name, c, log.Named("class."+name))
+		p, err := startPool(ctx, name, c, groups, log.Named("class."+name))
 		if err != nil {
 			_ = b.Shutdown(ctx)
 			return nil, fmt.Errorf("class %q: %w", name, err)
@@ -67,7 +70,11 @@ func New(ctx context.Context, classes map[string]Class, log hclog.Logger) (*Back
 	return b, nil
 }
 
-func startPool(ctx context.Context, name string, c Class, log hclog.Logger) (*pool, error) {
+// startPool starts the class's plugin and then its taskscaler. The plugin is
+// initialised first, so a class whose group another class already uses is
+// refused before a second taskscaler can see the group: each would remove
+// the other's VMs as unknown.
+func startPool(ctx context.Context, name string, c Class, groups map[string]string, log hclog.Logger) (*pool, error) {
 	settings, err := c.Connector.settings()
 	if err != nil {
 		return nil, err
@@ -82,7 +89,18 @@ func startPool(ctx context.Context, name string, c Class, log hclog.Logger) (*po
 		return nil, fmt.Errorf("starting plugin %s: %w", c.Plugin, err)
 	}
 
-	ts, err := taskscaler.New(ctx, runner.InstanceGroup(),
+	info, err := runner.InstanceGroup().Init(ctx, log.Named("plugin"), settings)
+	if err != nil {
+		runner.Kill()
+		return nil, fmt.Errorf("initialising plugin %s: %w", c.Plugin, err)
+	}
+	if other, ok := groups[info.ID]; ok {
+		runner.Kill()
+		return nil, fmt.Errorf("uses group %s, as class %q does; each class needs a group of its own", info.ID, other)
+	}
+	groups[info.ID] = name
+
+	ts, err := taskscaler.New(ctx, initialised{runner.InstanceGroup(), info},
 		taskscaler.WithLogger(log.Named("taskscaler")),
 		taskscaler.WithInstanceGroupSettings(settings),
 		taskscaler.WithCapacityPerInstance(1),
@@ -106,8 +124,19 @@ func startPool(ctx context.Context, name string, c Class, log hclog.Logger) (*po
 	if timeout == 0 {
 		timeout = 10 * time.Minute
 	}
-	log.Info("class ready", "plugin", c.Plugin, "max_instances", c.MaxInstances, "policies", len(c.schedules()))
+	log.Info("class ready", "group", info.ID, "plugin", c.Plugin, "max_instances", c.MaxInstances, "policies", len(c.schedules()))
 	return &pool{name: name, class: c, runner: runner, ts: ts, timeout: timeout}, nil
+}
+
+// initialised is an instance group whose Init already ran; taskscaler's own
+// call gets that result instead of initialising the plugin twice.
+type initialised struct {
+	provider.InstanceGroup
+	info provider.ProviderInfo
+}
+
+func (g initialised) Init(context.Context, hclog.Logger, provider.Settings) (provider.ProviderInfo, error) {
+	return g.info, nil
 }
 
 // Has reports whether a class exists.
