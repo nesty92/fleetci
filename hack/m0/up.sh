@@ -8,6 +8,10 @@ REPO=$(cd "$HERE/../.." && pwd)
 DATA=${FLEETCI_M0_DATA:-$HOME/.local/share/fleetci-m0}
 TOKEN_FILE=${FLEETCI_M0_TOKEN:-$HOME/.config/fleetci/m0-runner.token}
 NET=fleetci-m0
+# GitHub Actions on the same classes: space-separated owner/name repos, and a
+# file holding a token that may register runners on them.
+GITHUB_REPOS=${FLEETCI_GITHUB_REPOS:-}
+GITHUB_TOKEN_FILE=${FLEETCI_GITHUB_TOKEN_FILE:-$HOME/.config/fleetci/github.token}
 
 umask 077
 mkdir -p "$DATA/work" "$DATA/bin"
@@ -21,6 +25,15 @@ docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/
 #
 # The VM password is a placeholder: the runner's VM connection ends inside
 # the plugin, which reaches the VM with that VM's own key.
+github=
+if [ -n "$GITHUB_REPOS" ]; then
+  [ -r "$GITHUB_TOKEN_FILE" ] || { echo "no GitHub token in $GITHUB_TOKEN_FILE" >&2; exit 1; }
+  repos=$(printf '%s\n' $GITHUB_REPOS | jq -R . | jq -sc .)
+  github="      [runners.autoscaler.plugin_config.github]
+        repos = $repos
+        token_file = \"$GITHUB_TOKEN_FILE\""
+fi
+
 cat > "$DATA/config.toml" <<TOML
 concurrent = 4
 check_interval = 3
@@ -68,6 +81,7 @@ log_level = "info"
         [runners.autoscaler.plugin_config.classes.4vcpu-6gb.connector_config]
           username = "fleetci"
           timeout = "2m"
+$github
     [runners.autoscaler.connector_config]
       timeout = "2m"
     [[runners.autoscaler.policy]]

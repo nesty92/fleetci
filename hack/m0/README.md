@@ -24,7 +24,8 @@ Only the last connection crosses the network. Each class is a fleeting
 plugin under its own taskscaler with `capacity_per_instance = 1` and
 `max_use_count = 1`: a VM serves one job and is then removed. Here every
 class uses `fleeting-plugin-dockervm`, whose instances are local
-Docker-in-Docker containers. Like EC2 Instance Connect, it hands out a new
+privileged containers running Ubuntu 24.04 with their own Docker, like
+GitHub's `ubuntu-latest`. Like EC2 Instance Connect, it hands out a new
 key on every `ConnectInfo` that the VM accepts for two minutes
 (`expiry-time` in `authorized_keys`). A cloud class swaps in that cloud's
 fleeting plugin; nothing else changes.
@@ -46,6 +47,8 @@ variable by hand works too, and an unknown class is a system failure.
 
 ```sh
 hack/m0/up.sh      # VM image, network, plugin binaries, config.toml
+# or, to serve GitHub Actions on the same classes too:
+FLEETCI_GITHUB_REPOS=owner/name hack/m0/up.sh   # token in ~/.config/fleetci/github.token
 # then the gitlab-runner command up.sh prints
 hack/m0/down.sh    # remove leftover VMs and the network
 ```

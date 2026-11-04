@@ -29,7 +29,7 @@ if [ ! -x "$dir/run.sh" ]; then
   curl -fsSL "https://github.com/actions/runner/releases/download/v%[1]s/actions-runner-linux-$arch-%[1]s.tar.gz" | tar -xz -C "$dir"
 fi
 cd "$dir"
-if ! ldconfig -p 2>/dev/null | grep -q libicu; then
+if ! ls /usr/lib*/libicuuc.so.* /usr/lib/*/libicuuc.so.* 2>/dev/null | grep -q .; then
   if command -v dnf >/dev/null 2>&1; then sudo dnf install -y -q libicu >/dev/null
   else sudo ./bin/installdependencies.sh >/dev/null
   fi

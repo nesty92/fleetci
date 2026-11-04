@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -117,6 +118,16 @@ func startPool(ctx context.Context, name string, c Class, log hclog.Logger) (*po
 func (b *Backend) Has(class string) bool {
 	_, ok := b.pools[class]
 	return ok
+}
+
+// Classes lists the class names, sorted.
+func (b *Backend) Classes() []string {
+	names := make([]string, 0, len(b.pools))
+	for name := range b.pools {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names
 }
 
 // Create acquires a VM of the class, waiting for one to boot if none is idle.

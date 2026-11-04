@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -62,6 +63,7 @@ var genericLabels = []string{"self-hosted", "linux"}
 // Backend hands out one VM per job.
 type Backend interface {
 	Has(class string) bool
+	Classes() []string
 	Create(ctx context.Context, class string) (fleet.VM, error)
 	Delete(ctx context.Context, id string) error
 }
@@ -78,8 +80,8 @@ type Dispatcher struct {
 	log          hclog.Logger
 
 	mu     sync.Mutex
-	taken  map[int64]time.Time // job id → when a runner was started for it
-	warned map[int64]bool      // jobs already logged as unservable
+	taken  map[int64]*attempt // jobs a runner was started for
+	warned map[int64]bool     // jobs already logged as unservable
 	wg     sync.WaitGroup
 }
 
@@ -133,7 +135,7 @@ func New(cfg Config, defaultClass string, backend Backend, start StartFunc, log 
 		start:        start,
 		gh:           newClient(cfg.APIURL, token),
 		log:          log,
-		taken:        map[int64]time.Time{},
+		taken:        map[int64]*attempt{},
 		warned:       map[int64]bool{},
 	}, nil
 }
@@ -201,7 +203,7 @@ func (d *Dispatcher) classFor(repo string, j job) (string, bool) {
 
 	var problem string
 	if !d.backend.Has(class) {
-		problem = fmt.Sprintf("no class %q", class)
+		problem = fmt.Sprintf("no class %q; classes are %s", class, strings.Join(d.backend.Classes(), ", "))
 	}
 	for _, l := range j.Labels {
 		l = strings.ToLower(l)
@@ -213,7 +215,7 @@ func (d *Dispatcher) classFor(repo string, j job) (string, bool) {
 		d.mu.Lock()
 		if !d.warned[j.ID] {
 			d.warned[j.ID] = true
-			d.log.Warn("job left queued: "+problem, "repo", repo, "job", j.Name, "job_id", j.ID, "labels", j.Labels)
+			d.log.Warn("job left queued: "+problem, "repo", repo, "job", j.Name, "job_id", strconv.FormatInt(j.ID, 10), "labels", j.Labels)
 		}
 		d.mu.Unlock()
 		return "", false
@@ -224,17 +226,60 @@ func (d *Dispatcher) classFor(repo string, j job) (string, bool) {
 func (d *Dispatcher) take(id int64) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if _, ok := d.taken[id]; ok {
+	a, ok := d.taken[id]
+	switch {
+	case !ok:
+		a = &attempt{}
+		d.taken[id] = a
+	case a.running || a.tries >= maxTries || time.Now().Before(a.retryAt):
 		return false
 	}
-	d.taken[id] = time.Now()
+	a.tries++
+	a.running = true
+	a.at = time.Now()
 	return true
 }
 
-func (d *Dispatcher) forget(id int64) {
+// attempt tracks the runners started for one job.
+type attempt struct {
+	at      time.Time
+	tries   int
+	running bool
+	retryAt time.Time
+}
+
+// maxTries caps the runners started for one job whose runners keep failing
+// before they take it.
+const maxTries = 3
+
+// retryPause separates the runners started for one job.
+var retryPause = 30 * time.Second
+
+// forget lets the next poll start a new runner for the job if it is still
+// queued: at once when no VM was found, after a pause when a runner failed.
+func (d *Dispatcher) forget(id int64, failed bool) {
 	d.mu.Lock()
-	delete(d.taken, id)
-	d.mu.Unlock()
+	defer d.mu.Unlock()
+	a, ok := d.taken[id]
+	if !ok {
+		return
+	}
+	a.running = false
+	if failed {
+		a.retryAt = time.Now().Add(retryPause)
+	} else {
+		a.tries--
+	}
+}
+
+// done marks the job's runner finished; the job is not served again.
+func (d *Dispatcher) done(id int64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if a, ok := d.taken[id]; ok {
+		a.running = false
+		a.tries = maxTries
+	}
 }
 
 // prune drops jobs that are no longer queued after an hour, so the map stays
@@ -242,8 +287,8 @@ func (d *Dispatcher) forget(id int64) {
 func (d *Dispatcher) prune(queued map[int64]bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	for id, at := range d.taken {
-		if !queued[id] && time.Since(at) > time.Hour {
+	for id, a := range d.taken {
+		if !queued[id] && !a.running && time.Since(a.at) > time.Hour {
 			delete(d.taken, id)
 		}
 	}
@@ -257,7 +302,8 @@ func (d *Dispatcher) prune(queued map[int64]bool) {
 // serve boots one runner for a queued job. GitHub may hand that runner any
 // queued job with the same labels; the count is what matters.
 func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string) {
-	log := d.log.With("repo", repo, "job", j.Name, "job_id", j.ID, "class", class)
+	// IDs as strings: plugin logs travel as JSON, which turns them into floats.
+	log := d.log.With("repo", repo, "job", j.Name, "job_id", strconv.FormatInt(j.ID, 10), "class", class)
 	start := time.Now()
 
 	vm, err := d.backend.Create(ctx, class)
@@ -265,7 +311,7 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 		if ctx.Err() == nil {
 			log.Error("no vm for job; retrying on the next poll", "err", err)
 		}
-		d.forget(j.ID)
+		d.forget(j.ID, false)
 		return
 	}
 	defer func() {
@@ -276,28 +322,37 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 	labels := runnerLabels(j.Labels)
 	runnerID, jit, err := d.gh.jitConfig(ctx, repo, vm.ID, d.cfg.RunnerGroupID, labels)
 	if err != nil {
-		log.Error("registering runner; retrying on the next poll", "err", err)
-		d.forget(j.ID)
+		log.Error("registering runner; retrying", "err", err)
+		d.forget(j.ID, true)
 		return
 	}
 	defer func() {
 		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		defer cancel()
 		if err := d.gh.deleteRunner(dctx, repo, runnerID); err != nil {
-			log.Warn("removing runner", "runner_id", runnerID, "err", err)
+			log.Warn("removing runner", "runner_id", strconv.FormatInt(runnerID, 10), "err", err)
 		}
 	}()
-	log.Info("runner starting", "runner_id", runnerID, "labels", labels, "waited", time.Since(start).Round(time.Second).String())
+	log.Info("runner starting", "runner_id", strconv.FormatInt(runnerID, 10), "labels", labels, "waited", time.Since(start).Round(time.Second).String())
 
 	rctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go d.watchIdle(rctx, cancel, repo, runnerID, log)
 
-	if err := d.start(rctx, vm, jit); err != nil && rctx.Err() == nil {
-		log.Error("runner failed", "err", err)
-		return
+	err = d.start(rctx, vm, jit)
+	switch {
+	case ctx.Err() != nil:
+	case err != nil || rctx.Err() != nil:
+		// Retried while the job is still queued: a runner that failed or
+		// was stopped idle never took it.
+		if rctx.Err() == nil {
+			log.Error("runner failed; retrying if the job is still queued", "err", err)
+		}
+		d.forget(j.ID, true)
+	default:
+		d.done(j.ID)
+		log.Info("runner done", "took", time.Since(start).Round(time.Second).String())
 	}
-	log.Info("runner done", "took", time.Since(start).Round(time.Second).String())
 }
 
 // watchIdle stops a runner that has not picked up a job within IdleTimeout.

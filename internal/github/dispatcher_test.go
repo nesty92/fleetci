@@ -28,6 +28,8 @@ type fakeBackend struct {
 
 func (b *fakeBackend) Has(class string) bool { return class == "2vcpu-1gb" || class == "2vcpu-2gb" }
 
+func (b *fakeBackend) Classes() []string { return []string{"2vcpu-1gb", "2vcpu-2gb"} }
+
 func (b *fakeBackend) Create(_ context.Context, class string) (fleet.VM, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -205,5 +207,47 @@ func waitFor(t *testing.T, ok func() bool) {
 			t.Fatal("timed out")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A runner that fails before taking its job is replaced, up to maxTries.
+func TestDispatcherRetriesFailedRunner(t *testing.T) {
+	defer func(p time.Duration) { retryPause = p }(retryPause)
+	retryPause = 10 * time.Millisecond
+
+	gh := &fakeGitHub{t: t, jit: map[string][]string{}, jobsJSON: `{"jobs":[
+	  {"id":1,"name":"build","status":"queued","labels":["fleetci"]}
+	]}`}
+	srv := httptest.NewServer(gh)
+	defer srv.Close()
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	_ = os.WriteFile(tokenFile, []byte("test-token"), 0o600)
+
+	var starts atomic.Int32
+	start := func(context.Context, fleet.VM, string) error {
+		starts.Add(1)
+		return fmt.Errorf("download failed")
+	}
+	backend := &fakeBackend{}
+	d, err := New(Config{Repos: []string{"o/r"}, TokenFile: tokenFile, PollInterval: fleet.Duration(5 * time.Millisecond), APIURL: srv.URL},
+		"2vcpu-1gb", backend, start, hclog.NewNullLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { d.Run(ctx); close(done) }()
+
+	waitFor(t, func() bool { return starts.Load() == maxTries })
+	waitFor(t, func() bool { return gh.polls.Load() > 40 })
+	cancel()
+	<-done
+	if n := starts.Load(); n != maxTries {
+		t.Errorf("%d runners started; want %d", n, maxTries)
+	}
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if len(backend.deleted) != maxTries {
+		t.Errorf("%d vms removed; want %d", len(backend.deleted), maxTries)
 	}
 }

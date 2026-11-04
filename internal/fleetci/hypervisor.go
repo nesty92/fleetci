@@ -23,6 +23,7 @@ const namePrefix = "class-"
 // Backend hands out one VM per job.
 type Backend interface {
 	Has(class string) bool
+	Classes() []string
 	Create(ctx context.Context, class string) (fleet.VM, error)
 	Delete(ctx context.Context, id string) error
 	Shutdown(ctx context.Context) error
@@ -41,6 +42,7 @@ type Hypervisor struct {
 
 type vmEntry struct {
 	name  string
+	host  string
 	proxy *proxy.VM
 }
 
@@ -60,13 +62,36 @@ func (h *Hypervisor) ClassFor(name string) (string, error) {
 		class = h.defaultClass
 	}
 	if !h.backend.Has(class) {
-		return "", fmt.Errorf("unknown class %q", class)
+		return "", fmt.Errorf("unknown class %q; this runner has %s", class, ClassList(h.backend.Classes(), h.defaultClass))
 	}
 	return class, nil
 }
 
-// Get finds a VM for the gateway.
-func (h *Hypervisor) Get(id string) (*proxy.VM, bool) {
+// ClassList names the classes for an error message, marking the default.
+func ClassList(classes []string, defaultClass string) string {
+	out := make([]string, len(classes))
+	for i, c := range classes {
+		out[i] = c
+		if c == defaultClass {
+			out[i] += " (default)"
+		}
+	}
+	return strings.Join(out, ", ")
+}
+
+// vmHost is the host the runner dials for a VM. It carries the machine's
+// instance id after a dot, so the job log shows which machine ran the job:
+// "Created nesting VM fleetci-2vcpu-2gb-1a2b3c4d fleetci-2vcpu-2gb-1a2b3c4d.i-0530…:22".
+func vmHost(vm fleet.VM) string {
+	if vm.Instance == "" {
+		return vm.ID
+	}
+	return vm.ID + "." + strings.NewReplacer(".", "-", ":", "-", "/", "-").Replace(vm.Instance)
+}
+
+// Get finds a VM for the gateway by the host the runner dialed.
+func (h *Hypervisor) Get(host string) (*proxy.VM, bool) {
+	id, _, _ := strings.Cut(host, ".")
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	e, ok := h.vms[id]
@@ -94,12 +119,13 @@ func (h *Hypervisor) Create(ctx context.Context, name string) (hypervisor.Virtua
 	}
 
 	h.mu.Lock()
-	h.vms[vm.ID] = &vmEntry{name: name, proxy: proxy.NewVM(vm.ID, vm.Connect, h.log)}
+	host := vmHost(vm)
+	h.vms[vm.ID] = &vmEntry{name: name, host: host, proxy: proxy.NewVM(vm.ID, vm.Connect, h.log)}
 	h.mu.Unlock()
 
 	// The address is the VM's id, which only the gateway understands. The
 	// runner's connection to it never leaves this process.
-	return hypervisor.VirtualMachineInfo{Id: vm.ID, Name: name, Addr: net.JoinHostPort(vm.ID, "22")}, nil
+	return hypervisor.VirtualMachineInfo{Id: vm.ID, Name: name, Addr: net.JoinHostPort(host, "22")}, nil
 }
 
 func (h *Hypervisor) Delete(ctx context.Context, id string) error {
@@ -119,7 +145,7 @@ func (h *Hypervisor) List(context.Context) ([]hypervisor.VirtualMachine, error) 
 	defer h.mu.Unlock()
 	vms := make([]hypervisor.VirtualMachine, 0, len(h.vms))
 	for id, e := range h.vms {
-		vms = append(vms, hypervisor.VirtualMachineInfo{Id: id, Name: e.name, Addr: net.JoinHostPort(id, "22")})
+		vms = append(vms, hypervisor.VirtualMachineInfo{Id: id, Name: e.name, Addr: net.JoinHostPort(e.host, "22")})
 	}
 	return vms, nil
 }
