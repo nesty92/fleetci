@@ -43,9 +43,13 @@ cd hack/aws
 cp terraform.tfvars.example terraform.tfvars   # set region, profile, operator_cidr
 tofu init
 tofu apply
-./runner-config.sh
+./runner-config.sh   # also writes ~/.local/share/fleetci-aws/fleetci.yml
 gitlab-runner run --config ~/.local/share/fleetci-aws/config.toml --working-directory ~/.local/share/fleetci-aws/work
 ```
+
+Copy `fleetci.yml` to `.gitlab/fleetci.yml` in your project and pick a class
+with `extends: .fleetci-2vcpu-2gb`. Jobs without one get
+`FLEETCI_DEFAULT_CLASS`, else the first class by name.
 
 Stop the local runner from hack/m0 first, since it uses the same token.
 

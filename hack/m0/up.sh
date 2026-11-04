@@ -85,6 +85,9 @@ log_level = "info"
         timeout = "2m"
 TOML
 chmod 600 "$DATA/config.toml"
+"$REPO/hack/ci-template.sh" fleetci 1vcpu-2gb 1vcpu-2gb 4vcpu-6gb > "$DATA/fleetci.yml"
+chmod 644 "$DATA/fleetci.yml"
 
 echo "ready: $DATA"
 echo "  runner: gitlab-runner run --config $DATA/config.toml --working-directory $DATA/work"
+echo "  CI include: copy $DATA/fleetci.yml to .gitlab/fleetci.yml in your project"

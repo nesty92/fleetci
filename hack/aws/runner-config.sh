@@ -20,6 +20,9 @@ mkdir -p "$DATA/work" "$DATA/bin"
 out=$(cd "$HERE" && tofu output -json)
 region=$(printf '%s' "$out" | jq -r '.region.value')
 profile=$(printf '%s' "$out" | jq -r '.profile.value // empty')
+# Jobs without FLEETCI_CLASS get FLEETCI_DEFAULT_CLASS, else the first class
+# by name.
+default=${FLEETCI_DEFAULT_CLASS:-$(printf '%s' "$out" | jq -r '.groups.value | keys | first')}
 
 classes=$(printf '%s' "$out" | jq -r --arg bin "$DATA/bin/fleeting-plugin-aws" --arg region "$region" --arg profile "$profile" '
   .groups.value | to_entries[] |
@@ -56,7 +59,7 @@ log_level = "info"
     max_use_count = 0
     max_instances = 1
     [runners.autoscaler.plugin_config]
-      default_class = "2vcpu-1gb"
+      default_class = "$default"
 $classes
     [runners.autoscaler.connector_config]
       timeout = "2m"
@@ -75,6 +78,10 @@ $classes
         timeout = "5m"
 TOML
 chmod 600 "$DATA/config.toml"
+# shellcheck disable=SC2046 # class names have no spaces
+"$REPO/hack/ci-template.sh" fleetci "$default" $(printf '%s' "$out" | jq -r '.groups.value | keys[]') > "$DATA/fleetci.yml"
+chmod 644 "$DATA/fleetci.yml"
 
 echo "ready: $DATA"
 echo "  runner: gitlab-runner run --config $DATA/config.toml --working-directory $DATA/work"
+echo "  CI include: copy $DATA/fleetci.yml to .gitlab/fleetci.yml in your project"

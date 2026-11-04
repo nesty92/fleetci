@@ -29,14 +29,18 @@ key on every `ConnectInfo` that the VM accepts for two minutes
 (`expiry-time` in `authorized_keys`). A cloud class swaps in that cloud's
 fleeting plugin; nothing else changes.
 
-The job picks its class with one variable:
+The job picks its class with one line, from the include `up.sh` writes to
+`~/.local/share/fleetci-m0/fleetci.yml` (copy it to `.gitlab/fleetci.yml`):
 
 ```yaml
+include:
+  - local: .gitlab/fleetci.yml
 build:
-  tags: [fleetci]
-  variables:
-    FLEETCI_CLASS: 4vcpu-6gb   # unset → default class; unknown → system failure
+  extends: .fleetci-4vcpu-6gb   # .fleetci → default class
 ```
+
+The include only sets `tags: [fleetci]` and `FLEETCI_CLASS`; setting the
+variable by hand works too, and an unknown class is a system failure.
 
 ## Run it
 
