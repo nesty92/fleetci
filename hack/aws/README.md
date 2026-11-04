@@ -51,6 +51,10 @@ Copy `fleetci.yml` to `.gitlab/fleetci.yml` in your project and pick a class
 with `extends: .fleetci-2vcpu-2gb`. Jobs without one get
 `FLEETCI_DEFAULT_CLASS`, else the first class by name.
 
+For GitHub Actions on the same groups, put a token that may register runners
+on the repos in `~/.config/fleetci/github.token` and run
+`FLEETCI_GITHUB_REPOS="owner/name" ./runner-config.sh`.
+
 Stop the local runner from hack/m0 first, since it uses the same token.
 
 The credentials used by fleeting-plugin-aws need the plugin's IAM policy

@@ -22,6 +22,7 @@ import (
 
 	"github.com/nesty92/fleetci/internal/fleet"
 	"github.com/nesty92/fleetci/internal/gateway"
+	"github.com/nesty92/fleetci/internal/github"
 )
 
 const (
@@ -38,6 +39,8 @@ type Config struct {
 	NestingPath  string                 `json:"nesting_path"`
 	DefaultClass string                 `json:"default_class"`
 	Classes      map[string]fleet.Class `json:"classes"`
+	// GitHub, when set, also runs GitHub Actions jobs on the classes.
+	GitHub *github.Config `json:"github"`
 }
 
 type InstanceGroup struct {
@@ -49,6 +52,9 @@ type InstanceGroup struct {
 	stop     context.CancelFunc
 	stopped  chan struct{}
 	dir      string
+
+	ghStop context.CancelFunc
+	ghDone chan struct{}
 
 	mu      sync.Mutex
 	running bool
@@ -93,6 +99,14 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 	}
 
 	hv := NewHypervisor(g.DefaultClass, backend, log)
+
+	var gh *github.Dispatcher
+	if g.GitHub != nil {
+		gh, err = github.New(*g.GitHub, g.DefaultClass, backend, nil, log.Named("github"))
+		if err != nil {
+			return provider.ProviderInfo{}, err
+		}
+	}
 	g.gw, err = gateway.New(gateway.Config{
 		Listen:        g.Listen,
 		NestingPath:   g.NestingPath,
@@ -121,6 +135,15 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 		return provider.ProviderInfo{}, err
 	}
 	started = true
+
+	if gh != nil {
+		ghCtx, ghStop := context.WithCancel(context.Background())
+		g.ghStop, g.ghDone = ghStop, make(chan struct{})
+		go func() {
+			defer close(g.ghDone)
+			gh.Run(ghCtx)
+		}()
+	}
 
 	log.Info("fleetci ready", "gateway", g.gw.Addr(), "classes", len(g.Classes), "default_class", g.DefaultClass)
 	return provider.ProviderInfo{ID: "fleetci/gateway", MaxSize: 1}, nil
@@ -223,8 +246,16 @@ func (g *InstanceGroup) Heartbeat(_ context.Context, id string) error {
 func (g *InstanceGroup) Suspend(context.Context, []string) ([]string, error) { return nil, nil }
 func (g *InstanceGroup) Resume(context.Context, []string) ([]string, error)  { return nil, nil }
 
-// Shutdown stops the gateway and the nesting API, which removes every VM.
+// Shutdown stops GitHub's runners, then the gateway and the nesting API,
+// which removes every VM.
 func (g *InstanceGroup) Shutdown(ctx context.Context) error {
+	if g.ghStop != nil {
+		g.ghStop()
+		select {
+		case <-g.ghDone:
+		case <-ctx.Done():
+		}
+	}
 	if g.stop == nil {
 		return nil
 	}

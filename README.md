@@ -31,5 +31,31 @@ A misspelled class fails when the pipeline is created
 (`unknown keys in extends`), before any VM boots. GitLab does not pass a job's
 tags to the runner, so the class can't be a tag alone.
 
+## GitHub Actions
+
+The same classes serve GitHub Actions. Labels reach fleetci there, so the class
+is the label:
+
+```yaml
+jobs:
+  build:
+    runs-on: fleetci-4vcpu-8gb   # class 4vcpu-8gb; runs-on: fleetci → default class
+```
+
+With a `github` table in `plugin_config`, fleetci lists each repo's queued
+jobs, takes a VM of the job's class from the same pool gitlab-runner uses,
+registers a just-in-time runner with the job's labels and starts it on the VM
+over SSH. The runner takes one job and exits; the VM is removed.
+
+```toml
+[runners.autoscaler.plugin_config.github]
+  repos = ["owner/name"]
+  token_file = "/path/to/token"   # fine-grained, Administration: write
+```
+
+A job asking for a class fleetci lacks, or for other labels besides
+`self-hosted` and `linux`, stays queued and is logged. VMs need `curl`; the
+runner is downloaded on first use.
+
 Status: proof of concept, running locally. See [hack/m0](hack/m0/README.md)
 to try it on one machine.

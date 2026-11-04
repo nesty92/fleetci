@@ -9,6 +9,10 @@ REPO=$(cd "$HERE/../.." && pwd)
 DATA=${FLEETCI_AWS_DATA:-$HOME/.local/share/fleetci-aws}
 TOKEN_FILE=${FLEETCI_M0_TOKEN:-$HOME/.config/fleetci/m0-runner.token}
 AWS_PLUGIN_VERSION=${AWS_PLUGIN_VERSION:-v1.3.1}
+# GitHub Actions on the same classes: space-separated owner/name repos, and a
+# file holding a token that may register runners on them.
+GITHUB_REPOS=${FLEETCI_GITHUB_REPOS:-}
+GITHUB_TOKEN_FILE=${FLEETCI_GITHUB_TOKEN_FILE:-$HOME/.config/fleetci/github.token}
 
 umask 077
 mkdir -p "$DATA/work" "$DATA/bin"
@@ -41,6 +45,15 @@ classes=$(printf '%s' "$out" | jq -r --arg bin "$DATA/bin/fleeting-plugin-aws" -
   "          timeout = \"5m\""
 ' --argjson out_classes "$(printf '%s' "$out" | jq '.classes.value')")
 
+github=
+if [ -n "$GITHUB_REPOS" ]; then
+  [ -r "$GITHUB_TOKEN_FILE" ] || { echo "no GitHub token in $GITHUB_TOKEN_FILE" >&2; exit 1; }
+  repos=$(printf '%s\n' $GITHUB_REPOS | jq -R . | jq -sc .)
+  github="      [runners.autoscaler.plugin_config.github]
+        repos = $repos
+        token_file = \"$GITHUB_TOKEN_FILE\""
+fi
+
 cat > "$DATA/config.toml" <<TOML
 concurrent = 4
 check_interval = 3
@@ -61,6 +74,7 @@ log_level = "info"
     [runners.autoscaler.plugin_config]
       default_class = "$default"
 $classes
+$github
     [runners.autoscaler.connector_config]
       timeout = "2m"
     [[runners.autoscaler.policy]]
