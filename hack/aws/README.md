@@ -30,6 +30,11 @@ All of it is free while idle. VMs run only while a job runs (`idle_count = 0`
 in the runner config). With `use_spot = false` (the default), a `t3.micro`
 costs about $0.01 an hour.
 
+Each class may run 4 VMs at once (`max_instances` in `classes`), shared by
+GitLab and GitHub jobs. A limit costs nothing until VMs run, but AWS's own
+vCPU quota (Spot and On-Demand are separate) can stop a group short of it:
+4 + 4 `t3` VMs need 16 vCPUs. New accounts may have less; see Service Quotas.
+
 ## Run it
 
 You need:

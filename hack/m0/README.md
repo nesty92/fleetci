@@ -14,8 +14,8 @@ fleeting-plugin-fleetci  ── one process ────────────
     ├─ "exit 0"       → the runner's health check; nothing else runs
     └─ fleetci-vm-…:22 → proxy: ends the runner's VM connection
                               (password "unused": it never leaves the process)
-  class "1vcpu-2gb": fleeting plugin + taskscaler, 1 idle VM, max 4
-  class "4vcpu-6gb": fleeting plugin + taskscaler, boots per job, max 2
+  class "1vcpu-2gb": fleeting plugin + taskscaler, boots per job, max 6
+  class "4vcpu-6gb": fleeting plugin + taskscaler, boots per job, max 3
   ─────────────────────────────────────────────────────────────────────────
          └─ SSH with a key the class plugin just issued ─► VM ─► Docker
 ```

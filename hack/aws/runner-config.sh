@@ -26,6 +26,9 @@ region=$(printf '%s' "$out" | jq -r '.region.value')
 profile=$(printf '%s' "$out" | jq -r '.profile.value // empty')
 # Jobs without FLEETCI_CLASS get FLEETCI_DEFAULT_CLASS, else the first class
 # by name.
+# GitLab jobs all pass through fleetci's one gateway, so it takes up to the
+# sum of the classes' limits.
+total=$(printf '%s' "$out" | jq '[.classes.value[]] | add')
 default=${FLEETCI_DEFAULT_CLASS:-$(printf '%s' "$out" | jq -r '.groups.value | keys | first')}
 
 classes=$(printf '%s' "$out" | jq -r --arg bin "$DATA/bin/fleeting-plugin-aws" --arg region "$region" --arg profile "$profile" '
@@ -55,7 +58,7 @@ if [ -n "$GITHUB_REPOS" ]; then
 fi
 
 cat > "$DATA/config.toml" <<TOML
-concurrent = 4
+concurrent = $total
 check_interval = 3
 log_level = "info"
 
@@ -68,7 +71,7 @@ log_level = "info"
     image = "alpine:3.22"
   [runners.autoscaler]
     plugin = "$DATA/bin/fleeting-plugin-fleetci"
-    capacity_per_instance = 4
+    capacity_per_instance = $total
     max_use_count = 0
     max_instances = 1
     [runners.autoscaler.plugin_config]

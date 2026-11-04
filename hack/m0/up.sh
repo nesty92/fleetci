@@ -35,7 +35,7 @@ if [ -n "$GITHUB_REPOS" ]; then
 fi
 
 cat > "$DATA/config.toml" <<TOML
-concurrent = 4
+concurrent = 9
 check_interval = 3
 log_level = "info"
 
@@ -48,17 +48,18 @@ log_level = "info"
     image = "alpine:3.22"
   [runners.autoscaler]
     plugin = "$DATA/bin/fleeting-plugin-fleetci"
-    capacity_per_instance = 4
+    # One gateway carries every GitLab job: up to the sum of the classes' limits.
+    capacity_per_instance = 9
     max_use_count = 0
     max_instances = 1
     [runners.autoscaler.plugin_config]
       default_class = "1vcpu-2gb"
-      # 1vcpu-2gb keeps one VM booted and waiting; 4vcpu-6gb boots per job.
+      # Every VM boots for its job (no warm VMs). The limits are ceilings;
+      # memory is only used by running VMs.
       [runners.autoscaler.plugin_config.classes.1vcpu-2gb]
         plugin = "$DATA/bin/fleeting-plugin-dockervm"
-        max_instances = 4
-        idle_count = 1
-        idle_time = "20m"
+        max_instances = 6
+        idle_count = 0
         [runners.autoscaler.plugin_config.classes.1vcpu-2gb.plugin_config]
           name = "1vcpu-2gb"
           image = "fleetci-m0-vm"
@@ -70,7 +71,7 @@ log_level = "info"
           timeout = "2m"
       [runners.autoscaler.plugin_config.classes.4vcpu-6gb]
         plugin = "$DATA/bin/fleeting-plugin-dockervm"
-        max_instances = 2
+        max_instances = 3
         idle_count = 0
         [runners.autoscaler.plugin_config.classes.4vcpu-6gb.plugin_config]
           name = "4vcpu-6gb"
