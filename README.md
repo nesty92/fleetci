@@ -154,7 +154,7 @@ gitlab-runner's `config.toml` only points at fleetci's own file
 ```toml
 [runners.autoscaler]
   plugin = "fleeting-plugin-fleetci"
-  capacity_per_instance = 12  # GitLab jobs at once: the sum of the classes' limits
+  capacity_per_instance = 18  # GitLab jobs at once: the sum of the classes' limits
   max_instances = 1
   [runners.autoscaler.plugin_config]
     config_file = "/etc/fleetci/fleetci.toml"
@@ -168,7 +168,13 @@ gitlab-runner's `config.toml` only points at fleetci's own file
 # /etc/fleetci/fleetci.toml
 default_class = "2vcpu-4gb"
 
-[classes.2vcpu-2gb]            # linters and small checks
+[classes.1vcpu-2gb]            # linters
+plugin = "fleeting-plugin-aws"
+max_instances = 6
+plugin_config = { name = "fleetci-1vcpu-2gb", region = "eu-north-1" }
+connector_config = { username = "ubuntu", use_external_addr = true }
+
+[classes.2vcpu-2gb]            # small checks
 plugin = "fleeting-plugin-aws"
 max_instances = 6
 plugin_config = { name = "fleetci-2vcpu-2gb", region = "eu-north-1" }
