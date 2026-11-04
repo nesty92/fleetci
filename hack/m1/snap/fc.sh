@@ -85,7 +85,7 @@ ethernets:
 EOF
 
 t=$(now)
-cp --sparse=always root.base.ext4 tpl.ext4
+cp ${CP_FLAGS:---sparse=always} root.base.ext4 tpl.ext4
 echo "template disk copied: $(since "$t") s"
 # Only the root partition is here: drop the EFI (and any other) mounts, or
 # boot waits 90 s for the device and stops in emergency mode.
@@ -108,7 +108,7 @@ ip link set tap0 up
 S=$W/tpl.sock
 firecracker --api-sock "$S" --log-path /dev/null >tpl.console 2>&1 &
 until [ -S "$S" ]; do sleep 0.01; done
-api "$S" PUT /boot-source "{\"kernel_image_path\":\"$KERNEL\",\"boot_args\":\"console=ttyS0 reboot=k panic=1 root=/dev/vda rw\"}"
+api "$S" PUT /boot-source "{\"kernel_image_path\":\"$KERNEL\",\"boot_args\":\"${FC_ARGS:-console=ttyS0 reboot=k panic=1 root=/dev/vda rw}\"}"
 api "$S" PUT /drives/root "{\"drive_id\":\"root\",\"path_on_host\":\"$W/tpl.ext4\",\"is_root_device\":true,\"is_read_only\":false}"
 api "$S" PUT /machine-config "{\"vcpu_count\":$CPUS,\"mem_size_mib\":$MEM}"
 api "$S" PUT /network-interfaces/eth0 "{\"iface_id\":\"eth0\",\"guest_mac\":\"$MAC\",\"host_dev_name\":\"tap0\"}"
@@ -140,7 +140,7 @@ while [ $i -le "$CLONES" ]; do
   c=clone$i
   mkdir $c
   t=$(now)
-  cp --sparse=always tpl.ext4 $c/disk.ext4
+  cp ${CP_FLAGS:---sparse=always} tpl.ext4 $c/disk.ext4
   chmod u+w $c/disk.ext4
   echo "$c disk copied: $(since "$t") s"
   ip netns add $c

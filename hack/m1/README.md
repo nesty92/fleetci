@@ -119,6 +119,21 @@ Cloud Hypervisor's qcow2 overlay avoids. In both, the slowest unit is
 `systemd-networkd-wait-online` at 1.1–2.0 s, though the network is
 static. `systemd-binfmt` costs Firecracker another 0.9 s.
 
+Copy-on-write disks for Firecracker: `fc-run.sh 3 ubuntu reflink` keeps the
+disks on a loop-mounted btrfs (in a sparse file), and each clone is a
+`cp --reflink` of the template. A device-mapper snapshot would do the same,
+but needs the `dm_snapshot` module. With the quiet console options:
+
+| Firecracker, Ubuntu's kernel | raw copy, serial console | reflink, `quiet` |
+| --- | --- | --- |
+| clone disk | 2.3–5.3 s | 0.05 s |
+| template cold boot to `docker version` | 6.3 s | 4.3 s |
+| restore to `docker version` | 1.54 s | 0.32 s |
+| memory per clone, resident / private | 370 / 97 MB | 420 / 82 MB |
+
+The slow restore came from the serial console. Quiet, Firecracker restores as
+fast as Cloud Hypervisor.
+
 With Firecracker's own kernel, `DOCKER_INSECURE_NO_IPTABLES_RAW=1` in
 Docker's environment skips the raw-table rule instead. That's untested here.
 
