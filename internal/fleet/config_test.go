@@ -57,3 +57,53 @@ func TestClassValidate(t *testing.T) {
 		}
 	}
 }
+
+func TestClassPolicies(t *testing.T) {
+	raw := `{
+	  "plugin": "p", "max_instances": 4,
+	  "policy": [
+	    {"idle_count": 0},
+	    {"periods": ["* 8-18 * * mon-fri"], "timezone": "Europe/Warsaw", "idle_count": 2, "idle_time": "20m",
+	     "scale_factor": 0.5, "scale_factor_limit": 4}
+	  ]
+	}`
+	var c Class
+	if err := json.Unmarshal([]byte(raw), &c); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.validate("x"); err != nil {
+		t.Fatal(err)
+	}
+	s := c.schedules()
+	if len(s) != 2 {
+		t.Fatalf("%d schedules", len(s))
+	}
+	if s[0].IdleCount != 0 || s[0].IdleTime != defaultIdleTime || len(s[0].Periods) != 0 {
+		t.Errorf("default policy: %+v", s[0])
+	}
+	w := s[1]
+	if w.Periods[0] != "* 8-18 * * mon-fri" || w.Timezone != "Europe/Warsaw" || w.IdleCount != 2 ||
+		w.IdleTime != 20*time.Minute || w.ScaleFactor != 0.5 || w.ScaleFactorLimit != 4 {
+		t.Errorf("work hours policy: %+v", w)
+	}
+
+	// idle_count alone is one policy at all times.
+	short := Class{Plugin: "p", MaxInstances: 2, IdleCount: 1}
+	if s := short.schedules(); len(s) != 1 || s[0].IdleCount != 1 || s[0].IdleTime != defaultIdleTime {
+		t.Errorf("shorthand: %+v", s)
+	}
+}
+
+func TestClassPolicyValidate(t *testing.T) {
+	for name, c := range map[string]Class{
+		"idle beside policy": {Plugin: "p", MaxInstances: 2, IdleCount: 1, Policy: []Policy{{}}},
+		"policy above max":   {Plugin: "p", MaxInstances: 2, Policy: []Policy{{IdleCount: 3}}},
+		"bad period":         {Plugin: "p", MaxInstances: 2, Policy: []Policy{{Periods: []string{"every day"}}}},
+		"bad timezone":       {Plugin: "p", MaxInstances: 2, Policy: []Policy{{Periods: []string{"* * * * *"}, Timezone: "Mars/Olympus"}}},
+		"negative factor":    {Plugin: "p", MaxInstances: 2, Policy: []Policy{{ScaleFactor: -1}}},
+	} {
+		if err := c.validate("x"); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}

@@ -3,9 +3,11 @@ module github.com/nesty92/fleetci
 go 1.27.0
 
 require (
+	github.com/BurntSushi/toml v1.5.0
 	github.com/hashicorp/go-hclog v1.6.3
 	gitlab.com/gitlab-org/fleeting/fleeting v0.0.0-20261102084746-4085ca1ae366
 	gitlab.com/gitlab-org/fleeting/nesting v0.5.0
+	gitlab.com/gitlab-org/fleeting/taskscaler v0.0.0-20261103060922-6d4e8d9a9815
 	golang.org/x/crypto v0.57.0
 )
 
@@ -17,7 +19,6 @@ require (
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/oklog/run v1.2.0 // indirect
-	gitlab.com/gitlab-org/fleeting/taskscaler v0.0.0-20261103060922-6d4e8d9a9815 // indirect
 	golang.org/x/mod v0.42.0 // indirect
 	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect

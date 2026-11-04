@@ -29,10 +29,32 @@ github=
 if [ -n "$GITHUB_REPOS" ]; then
   [ -r "$GITHUB_TOKEN_FILE" ] || { echo "no GitHub token in $GITHUB_TOKEN_FILE" >&2; exit 1; }
   repos=$(printf '%s\n' $GITHUB_REPOS | jq -R . | jq -sc .)
-  github="      [runners.autoscaler.plugin_config.github]
-        repos = $repos
-        token_file = \"$GITHUB_TOKEN_FILE\""
+  github="
+# GitHub Actions jobs on the same classes: runs-on: fleetci-<class>.
+[github]
+repos = $repos
+token_file = \"$GITHUB_TOKEN_FILE\""
 fi
+
+# fleetci's own settings. Every VM boots for its job (no warm VMs); see
+# [[classes.<name>.policy]] in the README to keep some warm by time of day.
+# The limits are ceilings: memory is only used by running VMs.
+cat > "$DATA/fleetci.toml" <<TOML
+default_class = "1vcpu-2gb"
+
+[classes.1vcpu-2gb]
+plugin = "$DATA/bin/fleeting-plugin-dockervm"
+max_instances = 6
+plugin_config = { name = "1vcpu-2gb", image = "fleetci-m0-vm", network = "$NET", cpus = "1", memory = "2g" }
+connector_config = { username = "fleetci", timeout = "2m" }
+
+[classes.4vcpu-6gb]
+plugin = "$DATA/bin/fleeting-plugin-dockervm"
+max_instances = 3
+plugin_config = { name = "4vcpu-6gb", image = "fleetci-m0-vm", network = "$NET", cpus = "4", memory = "6g" }
+connector_config = { username = "fleetci", timeout = "2m" }
+$github
+TOML
 
 cat > "$DATA/config.toml" <<TOML
 concurrent = 9
@@ -53,36 +75,7 @@ log_level = "info"
     max_use_count = 0
     max_instances = 1
     [runners.autoscaler.plugin_config]
-      default_class = "1vcpu-2gb"
-      # Every VM boots for its job (no warm VMs). The limits are ceilings;
-      # memory is only used by running VMs.
-      [runners.autoscaler.plugin_config.classes.1vcpu-2gb]
-        plugin = "$DATA/bin/fleeting-plugin-dockervm"
-        max_instances = 6
-        idle_count = 0
-        [runners.autoscaler.plugin_config.classes.1vcpu-2gb.plugin_config]
-          name = "1vcpu-2gb"
-          image = "fleetci-m0-vm"
-          network = "$NET"
-          cpus = "1"
-          memory = "2g"
-        [runners.autoscaler.plugin_config.classes.1vcpu-2gb.connector_config]
-          username = "fleetci"
-          timeout = "2m"
-      [runners.autoscaler.plugin_config.classes.4vcpu-6gb]
-        plugin = "$DATA/bin/fleeting-plugin-dockervm"
-        max_instances = 3
-        idle_count = 0
-        [runners.autoscaler.plugin_config.classes.4vcpu-6gb.plugin_config]
-          name = "4vcpu-6gb"
-          image = "fleetci-m0-vm"
-          network = "$NET"
-          cpus = "4"
-          memory = "6g"
-        [runners.autoscaler.plugin_config.classes.4vcpu-6gb.connector_config]
-          username = "fleetci"
-          timeout = "2m"
-$github
+      config_file = "$DATA/fleetci.toml"
     [runners.autoscaler.connector_config]
       timeout = "2m"
     [runners.autoscaler.vm_isolation]
@@ -96,10 +89,11 @@ $github
         use_static_credentials = true
         timeout = "2m"
 TOML
-chmod 600 "$DATA/config.toml"
+chmod 600 "$DATA/config.toml" "$DATA/fleetci.toml"
 "$REPO/hack/ci-template.sh" fleetci 1vcpu-2gb 1vcpu-2gb 4vcpu-6gb > "$DATA/fleetci.yml"
 chmod 644 "$DATA/fleetci.yml"
 
 echo "ready: $DATA"
+echo "  classes: $DATA/fleetci.toml"
 echo "  runner: gitlab-runner run --config $DATA/config.toml --working-directory $DATA/work"
 echo "  CI include: copy $DATA/fleetci.yml to .gitlab/fleetci.yml in your project"

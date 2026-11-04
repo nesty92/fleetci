@@ -42,20 +42,72 @@ jobs:
     runs-on: fleetci-4vcpu-8gb   # class 4vcpu-8gb; runs-on: fleetci → default class
 ```
 
-With a `github` table in `plugin_config`, fleetci lists each repo's queued
-jobs, takes a VM of the job's class from the same pool gitlab-runner uses,
-registers a just-in-time runner with the job's labels and starts it on the VM
-over SSH. The runner takes one job and exits; the VM is removed.
-
-```toml
-[runners.autoscaler.plugin_config.github]
-  repos = ["owner/name"]
-  token_file = "/path/to/token"   # fine-grained, Administration: write
-```
+With a `[github]` table in the config, fleetci lists each repo's queued jobs,
+takes a VM of the job's class from the same pool gitlab-runner uses, registers
+a just-in-time runner with the job's labels and starts it on the VM over SSH.
+The runner takes one job and exits; the VM is removed.
 
 A job asking for a class fleetci lacks, or for other labels besides
-`self-hosted` and `linux`, stays queued and is logged. VMs need `curl`; the
-runner is downloaded on first use.
+`self-hosted` and `linux`, stays queued and is logged. The VM image should
+carry actions/runner in `~/actions-runner-<version>` (both kits do); otherwise
+it is downloaded for each job.
+
+## Configuration
+
+gitlab-runner's `config.toml` only points at fleetci's own file:
+
+```toml
+[runners.autoscaler]
+  plugin = "fleeting-plugin-fleetci"
+  capacity_per_instance = 8   # GitLab jobs at once: the sum of the classes' limits
+  max_instances = 1
+  [runners.autoscaler.plugin_config]
+    config_file = "/etc/fleetci/fleetci.toml"
+  [runners.autoscaler.vm_isolation]
+    enabled = true
+    nesting_host = "unix:///fleetci/nesting.sock"
+    image = "class-${FLEETCI_CLASS}"
+```
+
+```toml
+# /etc/fleetci/fleetci.toml
+default_class = "2vcpu-4gb"
+
+[classes.2vcpu-4gb]
+plugin = "fleeting-plugin-aws"
+max_instances = 4            # a ceiling; nothing runs until a job needs it
+plugin_config = { name = "fleetci-2vcpu-4gb", region = "eu-north-1" }
+connector_config = { username = "ubuntu", use_external_addr = true }
+
+[classes.8vcpu-16gb]
+plugin = "fleeting-plugin-aws"
+max_instances = 2
+plugin_config = { name = "fleetci-8vcpu-16gb", region = "eu-north-1" }
+connector_config = { username = "ubuntu", use_external_addr = true }
+
+# Warm VMs by time of day, as gitlab-runner's [[runners.autoscaler.policy]]:
+# of the policies whose periods match, the last applies.
+[[classes.8vcpu-16gb.policy]]
+idle_count = 0                       # default: boot per job
+
+[[classes.8vcpu-16gb.policy]]
+periods = ["* 8-18 * * mon-fri"]
+timezone = "Europe/Warsaw"
+idle_count = 1                       # one warm in work hours…
+scale_factor = 0.5                   # …or half the running jobs,
+scale_factor_limit = 2               # at most 2
+idle_time = "20m"
+
+[github]
+repos = ["owner/name"]
+token_file = "github.token"          # fine-grained, Administration: write
+```
+
+A class without `policy` can set `idle_count` and `idle_time` directly, for
+one policy at all times. Every class takes `acquire_timeout` (how long a job
+waits for a VM, default 10m). Unknown keys are errors; relative paths are
+relative to the file. Each class's `plugin_config` goes to its fleeting plugin
+as it is.
 
 Status: proof of concept, running locally. See [hack/m0](hack/m0/README.md)
 to try it on one machine.

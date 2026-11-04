@@ -96,11 +96,7 @@ func startPool(ctx context.Context, name string, c Class, log hclog.Logger) (*po
 		return nil, fmt.Errorf("starting taskscaler: %w", err)
 	}
 
-	idleTime := time.Duration(c.IdleTime)
-	if idleTime == 0 {
-		idleTime = 10 * time.Minute
-	}
-	if err := ts.ConfigureSchedule(taskscaler.Schedule{IdleCount: c.IdleCount, IdleTime: idleTime}); err != nil {
+	if err := ts.ConfigureSchedule(c.schedules()...); err != nil {
 		ts.Shutdown(ctx)
 		runner.Kill()
 		return nil, err
@@ -110,7 +106,7 @@ func startPool(ctx context.Context, name string, c Class, log hclog.Logger) (*po
 	if timeout == 0 {
 		timeout = 10 * time.Minute
 	}
-	log.Info("class ready", "plugin", c.Plugin, "max_instances", c.MaxInstances, "idle_count", c.IdleCount)
+	log.Info("class ready", "plugin", c.Plugin, "max_instances", c.MaxInstances, "policies", len(c.schedules()))
 	return &pool{name: name, class: c, runner: runner, ts: ts, timeout: timeout}, nil
 }
 

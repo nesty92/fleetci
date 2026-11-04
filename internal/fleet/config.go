@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"gitlab.com/gitlab-org/fleeting/fleeting/provider"
+	"gitlab.com/gitlab-org/fleeting/taskscaler"
+	"gitlab.com/gitlab-org/fleeting/taskscaler/cron"
 )
 
 // Class is one machine size, backed by its own fleeting plugin. Every VM in
@@ -23,10 +25,15 @@ type Class struct {
 
 	// MaxInstances caps the VMs of this class, running jobs and idle.
 	MaxInstances int `json:"max_instances"`
-	// IdleCount is how many VMs to keep booted and waiting for a job.
+	// IdleCount is how many VMs to keep booted and waiting for a job. It
+	// is shorthand for one policy that applies at all times.
 	IdleCount int `json:"idle_count"`
-	// IdleTime is how long an unused idle VM is kept.
+	// IdleTime is how long an unused idle VM is kept. Default 10m.
 	IdleTime Duration `json:"idle_time"`
+	// Policy sets warm VMs by time of day, as gitlab-runner's
+	// [[runners.autoscaler.policy]] does. Of the policies whose periods
+	// match, the last one applies; when none matches, no VMs are kept warm.
+	Policy []Policy `json:"policy"`
 	// AcquireTimeout is how long a job waits for a VM. Default 10m.
 	AcquireTimeout Duration `json:"acquire_timeout"`
 }
@@ -46,6 +53,50 @@ type Connector struct {
 	UseExternalAddr bool `json:"use_external_addr"`
 }
 
+// Policy is one entry of a class's policy list.
+type Policy struct {
+	// Periods are cron expressions ("* 8-18 * * mon-fri"); none means
+	// always.
+	Periods []string `json:"periods"`
+	// Timezone for Periods, such as "Europe/Warsaw". Default local time.
+	Timezone string `json:"timezone"`
+	// IdleCount is how many VMs to keep booted and waiting.
+	IdleCount int `json:"idle_count"`
+	// IdleTime is how long an unused idle VM is kept. Default 10m.
+	IdleTime Duration `json:"idle_time"`
+	// ScaleFactor keeps running jobs × ScaleFactor VMs warm when that is
+	// more than IdleCount.
+	ScaleFactor float64 `json:"scale_factor"`
+	// ScaleFactorLimit caps running jobs × ScaleFactor.
+	ScaleFactorLimit int `json:"scale_factor_limit"`
+}
+
+const defaultIdleTime = 10 * time.Minute
+
+// schedules turns the class's policies into taskscaler's.
+func (c Class) schedules() []taskscaler.Schedule {
+	policies := c.Policy
+	if len(policies) == 0 {
+		policies = []Policy{{IdleCount: c.IdleCount, IdleTime: c.IdleTime}}
+	}
+	out := make([]taskscaler.Schedule, len(policies))
+	for i, p := range policies {
+		idle := time.Duration(p.IdleTime)
+		if idle == 0 {
+			idle = defaultIdleTime
+		}
+		out[i] = taskscaler.Schedule{
+			Periods:          p.Periods,
+			Timezone:         p.Timezone,
+			IdleCount:        p.IdleCount,
+			IdleTime:         idle,
+			ScaleFactor:      p.ScaleFactor,
+			ScaleFactorLimit: p.ScaleFactorLimit,
+		}
+	}
+	return out
+}
+
 func (c Class) validate(name string) error {
 	if c.Plugin == "" {
 		return fmt.Errorf("class %q: plugin is required", name)
@@ -55,6 +106,23 @@ func (c Class) validate(name string) error {
 	}
 	if c.IdleCount < 0 || c.IdleCount > c.MaxInstances {
 		return fmt.Errorf("class %q: idle_count must be between 0 and max_instances", name)
+	}
+	if len(c.Policy) > 0 && (c.IdleCount != 0 || c.IdleTime != 0) {
+		return fmt.Errorf("class %q: set idle_count and idle_time in its policies, not beside them", name)
+	}
+	for i, p := range c.Policy {
+		where := fmt.Sprintf("class %q: policy %d", name, i+1)
+		if p.IdleCount < 0 || p.IdleCount > c.MaxInstances {
+			return fmt.Errorf("%s: idle_count must be between 0 and max_instances", where)
+		}
+		if p.ScaleFactor < 0 || p.ScaleFactorLimit < 0 {
+			return fmt.Errorf("%s: scale_factor and scale_factor_limit can't be negative", where)
+		}
+		for _, period := range p.Periods {
+			if _, err := cron.Parse(period, p.Timezone); err != nil {
+				return fmt.Errorf("%s: period %q: %w", where, period, err)
+			}
+		}
 	}
 	return nil
 }

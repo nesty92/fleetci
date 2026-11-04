@@ -30,8 +30,13 @@ const (
 	keyTTL     = 5 * time.Minute
 )
 
-// Config is the runner's [runners.autoscaler.plugin_config].
+// Config is the runner's [runners.autoscaler.plugin_config], or the file
+// it names in config_file.
 type Config struct {
+	// ConfigFile is a TOML file holding the settings below, with short
+	// table names. When set, plugin_config holds nothing else (but listen
+	// and nesting_path).
+	ConfigFile string `json:"config_file"`
 	// Listen is the gateway's loopback address. Default 127.0.0.1:0.
 	Listen string `json:"listen"`
 	// NestingPath must match vm_isolation.nesting_host. Default
@@ -63,6 +68,9 @@ type InstanceGroup struct {
 var _ provider.InstanceGroup = (*InstanceGroup)(nil)
 
 func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings provider.Settings) (provider.ProviderInfo, error) {
+	if err := g.loadFile(); err != nil {
+		return provider.ProviderInfo{}, err
+	}
 	if g.Listen == "" {
 		g.Listen = "127.0.0.1:0"
 	}

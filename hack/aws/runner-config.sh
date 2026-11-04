@@ -24,38 +24,42 @@ mkdir -p "$DATA/work" "$DATA/bin"
 out=$(cd "$HERE" && tofu output -json)
 region=$(printf '%s' "$out" | jq -r '.region.value')
 profile=$(printf '%s' "$out" | jq -r '.profile.value // empty')
-# Jobs without FLEETCI_CLASS get FLEETCI_DEFAULT_CLASS, else the first class
-# by name.
 # GitLab jobs all pass through fleetci's one gateway, so it takes up to the
 # sum of the classes' limits.
 total=$(printf '%s' "$out" | jq '[.classes.value[]] | add')
+# Jobs without FLEETCI_CLASS get FLEETCI_DEFAULT_CLASS, else the first class
+# by name.
 default=${FLEETCI_DEFAULT_CLASS:-$(printf '%s' "$out" | jq -r '.groups.value | keys | first')}
 
 classes=$(printf '%s' "$out" | jq -r --arg bin "$DATA/bin/fleeting-plugin-aws" --arg region "$region" --arg profile "$profile" '
   .groups.value | to_entries[] |
-  "      [runners.autoscaler.plugin_config.classes.\(.key)]\n" +
-  "        plugin = \"\($bin)\"\n" +
-  "        max_instances = \($out_classes[.key])\n" +
-  "        idle_count = 0\n" +
-  "        acquire_timeout = \"10m\"\n" +
-  "        [runners.autoscaler.plugin_config.classes.\(.key).plugin_config]\n" +
-  "          name = \"\(.value)\"\n" +
-  "          region = \"\($region)\"\n" +
-  (if $profile != "" then "          profile = \"\($profile)\"\n" else "" end) +
-  "        [runners.autoscaler.plugin_config.classes.\(.key).connector_config]\n" +
-  "          username = \"ubuntu\"\n" +
-  "          use_external_addr = true\n" +
-  "          timeout = \"5m\""
+  "[classes.\(.key)]\n" +
+  "plugin = \"\($bin)\"\n" +
+  "max_instances = \($out_classes[.key])\n" +
+  "acquire_timeout = \"10m\"\n" +
+  "plugin_config = { name = \"\(.value)\", region = \"\($region)\"" +
+  (if $profile != "" then ", profile = \"\($profile)\"" else "" end) + " }\n" +
+  "connector_config = { username = \"ubuntu\", use_external_addr = true, timeout = \"5m\" }\n"
 ' --argjson out_classes "$(printf '%s' "$out" | jq '.classes.value')")
 
 github=
 if [ -n "$GITHUB_REPOS" ]; then
   [ -r "$GITHUB_TOKEN_FILE" ] || { echo "no GitHub token in $GITHUB_TOKEN_FILE" >&2; exit 1; }
   repos=$(printf '%s\n' $GITHUB_REPOS | jq -R . | jq -sc .)
-  github="      [runners.autoscaler.plugin_config.github]
-        repos = $repos
-        token_file = \"$GITHUB_TOKEN_FILE\""
+  github="# GitHub Actions jobs on the same classes: runs-on: fleetci-<class>.
+[github]
+repos = $repos
+token_file = \"$GITHUB_TOKEN_FILE\""
 fi
+
+# fleetci's own settings: one class per Auto Scaling group. Every VM boots
+# for its job; add [[classes.<name>.policy]] to keep some warm.
+cat > "$DATA/fleetci.toml" <<TOML
+default_class = "$default"
+
+$classes
+$github
+TOML
 
 cat > "$DATA/config.toml" <<TOML
 concurrent = $total
@@ -71,13 +75,12 @@ log_level = "info"
     image = "alpine:3.22"
   [runners.autoscaler]
     plugin = "$DATA/bin/fleeting-plugin-fleetci"
+    # One gateway carries every GitLab job: up to the sum of the classes' limits.
     capacity_per_instance = $total
     max_use_count = 0
     max_instances = 1
     [runners.autoscaler.plugin_config]
-      default_class = "$default"
-$classes
-$github
+      config_file = "$DATA/fleetci.toml"
     [runners.autoscaler.connector_config]
       timeout = "2m"
     [runners.autoscaler.vm_isolation]
@@ -91,11 +94,12 @@ $github
         use_static_credentials = true
         timeout = "5m"
 TOML
-chmod 600 "$DATA/config.toml"
+chmod 600 "$DATA/config.toml" "$DATA/fleetci.toml"
 # shellcheck disable=SC2046 # class names have no spaces
 "$REPO/hack/ci-template.sh" fleetci "$default" $(printf '%s' "$out" | jq -r '.groups.value | keys[]') > "$DATA/fleetci.yml"
 chmod 644 "$DATA/fleetci.yml"
 
 echo "ready: $DATA"
+echo "  classes: $DATA/fleetci.toml"
 echo "  runner: gitlab-runner run --config $DATA/config.toml --working-directory $DATA/work"
 echo "  CI include: copy $DATA/fleetci.yml to .gitlab/fleetci.yml in your project"
