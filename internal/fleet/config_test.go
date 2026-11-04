@@ -101,6 +101,7 @@ func TestClassPolicyValidate(t *testing.T) {
 		"bad period":         {Plugin: "p", MaxInstances: 2, Policy: []Policy{{Periods: []string{"every day"}}}},
 		"bad timezone":       {Plugin: "p", MaxInstances: 2, Policy: []Policy{{Periods: []string{"* * * * *"}, Timezone: "Mars/Olympus"}}},
 		"negative factor":    {Plugin: "p", MaxInstances: 2, Policy: []Policy{{ScaleFactor: -1}}},
+		"preemptive mode":    {Plugin: "p", MaxInstances: 2, Policy: []Policy{{PreemptiveMode: new(bool)}}},
 	} {
 		if err := c.validate("x"); err == nil {
 			t.Errorf("%s: accepted", name)

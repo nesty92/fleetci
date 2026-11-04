@@ -69,6 +69,9 @@ type Policy struct {
 	ScaleFactor float64 `json:"scale_factor"`
 	// ScaleFactorLimit caps running jobs × ScaleFactor.
 	ScaleFactorLimit int `json:"scale_factor_limit"`
+	// PreemptiveMode is read only to reject it: it governs gitlab-runner's
+	// job reservations, which fleetci's classes don't make.
+	PreemptiveMode *bool `json:"preemptive_mode"`
 }
 
 const defaultIdleTime = 10 * time.Minute
@@ -114,6 +117,9 @@ func (c Class) validate(name string) error {
 		where := fmt.Sprintf("class %q: policy %d", name, i+1)
 		if p.IdleCount < 0 || p.IdleCount > c.MaxInstances {
 			return fmt.Errorf("%s: idle_count must be between 0 and max_instances", where)
+		}
+		if p.PreemptiveMode != nil {
+			return fmt.Errorf("%s: preemptive_mode doesn't apply to fleetci classes (it only affects gitlab-runner's own reservations); remove it", where)
 		}
 		if p.ScaleFactor < 0 || p.ScaleFactorLimit < 0 {
 			return fmt.Errorf("%s: scale_factor and scale_factor_limit can't be negative", where)

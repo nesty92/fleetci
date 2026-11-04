@@ -3,7 +3,7 @@ module github.com/nesty92/fleetci
 go 1.27.0
 
 require (
-	github.com/BurntSushi/toml v1.5.0
+	github.com/BurntSushi/toml v1.6.0
 	github.com/hashicorp/go-hclog v1.6.3
 	gitlab.com/gitlab-org/fleeting/fleeting v0.0.0-20261102084746-4085ca1ae366
 	gitlab.com/gitlab-org/fleeting/nesting v0.5.0
