@@ -52,9 +52,33 @@ A job asking for a class fleetci lacks, or for other labels besides
 carry actions/runner in `~/actions-runner-<version>` (both kits do); otherwise
 it is downloaded for each job.
 
+## Setup
+
+Write `fleetci.toml` (below), then let fleetci write gitlab-runner's side and
+check the whole install:
+
+```sh
+fleetci runner-config -config /etc/fleetci/fleetci.toml -token-file runner.token \
+  >> /etc/gitlab-runner/config.toml
+fleetci check -config /etc/fleetci/fleetci.toml
+```
+
+`runner-config` prints the `[[runners]]` entry: every value in it follows from
+`fleetci.toml`, so regenerate it rather than edit it. `check` changes nothing;
+it reports, one line each:
+
+- `fleetci.toml` loads and is valid;
+- each class's plugin starts, its credentials work and its group exists;
+- the GitHub token can list each repo's jobs and runners;
+- `config.toml` has fleetci's entry, naming each missing or wrong setting
+  with the line to write.
+
+It exits non-zero when anything fails.
+
 ## Configuration
 
-gitlab-runner's `config.toml` only points at fleetci's own file:
+gitlab-runner's `config.toml` only points at fleetci's own file
+(`fleetci runner-config` writes this part):
 
 ```toml
 [runners.autoscaler]

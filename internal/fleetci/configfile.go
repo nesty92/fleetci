@@ -3,6 +3,7 @@ package fleetci
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -83,4 +84,43 @@ func relativeTo(dir, path string) string {
 		return path
 	}
 	return filepath.Join(dir, path)
+}
+
+// Load reads a fleetci.toml.
+func Load(path string) (Config, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return Config{}, err
+	}
+	c := Config{ConfigFile: abs}
+	if err := c.loadFile(); err != nil {
+		return Config{}, err
+	}
+	return c, nil
+}
+
+// Validate checks the settings Init would reject, without starting
+// anything.
+func (c Config) Validate() error {
+	if len(c.Classes) == 0 {
+		return errors.New("no classes")
+	}
+	if _, ok := c.Classes[c.DefaultClass]; !ok {
+		return fmt.Errorf("default_class %q is not in classes", c.DefaultClass)
+	}
+	var errs []error
+	for _, name := range slices.Sorted(maps.Keys(c.Classes)) {
+		errs = append(errs, c.Classes[name].Validate(name))
+	}
+	return errors.Join(errs...)
+}
+
+// MaxInstances is the sum of the classes' limits: the most VMs, and so the
+// most GitLab jobs, fleetci runs at once.
+func (c Config) MaxInstances() int {
+	n := 0
+	for _, class := range c.Classes {
+		n += class.MaxInstances
+	}
+	return n
 }

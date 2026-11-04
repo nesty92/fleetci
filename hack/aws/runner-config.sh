@@ -17,16 +17,13 @@ GITHUB_TOKEN_FILE=${FLEETCI_GITHUB_TOKEN_FILE:-$HOME/.config/fleetci/github.toke
 umask 077
 mkdir -p "$DATA/work" "$DATA/bin"
 
-(cd "$REPO" && go build -o "$DATA/bin/" ./cmd/fleeting-plugin-fleetci)
+(cd "$REPO" && go build -o "$DATA/bin/" ./cmd/fleeting-plugin-fleetci ./cmd/fleetci)
 [ -x "$DATA/bin/fleeting-plugin-aws" ] ||
   GOBIN="$DATA/bin" go install "gitlab.com/gitlab-org/fleeting/plugins/aws/cmd/fleeting-plugin-aws@$AWS_PLUGIN_VERSION"
 
 out=$(cd "$HERE" && tofu output -json)
 region=$(printf '%s' "$out" | jq -r '.region.value')
 profile=$(printf '%s' "$out" | jq -r '.profile.value // empty')
-# GitLab jobs all pass through fleetci's one gateway, so it takes up to the
-# sum of the classes' limits.
-total=$(printf '%s' "$out" | jq '[.classes.value[]] | add')
 # Jobs without FLEETCI_CLASS get FLEETCI_DEFAULT_CLASS, else the first class
 # by name.
 default=${FLEETCI_DEFAULT_CLASS:-$(printf '%s' "$out" | jq -r '.groups.value | keys | first')}
@@ -61,43 +58,16 @@ $classes
 $github
 TOML
 
-cat > "$DATA/config.toml" <<TOML
-concurrent = $total
-check_interval = 3
-log_level = "info"
-
-[[runners]]
-  name = "fleetci-aws"
-  url = "https://gitlab.com"
-  token = "$(cat "$TOKEN_FILE")"
-  executor = "docker-autoscaler"
-  [runners.docker]
-    image = "alpine:3.22"
-  [runners.autoscaler]
-    plugin = "$DATA/bin/fleeting-plugin-fleetci"
-    # One gateway carries every GitLab job: up to the sum of the classes' limits.
-    capacity_per_instance = $total
-    max_use_count = 0
-    max_instances = 1
-    [runners.autoscaler.plugin_config]
-      config_file = "$DATA/fleetci.toml"
-    [runners.autoscaler.connector_config]
-      timeout = "2m"
-    [runners.autoscaler.vm_isolation]
-      enabled = true
-      nesting_host = "unix:///fleetci/nesting.sock"
-      image = "class-\${FLEETCI_CLASS}"
-      [runners.autoscaler.vm_isolation.connector_config]
-        os = "linux"
-        username = "ubuntu"
-        password = "unused"
-        use_static_credentials = true
-        timeout = "5m"
-TOML
+# gitlab-runner's side follows from fleetci.toml, so fleetci writes it.
+"$DATA/bin/fleetci" runner-config -global -config "$DATA/fleetci.toml" \
+  -name fleetci-aws -token-file "$TOKEN_FILE" -plugin "$DATA/bin/fleeting-plugin-fleetci" > "$DATA/config.toml"
 chmod 600 "$DATA/config.toml" "$DATA/fleetci.toml"
 # shellcheck disable=SC2046 # class names have no spaces
 "$REPO/hack/ci-template.sh" fleetci "$default" $(printf '%s' "$out" | jq -r '.groups.value | keys[]') > "$DATA/fleetci.yml"
 chmod 644 "$DATA/fleetci.yml"
+
+"$DATA/bin/fleetci" check -config "$DATA/fleetci.toml" -runner-config "$DATA/config.toml" ||
+  echo "fleetci check found problems; see above" >&2
 
 echo "ready: $DATA"
 echo "  classes: $DATA/fleetci.toml"

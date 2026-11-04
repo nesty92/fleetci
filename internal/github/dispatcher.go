@@ -11,9 +11,11 @@
 package github
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"slices"
 	"strconv"
@@ -88,24 +90,9 @@ type Dispatcher struct {
 // New checks the config and reads the token. Runners are started with
 // SSHStart unless start is set.
 func New(cfg Config, defaultClass string, backend Backend, start StartFunc, log hclog.Logger) (*Dispatcher, error) {
-	if len(cfg.Repos) == 0 {
-		return nil, errors.New("github: repos is required")
-	}
-	for _, r := range cfg.Repos {
-		if owner, name, ok := strings.Cut(r, "/"); !ok || owner == "" || name == "" || strings.Contains(name, "/") {
-			return nil, fmt.Errorf("github: repo %q must be owner/name", r)
-		}
-	}
-	if cfg.TokenFile == "" {
-		return nil, errors.New("github: token_file is required")
-	}
-	raw, err := os.ReadFile(cfg.TokenFile)
+	token, err := cfg.token()
 	if err != nil {
-		return nil, fmt.Errorf("github: reading token_file: %w", err)
-	}
-	token := strings.TrimSpace(string(raw))
-	if token == "" {
-		return nil, errors.New("github: token_file is empty")
+		return nil, err
 	}
 	if cfg.LabelPrefix == "" {
 		cfg.LabelPrefix = "fleetci"
@@ -138,6 +125,54 @@ func New(cfg Config, defaultClass string, backend Backend, start StartFunc, log 
 		taken:        map[int64]*attempt{},
 		warned:       map[int64]bool{},
 	}, nil
+}
+
+// token checks the repos and reads the token file.
+func (cfg Config) token() (string, error) {
+	if len(cfg.Repos) == 0 {
+		return "", errors.New("github: repos is required")
+	}
+	for _, r := range cfg.Repos {
+		if owner, name, ok := strings.Cut(r, "/"); !ok || owner == "" || name == "" || strings.Contains(name, "/") {
+			return "", fmt.Errorf("github: repo %q must be owner/name", r)
+		}
+	}
+	if cfg.TokenFile == "" {
+		return "", errors.New("github: token_file is required")
+	}
+	raw, err := os.ReadFile(cfg.TokenFile)
+	if err != nil {
+		return "", fmt.Errorf("github: reading token_file: %w", err)
+	}
+	token := strings.TrimSpace(string(raw))
+	if token == "" {
+		return "", errors.New("github: token_file is empty")
+	}
+	return token, nil
+}
+
+// Check proves the token can do what fleetci needs on each repo: list
+// queued jobs (Actions: read) and manage runners (Administration). It
+// registers nothing; whether the token may also write is only seen when
+// the first runner registers.
+func Check(ctx context.Context, cfg Config) map[string]error {
+	token, err := cfg.token()
+	if err != nil {
+		return map[string]error{"": err}
+	}
+	gh := newClient(cmp.Or(cfg.APIURL, "https://api.github.com"), token)
+	out := map[string]error{}
+	for _, repo := range cfg.Repos {
+		var errs []error
+		if err := gh.do(ctx, http.MethodGet, "/repos/"+repo+"/actions/runs?per_page=1", nil, nil); err != nil {
+			errs = append(errs, fmt.Errorf("listing jobs (needs Actions: read): %w", err))
+		}
+		if err := gh.do(ctx, http.MethodGet, "/repos/"+repo+"/actions/runners?per_page=1", nil, nil); err != nil {
+			errs = append(errs, fmt.Errorf("listing runners (needs Administration: read and write): %w", err))
+		}
+		out[repo] = errors.Join(errs...)
+	}
+	return out
 }
 
 // Run polls for queued jobs until ctx ends, then waits for its runners to
