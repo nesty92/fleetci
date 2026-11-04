@@ -9,11 +9,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/hashicorp/go-hclog"
-	"golang.org/x/crypto/ssh"
 
 	"gitlab.com/gitlab-org/fleeting/fleeting"
 	"gitlab.com/gitlab-org/fleeting/fleeting/provider"
@@ -87,7 +87,7 @@ func startPool(ctx context.Context, name string, c Class, log hclog.Logger) (*po
 		taskscaler.WithCapacityPerInstance(1),
 		taskscaler.WithMaxUseCount(1),
 		taskscaler.WithMaxInstances(c.MaxInstances),
-		taskscaler.WithInstanceUpFunc(dockerReady(c.Connector.UseExternalAddr, log)),
+		taskscaler.WithInstanceUpFunc(dockerReady(runner.InstanceGroup(), c.Connector.UseExternalAddr, log)),
 		taskscaler.WithDeleteInstancesOnShutdown(),
 	)
 	if err != nil {
@@ -228,37 +228,71 @@ func sweep(ctx context.Context, group provider.InstanceGroup, log hclog.Logger) 
 	}
 }
 
-// dockerReady admits an instance once Docker answers over SSH. Instances
-// that existed before fleetci started may have run a job already, so they
-// are removed instead.
-func dockerReady(external bool, log hclog.Logger) taskscaler.UpFunc {
+// dockerReady admits an instance once its setup has finished and Docker
+// answers over SSH. Instances that existed before fleetci started may have
+// run a job already, so they are removed instead.
+//
+// Every attempt opens a new connection with fresh credentials: a login made
+// while the VM's setup is still running keeps the groups it started with,
+// so it can stay locked out of Docker after setup adds the user to the
+// docker group. Short-lived keys (EC2 Instance Connect's last 60 seconds)
+// need the fresh ConnectInfo anyway.
+func dockerReady(group provider.InstanceGroup, external bool, log hclog.Logger) taskscaler.UpFunc {
 	return func(_ taskscaler.Taskscaler, inst taskscaler.UpFuncInstance) error {
 		if inst.Cause == fleeting.CausePreexisted {
 			return errors.New("instance existed before fleetci started; removing it")
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
 
-		client, err := proxy.Dial(ctx, target(inst.Info, external))
-		if err != nil {
-			return err
-		}
-		defer client.Close()
-
 		for {
-			err := run(client, "docker info --format '{{.ServerVersion}}' >/dev/null")
+			version, err := dockerVersion(ctx, group, inst.ID, external)
 			if err == nil {
-				log.Info("instance ready", "instance", inst.ID)
+				log.Info("instance ready", "instance", inst.ID, "docker", version)
 				return nil
 			}
+			log.Debug("instance not ready yet", "instance", inst.ID, "err", err)
 			select {
 			case <-ctx.Done():
 				return fmt.Errorf("docker not ready on %s: %w", inst.ID, err)
-			case <-time.After(time.Second):
+			case <-time.After(3 * time.Second):
 			}
 		}
 	}
+}
+
+// readyScript waits for cloud-init where the image has it, then asks the
+// Docker server for its version. The client alone can print an empty
+// version and exit 0 when no daemon answers, so the output is what counts.
+const readyScript = `if command -v cloud-init >/dev/null 2>&1; then cloud-init status --wait >/dev/null 2>&1 || true; fi
+docker version --format '{{.Server.Version}}'`
+
+func dockerVersion(ctx context.Context, group provider.InstanceGroup, id string, external bool) (string, error) {
+	info, err := group.ConnectInfo(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	client, err := proxy.Dial(ctx, target(info, external))
+	if err != nil {
+		return "", err
+	}
+	defer client.Close()
+
+	s, err := client.NewSession()
+	if err != nil {
+		return "", err
+	}
+	defer s.Close()
+	out, err := s.CombinedOutput(readyScript)
+	version := strings.TrimSpace(string(out))
+	if err != nil {
+		return "", fmt.Errorf("%w: %s", err, version)
+	}
+	if version == "" || strings.ContainsAny(version, " \n") {
+		return "", fmt.Errorf("docker server did not answer: %q", version)
+	}
+	return version, nil
 }
 
 // target picks the address to dial. As in fleeting's connector, a VM
@@ -268,15 +302,6 @@ func target(info provider.ConnectInfo, external bool) proxy.Target {
 		info.InternalAddr = info.ExternalAddr
 	}
 	return proxy.Target{Info: info}
-}
-
-func run(c *ssh.Client, cmd string) error {
-	s, err := c.NewSession()
-	if err != nil {
-		return err
-	}
-	defer s.Close()
-	return s.Run(cmd)
 }
 
 func randomHex(n int) string {
