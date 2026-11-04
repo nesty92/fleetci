@@ -15,14 +15,14 @@ func TestClassFromRunnerJSON(t *testing.T) {
 	  "idle_count": 1,
 	  "idle_time": "20m",
 	  "acquire_timeout": "10m",
-	  "plugin_config": {"name": "fleetci-test-small", "region": "eu-west-1"},
+	  "plugin_config": {"name": "fleetci-test-2vcpu-1gb", "region": "eu-west-1"},
 	  "connector_config": {"username": "ec2-user", "use_external_addr": true, "timeout": "5m"}
 	}`
 	var c Class
 	if err := json.Unmarshal([]byte(raw), &c); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.validate("small"); err != nil {
+	if err := c.validate("2vcpu-1gb"); err != nil {
 		t.Fatal(err)
 	}
 	if time.Duration(c.IdleTime) != 20*time.Minute || time.Duration(c.AcquireTimeout) != 10*time.Minute {
@@ -32,7 +32,7 @@ func TestClassFromRunnerJSON(t *testing.T) {
 		t.Errorf("connector: %+v", c.Connector)
 	}
 	var pc map[string]string
-	if err := json.Unmarshal(c.PluginConfig, &pc); err != nil || pc["name"] != "fleetci-test-small" {
+	if err := json.Unmarshal(c.PluginConfig, &pc); err != nil || pc["name"] != "fleetci-test-2vcpu-1gb" {
 		t.Errorf("plugin_config passed on as %s", c.PluginConfig)
 	}
 

@@ -1,15 +1,16 @@
 # AWS test: two classes, two Auto Scaling groups
 
 This tests fleetci's routing on AWS. Each class is an Auto Scaling group
-that `fleeting-plugin-aws` scales. `small` uses `t3.micro` and `large` uses
-`t3.small`, both on the AWS free plan. The names only matter to routing:
-a job with `FLEETCI_CLASS: large` must land in `fleetci-test-large`.
+that `fleeting-plugin-aws` scales, and is named after what it gives:
+`2vcpu-1gb` is `t3.micro` and `2vcpu-2gb` is `t3.small`, both on the AWS
+free plan. A job with `FLEETCI_CLASS: 2vcpu-2gb` must land in
+`fleetci-test-2vcpu-2gb`.
 
 ```
-your machine                                   AWS (default VPC)
-gitlab-runner ─ fleeting-plugin-fleetci        ASG fleetci-test-small (t3.micro)
-                  ├─ class small ─ fleeting-plugin-aws ─► ASG fleetci-test-large (t3.small)
-                  └─ class large ─ fleeting-plugin-aws
+your machine                                     AWS (default VPC)
+gitlab-runner ─ fleeting-plugin-fleetci          ASG fleetci-test-2vcpu-1gb (t3.micro)
+                  ├─ class 2vcpu-1gb ─ fleeting-plugin-aws ─► ASG fleetci-test-2vcpu-2gb (t3.small)
+                  └─ class 2vcpu-2gb ─ fleeting-plugin-aws
                   proxy ── SSH, 60-second EC2 Instance Connect key ──► VM public IP
 ```
 

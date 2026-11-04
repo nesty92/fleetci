@@ -10,12 +10,12 @@ gitlab-runner (docker-autoscaler, vm_isolation)
   ▼
 fleeting-plugin-fleetci  ── one process ──────────────────────────────────
   gateway  SSH on 127.0.0.1, accepts only keys it issued (ConnectInfo)
-    ├─ nesting socket → Create("class-large") → Acquire from class "large"
+    ├─ nesting socket → Create("class-4vcpu-6gb") → Acquire from that class
     ├─ "exit 0"       → the runner's health check; nothing else runs
     └─ fleetci-vm-…:22 → proxy: ends the runner's VM connection
                               (password "unused": it never leaves the process)
-  class "small": fleeting plugin + taskscaler, 1 idle VM, max 4
-  class "large": fleeting plugin + taskscaler, boots per job, max 2
+  class "1vcpu-2gb": fleeting plugin + taskscaler, 1 idle VM, max 4
+  class "4vcpu-6gb": fleeting plugin + taskscaler, boots per job, max 2
   ─────────────────────────────────────────────────────────────────────────
          └─ SSH with a key the class plugin just issued ─► VM ─► Docker
 ```
@@ -35,7 +35,7 @@ The job picks its class with one variable:
 build:
   tags: [fleetci]
   variables:
-    FLEETCI_CLASS: large   # unset → default class; unknown → system failure
+    FLEETCI_CLASS: 4vcpu-6gb   # unset → default class; unknown → system failure
 ```
 
 ## Run it
@@ -52,7 +52,7 @@ writes it only into `~/.local/share/fleetci-m0/config.toml` (mode 0600).
 ## What M0 found
 
 - `vm_isolation.image` is expanded with the job's variables, so
-  `class-${FLEETCI_CLASS}` reaches fleetci as `class-large`.
+  `class-${FLEETCI_CLASS}` reaches fleetci as `class-4vcpu-6gb`.
 - `vm_isolation.connector_config.key_path` is ignored; the runner logs in to
   a VM with `password` only. fleetci ends that connection itself, so the
   password is a placeholder.

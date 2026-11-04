@@ -34,12 +34,12 @@ func TestClassWithDockerPlugin(t *testing.T) {
 
 	group := "test-" + randomHex(3)
 	pluginCfg, _ := json.Marshal(map[string]string{
-		"name": group, "image": "fleetci-m0-vm", "network": network, "cpus": "1", "memory": "1g",
+		"name": group, "image": "fleetci-m0-vm", "network": network, "cpus": "1", "memory": "2g",
 	})
 
 	log := hclog.New(&hclog.LoggerOptions{Level: hclog.Info, Output: os.Stderr})
 	b, err := New(ctx, map[string]Class{
-		"small": {
+		"1vcpu-2gb": {
 			Plugin:       bin,
 			PluginConfig: pluginCfg,
 			Connector:    Connector{Username: "fleetci", Timeout: Duration(time.Minute)},
@@ -52,7 +52,7 @@ func TestClassWithDockerPlugin(t *testing.T) {
 	}
 	defer b.Shutdown(context.Background())
 
-	vm, err := b.Create(ctx, "small")
+	vm, err := b.Create(ctx, "1vcpu-2gb")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestClassWithDockerPlugin(t *testing.T) {
 
 	// Shut down while a VM is still booting: taking the idle VM makes
 	// taskscaler boot a replacement, and shutdown must remove it too.
-	vm2, err := b.Create(ctx, "small")
+	vm2, err := b.Create(ctx, "1vcpu-2gb")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -39,33 +39,33 @@ log_level = "info"
     max_use_count = 0
     max_instances = 1
     [runners.autoscaler.plugin_config]
-      default_class = "small"
-      # small keeps one VM booted and waiting; large boots per job.
-      [runners.autoscaler.plugin_config.classes.small]
+      default_class = "1vcpu-2gb"
+      # 1vcpu-2gb keeps one VM booted and waiting; 4vcpu-6gb boots per job.
+      [runners.autoscaler.plugin_config.classes.1vcpu-2gb]
         plugin = "$DATA/bin/fleeting-plugin-dockervm"
         max_instances = 4
         idle_count = 1
         idle_time = "20m"
-        [runners.autoscaler.plugin_config.classes.small.plugin_config]
-          name = "small"
+        [runners.autoscaler.plugin_config.classes.1vcpu-2gb.plugin_config]
+          name = "1vcpu-2gb"
           image = "fleetci-m0-vm"
           network = "$NET"
           cpus = "1"
           memory = "2g"
-        [runners.autoscaler.plugin_config.classes.small.connector_config]
+        [runners.autoscaler.plugin_config.classes.1vcpu-2gb.connector_config]
           username = "fleetci"
           timeout = "2m"
-      [runners.autoscaler.plugin_config.classes.large]
+      [runners.autoscaler.plugin_config.classes.4vcpu-6gb]
         plugin = "$DATA/bin/fleeting-plugin-dockervm"
         max_instances = 2
         idle_count = 0
-        [runners.autoscaler.plugin_config.classes.large.plugin_config]
-          name = "large"
+        [runners.autoscaler.plugin_config.classes.4vcpu-6gb.plugin_config]
+          name = "4vcpu-6gb"
           image = "fleetci-m0-vm"
           network = "$NET"
           cpus = "4"
           memory = "6g"
-        [runners.autoscaler.plugin_config.classes.large.connector_config]
+        [runners.autoscaler.plugin_config.classes.4vcpu-6gb.connector_config]
           username = "fleetci"
           timeout = "2m"
     [runners.autoscaler.connector_config]

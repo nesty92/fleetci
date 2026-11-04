@@ -26,8 +26,8 @@ variable "classes" {
     max_instances  = number
   }))
   default = {
-    small = { instance_types = ["t3.micro"], max_instances = 2 }
-    large = { instance_types = ["t3.small"], max_instances = 2 }
+    "2vcpu-1gb" = { instance_types = ["t3.micro"], max_instances = 2 }
+    "2vcpu-2gb" = { instance_types = ["t3.small"], max_instances = 2 }
   }
 }
 

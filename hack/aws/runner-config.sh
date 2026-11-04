@@ -56,7 +56,7 @@ log_level = "info"
     max_use_count = 0
     max_instances = 1
     [runners.autoscaler.plugin_config]
-      default_class = "small"
+      default_class = "2vcpu-1gb"
 $classes
     [runners.autoscaler.connector_config]
       timeout = "2m"

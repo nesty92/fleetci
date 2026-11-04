@@ -19,12 +19,12 @@ func (fakeBackend) Delete(context.Context, string) error { return nil }
 func (fakeBackend) Shutdown(context.Context) error       { return nil }
 
 func TestClassFor(t *testing.T) {
-	h := NewHypervisor("small", fakeBackend{"small": true, "large": true}, hclog.NewNullLogger())
+	h := NewHypervisor("1vcpu-2gb", fakeBackend{"1vcpu-2gb": true, "4vcpu-6gb": true}, hclog.NewNullLogger())
 
 	for name, want := range map[string]string{
-		"class-large": "large",
-		"class-small": "small",
-		"class-":      "small", // FLEETCI_CLASS unset
+		"class-4vcpu-6gb": "4vcpu-6gb",
+		"class-1vcpu-2gb": "1vcpu-2gb",
+		"class-":          "1vcpu-2gb", // FLEETCI_CLASS unset
 	} {
 		got, err := h.ClassFor(name)
 		if err != nil || got != want {
