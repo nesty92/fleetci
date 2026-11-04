@@ -31,6 +31,10 @@ A misspelled class fails when the pipeline is created
 (`unknown keys in extends`), before any VM boots. GitLab does not pass a job's
 tags to the runner, so the class can't be a tag alone.
 
+On AWS spot a Linux job costs about a ninth of a GitHub-hosted one; see
+[docs/cost.md](docs/cost.md) for the comparison on 104M real jobs, network
+and caches included.
+
 ## GitHub Actions
 
 The same classes serve GitHub Actions. Labels reach fleetci there, so the class
