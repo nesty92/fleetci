@@ -1,8 +1,11 @@
 #!/bin/sh
-# M1: M0 with one class on real microVMs. 4vcpu-6gb boots Cloud Hypervisor
-# VMs through fleeting-plugin-fleetingd; 1vcpu-2gb stays on dockervm. Both
-# run inside the fleetci-m1 container, which gets /dev/kvm and its own
-# network namespace for fleetingd's tap devices and nftables rules.
+# M1: M0 with real microVMs. 4vcpu-6gb boots Cloud Hypervisor VMs through
+# fleeting-plugin-fleetingd; 1vcpu-2gb stays on dockervm, or with
+# FLEETCI_M1_SMALL=fleetingd becomes a second fleetingd group on the same
+# host. Everything runs inside the fleetci-m1 container, which gets /dev/kvm
+# and its own network namespace for fleetingd's tap devices and nftables
+# rules. fleetingd is built from our fork when it is checked out next to
+# fleetci (FLEETCI_FLEETINGD_SRC), else the upstream release in the image.
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
@@ -14,12 +17,22 @@ GITHUB_TOKEN_FILE=${FLEETCI_GITHUB_TOKEN_FILE:-$HOME/.config/fleetci/github.toke
 # Optional Actions cache server (hack/cache/up.sh prints its URL).
 GITHUB_CACHE_URL=${FLEETCI_GITHUB_CACHE_URL:-}
 RUNNER_VERSION=2.338.2
+SMALL=${FLEETCI_M1_SMALL:-dockervm}
+FD_SRC=${FLEETCI_FLEETINGD_SRC:-$REPO/../fleeting-plugin-fleetingd}
 
 [ -c /dev/kvm ] || { echo "no /dev/kvm" >&2; exit 1; }
 umask 077
-mkdir -p "$DATA/work" "$DATA/bin" "$DATA/vms"
+mkdir -p "$DATA/work" "$DATA/bin" "$DATA/vms" "$DATA/vms-small"
 
 (cd "$REPO" && CGO_ENABLED=0 go build -o "$DATA/bin/" ./cmd/fleeting-plugin-fleetci ./cmd/fleetci ./cmd/fleeting-plugin-dockervm)
+fleetingd=/usr/local/bin/fleeting-plugin-fleetingd
+if [ -d "$FD_SRC/cmd/fleeting-plugin-fleetingd" ]; then
+  # main.go embeds LICENSE and NOTICE, which upstream's CI puts there.
+  cp "$FD_SRC/LICENSE" "$FD_SRC/cmd/fleeting-plugin-fleetingd/"
+  [ -f "$FD_SRC/cmd/fleeting-plugin-fleetingd/NOTICE" ] || echo "local build" > "$FD_SRC/cmd/fleeting-plugin-fleetingd/NOTICE"
+  (cd "$FD_SRC" && CGO_ENABLED=0 go build -o "$DATA/bin/fleeting-plugin-fleetingd" ./cmd/fleeting-plugin-fleetingd)
+  fleetingd=$DATA/bin/fleeting-plugin-fleetingd
+fi
 docker build -q -t fleetci-m0-vm "$REPO/hack/m0/vm" >/dev/null
 docker build -q -t fleetci-m1-host "$HERE" >/dev/null
 docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null
@@ -36,31 +49,24 @@ token_file = \"$GITHUB_TOKEN_FILE\""
 cache_url = \"$GITHUB_CACHE_URL\""
 fi
 
-# fleetingd builds its image once (Ubuntu 26.04 cloud image, then these
-# commands, then cloud-init clean) and clones it per VM. The commands are
-# cloud-init runcmd entries: keep them free of ': ' and ' #'.
-cat > "$DATA/fleetci.toml" <<TOML
-default_class = "1vcpu-2gb"
-
-[classes.1vcpu-2gb]
-plugin = "$DATA/bin/fleeting-plugin-dockervm"
-max_instances = 3
-plugin_config = { name = "1vcpu-2gb", image = "fleetci-m0-vm", network = "$NET", cpus = "1", memory = "2g" }
-connector_config = { username = "fleetci", timeout = "2m" }
-
-[classes.4vcpu-6gb]
-plugin = "/usr/local/bin/fleeting-plugin-fleetingd"
-max_instances = 2
+# fleetingd_class <class> <group name> <subnet> <disk dir> <cpus> <MB> <max>
+fleetingd_class() {
+  cat <<CLASS
+[classes.$1]
+plugin = "$fleetingd"
+max_instances = $7
 connector_config = { username = "ubuntu", timeout = "5m" }
 
-[classes.4vcpu-6gb.plugin_config]
+[classes.$1.plugin_config]
+name = "$2"
 egress_interface = "eth0"
-vm_disk_directory = "$DATA/vms"
-vm_subnet = "172.16.120."
-vm_num_cpu_cores = 4
-vm_memory_mb = 6144
+vm_disk_directory = "$4"
+vm_subnet = "$3"
+vm_num_cpu_cores = $5
+vm_memory_mb = $6
 vm_disk_size_gb = 30
 vm_enable_virtio_console = true
+vm_package_upgrade = false
 vm_prebuild_cloudinit_extra_cmds = [
   "DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-buildx git zstd",
   "usermod -aG docker ubuntu",
@@ -70,6 +76,27 @@ vm_prebuild_cloudinit_extra_cmds = [
   "systemctl mask fail2ban.service chrony-wait.service",
   "systemctl mask apt-daily.timer apt-daily-upgrade.timer motd-news.timer update-notifier-download.timer fwupd-refresh.timer",
 ]
+CLASS
+}
+
+if [ "$SMALL" = fleetingd ]; then
+  small=$(fleetingd_class 1vcpu-2gb fd1 172.16.121. "$DATA/vms-small" 1 2048 2)
+else
+  small='[classes.1vcpu-2gb]
+plugin = "'"$DATA"'/bin/fleeting-plugin-dockervm"
+max_instances = 3
+plugin_config = { name = "1vcpu-2gb", image = "fleetci-m0-vm", network = "'"$NET"'", cpus = "1", memory = "2g" }
+connector_config = { username = "fleetci", timeout = "2m" }'
+fi
+
+# fleetingd builds its image once (Ubuntu 26.04 cloud image, then these
+# commands, then cloud-init clean) and clones it per VM. The commands are
+# cloud-init runcmd entries: keep them free of ': ' and ' #'.
+cat > "$DATA/fleetci.toml" <<TOML
+default_class = "1vcpu-2gb"
+
+$small
+$(fleetingd_class 4vcpu-6gb fd4 172.16.120. "$DATA/vms" 4 6144 2)
 $github
 TOML
 
