@@ -45,7 +45,9 @@ jobs:
 With a `[github]` table in the config, fleetci lists each repo's queued jobs,
 takes a VM of the job's class from the same pool gitlab-runner uses, registers
 a just-in-time runner with the job's labels and starts it on the VM over SSH.
-The runner takes one job and exits; the VM is removed.
+The runner takes one job and exits; the VM is removed. Steps run on the VM
+itself, as on GitHub's `ubuntu-latest`; `container:` and `services:` use its
+Docker. GitLab jobs always run in a container on the VM.
 
 A job asking for a class fleetci lacks, or for other labels besides
 `self-hosted` and `linux`, stays queued and is logged. The VM image should
@@ -152,7 +154,7 @@ gitlab-runner's `config.toml` only points at fleetci's own file
 ```toml
 [runners.autoscaler]
   plugin = "fleeting-plugin-fleetci"
-  capacity_per_instance = 8   # GitLab jobs at once: the sum of the classes' limits
+  capacity_per_instance = 12  # GitLab jobs at once: the sum of the classes' limits
   max_instances = 1
   [runners.autoscaler.plugin_config]
     config_file = "/etc/fleetci/fleetci.toml"
@@ -165,6 +167,12 @@ gitlab-runner's `config.toml` only points at fleetci's own file
 ```toml
 # /etc/fleetci/fleetci.toml
 default_class = "2vcpu-4gb"
+
+[classes.2vcpu-2gb]            # linters and small checks
+plugin = "fleeting-plugin-aws"
+max_instances = 6
+plugin_config = { name = "fleetci-2vcpu-2gb", region = "eu-north-1" }
+connector_config = { username = "ubuntu", use_external_addr = true }
 
 [classes.2vcpu-4gb]
 plugin = "fleeting-plugin-aws"
