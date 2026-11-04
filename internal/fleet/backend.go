@@ -108,6 +108,9 @@ func startPool(ctx context.Context, name string, c Class, groups map[string]stri
 		taskscaler.WithMaxInstances(c.MaxInstances),
 		taskscaler.WithInstanceUpFunc(dockerReady(runner.InstanceGroup(), c.Connector.UseExternalAddr, log)),
 		taskscaler.WithDeleteInstancesOnShutdown(),
+		// A job is waiting while instances are expected: look every second
+		// instead of every two. One list call per second per scaling class.
+		taskscaler.WithUpdateIntervalWhenExpecting(time.Second),
 	)
 	if err != nil {
 		runner.Kill()
@@ -282,6 +285,7 @@ func dockerReady(group provider.InstanceGroup, external bool, log hclog.Logger) 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
 
+		wait := 500 * time.Millisecond
 		for {
 			version, err := dockerVersion(ctx, group, inst.ID, external)
 			if err == nil {
@@ -292,8 +296,11 @@ func dockerReady(group provider.InstanceGroup, external bool, log hclog.Logger) 
 			select {
 			case <-ctx.Done():
 				return fmt.Errorf("docker not ready on %s: %w", inst.ID, err)
-			case <-time.After(3 * time.Second):
+			case <-time.After(wait):
 			}
+			// SSH comes up seconds into boot: retry soon, then back off so a
+			// slow VM costs few ConnectInfo calls (an API call on EC2).
+			wait = min(wait*3/2, 3*time.Second)
 		}
 	}
 }
