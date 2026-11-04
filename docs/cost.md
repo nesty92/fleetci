@@ -1,6 +1,6 @@
 # What fleetci costs next to GitHub-hosted runners
 
-fleetci on AWS spot runs a Linux CI job for about a ninth of what GitHub's
+fleetci on AWS spot runs a Linux CI job for about a tenth of what GitHub's
 hosted runners charge. That holds as long as image pulls don't go through a
 NAT gateway. It serves only Linux, though, and on GitHub macOS makes up 41% of
 the hosted bill.
@@ -19,9 +19,22 @@ list prices on 2026-11-04. [hack/cost](../hack/cost) reproduces every number.
   cost nothing on GitHub; a $0.002/min charge for them was announced for March
   2026 and postponed.
 - **fleetci** pays EC2 per second with a 60 s minimum for one fresh VM per job,
-  boot included. With a baked image the VM takes 45–90 s before the job starts.
-  Each VM also has its disk (30 GiB gp3), and the Runner Manager is a fixed
-  cost.
+  boot included. Each VM also has its disk (30 GiB gp3), and the Runner
+  Manager is a fixed cost.
+
+## Boot time
+
+Not yet measured with a baked image. The boots seen so far ran a boot script
+that installed Docker and actions/runner, which a baked image no longer does.
+Published EC2 figures for a ready image: about 7–8 s from RunInstances to
+running, then a few seconds to SSH (2.8 s for a tuned Ubuntu 24.04, 13 s for
+a stock one on a t3.micro). Add the Auto Scaling group's launch, the plugin's
+polling and fleetci waiting for cloud-init and Docker, and a baked image should
+start a job in about 20–40 s. The figures below take 20–30 s, and show 90 s as
+a worst case.
+
+Boot time hardly moves the cost, because EC2 bills at least 60 s anyway: a
+job that ends in 20 s pays for a minute either way. It moves the wait.
 
 ## Job durations
 
@@ -36,7 +49,7 @@ that succeeded, failed or were cancelled, longer than 0 s and at most 6 h.
 | Under 1 min | 34% of jobs, 1.8% of minutes |
 | 10 min or longer | 18% of jobs, 72% of minutes |
 | GitHub billed minutes per job | 7.64 (rounding adds 7.8%) |
-| fleetci VM minutes per job | 7.85 (45 s boot) to 8.58 (90 s boot) |
+| fleetci VM minutes per job | 7.53 (20 s boot) to 8.58 (90 s boot) |
 
 GitHub's rounding and fleetci's boot cost about the same, so the per-minute
 price decides.
@@ -72,10 +85,12 @@ minute) and are billed 5.37 minutes each:
 | | Per job | Against GitHub |
 |---|---|---|
 | GitHub Linux 2-core | $0.0322 | |
-| fleetci, m7i.large spot (2 vCPU, 8 GiB) | $0.0035–0.0039 | 8.2–9.3× cheaper |
-| fleetci, m7i.large on-demand | $0.0102 | 3.1× cheaper |
+| fleetci, m7i.large spot (2 vCPU, 8 GiB), 20–30 s boot | $0.0033–0.0034 | 9.6–9.8× cheaper |
+| the same, 90 s boot | $0.0039 | 8.2× cheaper |
+| fleetci, m7i.large on-demand, 30 s boot | $0.0099 | 3.3× cheaper |
 
-Larger sizes, using every job's durations:
+Larger sizes, using every job's durations and the older 45–90 s boot, so
+slightly conservative:
 
 | Machine | GitHub | fleetci spot | Against GitHub |
 |---|---|---|---|
@@ -106,13 +121,13 @@ again. GitHub's hosted runners do the same, but there GitHub pays for the traffi
 | S3 in the same region through a gateway endpoint | free; storage $0.023/GB-month |
 
 The NAT charge is the one that matters. Per Linux 2-core job (GitHub $0.0322,
-fleetci $0.0039):
+fleetci $0.0034 with a 30 s boot):
 
 | Downloaded per job | Through NAT | Public subnet |
 |---|---|---|
-| 0.2 GB | $0.0131 (2.5× cheaper) | $0.0044 (7.3× cheaper) |
-| 0.5 GB | $0.0269 (1.2× cheaper) | $0.0044 |
-| 1 GB | $0.0499 (1.5× **dearer**) | $0.0044 |
+| 0.2 GB | $0.0126 (2.6× cheaper) | $0.0038 (8.4× cheaper) |
+| 0.5 GB | $0.0264 (1.2× cheaper) | $0.0038 |
+| 1 GB | $0.0494 (1.5× **dearer**) | $0.0038 |
 
 So:
 
@@ -141,10 +156,11 @@ either way; the boot is what hurts. What others do:
   $0.0009/min for 2 ARM vCPUs, plus its licence.
 
 A sub-minute job on fleetci's `1vcpu-2gb` (c7a.medium spot, disk included)
-costs about $0.0004, against $0.002 on `ubuntu-slim`. The price is fine; the 45–90 s
-boot is not. A warm VM (`idle_count`) removes the wait, at the cost of its
-idle hours. A container per job on a shared VM, as `ubuntu-slim` does, would
-remove the wait without paying for idle time, but gives up a VM per job.
+costs about $0.0003, against $0.002 on `ubuntu-slim`. The price is fine; the
+wait is not. Even a 20–40 s boot is long for a 10 s check. A warm VM
+(`idle_count`) removes the wait, at the cost of its idle hours. A container
+per job on a shared VM, as `ubuntu-slim` does, would remove it without paying
+for idle time, but gives up a VM per job.
 
 ## Fixed costs
 
@@ -153,15 +169,15 @@ remove the wait without paying for idle time, but gives up a VM per job.
 | Runner Manager (t3.nano, 8 GiB) | $4.58 |
 | NAT gateway, if there is none already | $33.58 |
 
-With Linux 2-core jobs ($0.0322 on GitHub, $0.0039 on fleetci), fleetci pays
-for itself from about 162 jobs a month, or about 1,350 if it needs a NAT
+With Linux 2-core jobs ($0.0322 on GitHub, $0.0034 on fleetci), fleetci pays
+for itself from about 159 jobs a month, or about 1,325 if it needs a NAT
 gateway of its own.
 
 | Linux jobs a month | GitHub | fleetci (spot, no NAT) |
 |---|---|---|
 | 1,000 | $32 | $8 |
-| 10,000 | $322 | $44 |
-| 100,000 | $3,220 | $395 |
+| 10,000 | $322 | $39 |
+| 100,000 | $3,220 | $345 |
 
 ## macOS, next
 
