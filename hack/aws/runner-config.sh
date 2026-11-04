@@ -40,7 +40,7 @@ classes=$(printf '%s' "$out" | jq -r --arg bin "$DATA/bin/fleeting-plugin-aws" -
   "          region = \"\($region)\"\n" +
   (if $profile != "" then "          profile = \"\($profile)\"\n" else "" end) +
   "        [runners.autoscaler.plugin_config.classes.\(.key).connector_config]\n" +
-  "          username = \"ec2-user\"\n" +
+  "          username = \"ubuntu\"\n" +
   "          use_external_addr = true\n" +
   "          timeout = \"5m\""
 ' --argjson out_classes "$(printf '%s' "$out" | jq '.classes.value')")
@@ -86,7 +86,7 @@ $github
       image = "class-\${FLEETCI_CLASS}"
       [runners.autoscaler.vm_isolation.connector_config]
         os = "linux"
-        username = "ec2-user"
+        username = "ubuntu"
         password = "unused"
         use_static_credentials = true
         timeout = "5m"

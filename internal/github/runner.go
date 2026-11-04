@@ -23,7 +23,7 @@ case $(uname -m) in
   aarch64|arm64) arch=arm64 ;;
   *) echo "unsupported architecture $(uname -m)" >&2; exit 1 ;;
 esac
-dir=$HOME/actions-runner
+dir=$HOME/actions-runner-%[1]s
 if [ ! -x "$dir/run.sh" ]; then
   mkdir -p "$dir"
   curl -fsSL "https://github.com/actions/runner/releases/download/v%[1]s/actions-runner-linux-$arch-%[1]s.tar.gz" | tar -xz -C "$dir"

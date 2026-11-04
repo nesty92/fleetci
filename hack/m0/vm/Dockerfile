@@ -14,6 +14,11 @@ RUN apt-get update \
  && useradd -m -s /bin/bash -G docker fleetci \
  && usermod -p '*' fleetci \
  && mkdir -p /run/sshd
+# actions/runner for GitHub jobs, at the version fleetci runs by default.
+ARG RUNNER_VERSION=2.338.2
+RUN install -d -o fleetci -g fleetci /home/fleetci/actions-runner-$RUNNER_VERSION \
+ && curl -fsSL "https://github.com/actions/runner/releases/download/v$RUNNER_VERSION/actions-runner-linux-x64-$RUNNER_VERSION.tar.gz" \
+  | su fleetci -c "tar -xz -C /home/fleetci/actions-runner-$RUNNER_VERSION"
 COPY --from=docker:29-dind /usr/local/bin/dind /usr/local/bin/dind
 COPY sshd_config /etc/ssh/sshd_config
 COPY entrypoint.sh /usr/local/bin/fleetci-vm

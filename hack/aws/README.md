@@ -21,7 +21,7 @@ instance profile, so no AWS credentials.
 ## What it creates
 
 - one security group: SSH in from `operator_cidr` only, all traffic out;
-- one launch template: Amazon Linux 2023 with Docker, IMDSv2 with a hop
+- one launch template: Ubuntu 24.04 with Docker and actions/runner, IMDSv2 with a hop
   limit of 1, encrypted 20 GiB gp3;
 - one Auto Scaling group per class: desired 0, min 0, scale-in protection
   on, `AZRebalance` suspended, as fleeting-plugin-aws asks.

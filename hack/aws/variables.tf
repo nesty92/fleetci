@@ -36,3 +36,9 @@ variable "use_spot" {
   type        = bool
   default     = false
 }
+
+variable "github_runner_version" {
+  description = "actions/runner release unpacked on every VM, for GitHub Actions jobs. Keep it equal to fleetci's runner_version."
+  type        = string
+  default     = "2.338.2"
+}

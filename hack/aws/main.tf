@@ -17,8 +17,8 @@ data "aws_subnets" "default" {
   }
 }
 
-data "aws_ssm_parameter" "al2023" {
-  name = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
+data "aws_ssm_parameter" "ubuntu" {
+  name = "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id"
 }
 
 # VMs accept SSH from the operator only. They cannot reach each other: the
@@ -44,15 +44,15 @@ resource "aws_vpc_security_group_ingress_rule" "ssh" {
 
 resource "aws_vpc_security_group_egress_rule" "all" {
   security_group_id = aws_security_group.vm.id
-  description       = "Image pulls, GitLab, cache and artifacts"
+  description       = "Image pulls, GitLab, GitHub, cache and artifacts"
   cidr_ipv4         = "0.0.0.0/0"
   ip_protocol       = "-1"
 }
 
 resource "aws_launch_template" "vm" {
   name_prefix = "fleetci-test-vm-"
-  image_id    = data.aws_ssm_parameter.al2023.value
-  user_data   = filebase64("${path.module}/user-data.sh")
+  image_id    = data.aws_ssm_parameter.ubuntu.value
+  user_data   = base64encode(templatefile("${path.module}/user-data.sh", { runner_version = var.github_runner_version }))
 
   vpc_security_group_ids = [aws_security_group.vm.id]
 
@@ -67,7 +67,7 @@ resource "aws_launch_template" "vm" {
   }
 
   block_device_mappings {
-    device_name = "/dev/xvda"
+    device_name = "/dev/sda1"
     ebs {
       volume_size           = 20
       volume_type           = "gp3"
