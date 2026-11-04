@@ -74,6 +74,27 @@ With `copyonwrite` the clones share the snapshot's pages through the page
 cache, so three cost about one copy of what they read plus 100 MB each.
 `ondemand` faults in all 6 GB per clone. No fleeting plugin does this yet.
 
+### Firecracker, for comparison
+
+`snap/fc-run.sh` runs the same experiment on Firecracker 1.17 with its CI
+kernel (6.1) and the same image, sizes and clones. The CI kernel has no GPT,
+ISO9660/FAT or nf_tables. So the script extracts the root partition to a plain
+ext4 file (once, 53 s) and writes the cloud-init seed into it. It also drops
+the EFI mount from fstab, and the guest switches to iptables-legacy.
+
+| | Cloud Hypervisor | Firecracker |
+| --- | --- | --- |
+| cold boot to `docker version` | 6.7 s (kernel 0.2 s) | 6.6 s (kernel 0.8 s) |
+| restore to `docker version` | 0.34–0.37 s | 0.62 s |
+| memory per clone, resident / private | 620 / 93 MB | 340 / 84 MB |
+| clone disk | qcow2 overlay, instant | raw only: 4.4 GB copy, 4.6–5.3 s |
+| RNG after restore | reseed by hand | VMGenID reseeds it |
+| `docker run` on the default bridge | works | fails: the CI kernel lacks the iptables raw table |
+
+Firecracker uses less memory, but it needs a kernel of our own for Docker's
+networking. Without reflinks or device-mapper snapshots, every clone copies
+its disk. Cloud Hypervisor runs Ubuntu's own kernel and image as they are.
+
 ## Limits
 
 - fleetingd allows one class per machine: its nftables table names and
