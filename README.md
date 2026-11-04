@@ -207,7 +207,3 @@ one policy at all times. Every class takes `acquire_timeout` (how long a job
 waits for a VM, default 10m). Unknown keys are errors; relative paths are
 relative to the file. Each class's `plugin_config` goes to its fleeting plugin
 as it is.
-
-Status: early. [hack/m0](hack/m0/README.md) runs everything on one machine
-with containers as VMs; [hack/aws](hack/aws/README.md) on two Auto Scaling
-groups.
