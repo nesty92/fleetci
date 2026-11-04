@@ -103,6 +103,22 @@ the image, so nf_tables and the raw table load and Docker works as is.
 | `docker run` on the default bridge | works |
 
 The restore is slower than with the CI kernel (0.62 s), and the cause isn't measured yet.
+Cold boots side by side (`snap/boot-run.sh`, 3 each, Ubuntu's kernel in both,
+a new cloud-init instance every boot). Each cell gives the time from process
+start to SSH, then to `docker version`:
+
+| | SSH | ready | guest kernel + userspace |
+| --- | --- | --- | --- |
+| Cloud Hypervisor | 4.8–5.8 s | 5.2–6.3 s | 0.2 + 3.8–4.2 s |
+| Firecracker, serial console | 5.7–6.9 s | 6.2–7.3 s | 0.7 + 4.2–4.8 s |
+| Firecracker, `quiet`, i8042 off | 4.7 s | 5.1–5.2 s | 0.2 + 3.2–4.0 s |
+
+Firecracker's emulated serial console was what made its kernel slow. Quiet,
+both boot alike. Firecracker adds 1.3 s to copy the raw disk, which
+Cloud Hypervisor's qcow2 overlay avoids. In both, the slowest unit is
+`systemd-networkd-wait-online` at 1.1–2.0 s, though the network is
+static. `systemd-binfmt` costs Firecracker another 0.9 s.
+
 With Firecracker's own kernel, `DOCKER_INSECURE_NO_IPTABLES_RAW=1` in
 Docker's environment skips the raw-table rule instead. That's untested here.
 
