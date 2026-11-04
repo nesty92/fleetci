@@ -162,6 +162,61 @@ wait is not. Even a 20–40 s boot is long for a 10 s check. A warm VM
 per job on a shared VM, as `ubuntu-slim` does, would remove it without paying
 for idle time, but gives up a VM per job.
 
+## Against other CI services and OVHcloud
+
+The same workload, one Linux 2-core job (5.37 billed minutes where a service
+rounds to the minute, 4.78 where it bills by the second, 5.39 VM minutes for
+fleetci with a 30 s boot). Euro prices at $1.15 per euro, an assumed rate.
+
+| Option | Per job | Against GitHub |
+|---|---|---|
+| GitLab.com small, 2 vCPU 8 GB ($0.01/min) | $0.0478 | 1.5× dearer |
+| Buildkite hosted, 2 vCPU ($0.008/min) | $0.0430 | 1.3× dearer |
+| GitHub-hosted 2-core ($0.006/min) | $0.0322 | |
+| CircleCI medium (10 credits, $0.006/min) | $0.0322 | same |
+| Depot 2 vCPU ($0.006/min, per second) | $0.0287 | 1.1× cheaper |
+| Blacksmith, WarpBuild 2 vCPU ($0.004/min) | $0.0215 | 1.5× cheaper |
+| Namespace 2 vCPU ($0.002–0.003/min) | $0.0134 | 2.4× cheaper |
+| Ubicloud 2 vCPU ($0.00125/min) | $0.0067 | 4.8× cheaper |
+| fleetci, OVH b3-8 VM, 2 vCPU 8 GB (€0.0512/h) | $0.0053 | 6.1× cheaper |
+| fleetci, OVH c3-4 VM, 2 vCPU 4 GB (€0.0457/h) | $0.0047 | 6.8× cheaper |
+| fleetci, AWS m7i.large spot | $0.0034 | 9.5× cheaper |
+| fleetci, OVH d2-4 VM, 2 shared vCPU 4 GB (€0.0198/h) | $0.0020 | 16× cheaper |
+| fleetci, OVH ADVANCE-1 bare metal with Firecracker, 50% busy | $0.0049 | 6.6× cheaper |
+| the same, 100% busy | $0.0024 | 13× cheaper |
+
+**OVHcloud Public Cloud VMs** bill per second with a one-minute minimum, like
+EC2, so a fresh VM per job works the same way. They are on-demand, with no
+spot interruptions, and traffic is included: no NAT charge and no egress
+charge, so the network table above does not apply. That makes OVH cheaper
+than AWS for jobs that download a lot. OVH Public Cloud is OpenStack, so a
+fleetci class there needs a fleeting plugin for OpenStack. d2 instances share
+their vCPUs.
+
+**OVHcloud bare metal with Firecracker** is the other model: a fixed monthly
+server split into microVMs. ADVANCE-1 (EPYC 4244P, 6 cores, 12 threads, 32 GB,
+€114.99 a month) holds six 2-vCPU microVMs and costs as much as about 4,100
+GitHub Linux jobs a month. At most it runs about 55,000 jobs a month. Its cost
+per job depends only on how busy it is (25% busy: $0.0097, still 3.3× below
+GitHub), and in exchange:
+
+- a microVM boots in a second or two, with no 60 s minimum, which suits the
+  smallest jobs;
+- images and caches can stay on the host's NVMe between jobs, so a job
+  downloads little;
+- traffic is included;
+- capacity is fixed: beyond six jobs at once they wait, unless another class
+  (OVH or AWS VMs) takes the overflow.
+
+fleetci has no fleeting plugin for Firecracker yet; this is a design, not a
+feature. OVH Public Cloud VMs expose `vmx`, so Firecracker can also run inside
+them, though OVH warns that live migration can then crash the guest.
+
+OVHcloud raised its prices twice in 2026, and its own posts disagree on
+whether hourly instance prices changed in October; check the price list.
+The other services' rates come from third-party comparisons, checked against
+the vendors only for GitHub and GitLab.
+
 ## Fixed costs
 
 | | Per month |
@@ -219,4 +274,7 @@ bills whether or not jobs run, so warm hours count.
 - [Burstable instances: unlimited mode](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/burstable-performance-instances-unlimited-mode-concepts.html) and [credits](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/burstable-credits-baseline-concepts.html)
 - [nesting: Virtualization.framework hypervisor](https://gitlab.com/gitlab-org/fleeting/nesting/-/merge_requests/7) and [why GitLab replaced Tart](https://gitlab.com/gitlab-org/ci-cd/shared-runners/infrastructure/-/issues/97)
 - [GitHub's ubuntu-slim runner](https://docs.github.com/en/billing/reference/actions-runner-pricing), and runner vendor prices compared: [cicdpipelinecost.com](https://cicdpipelinecost.com/depot-vs-namespace-vs-blacksmith), [craci.com](https://craci.com/compare/github-actions-runner-providers), [runnerbench.com](https://runnerbench.com/)
+- [GitLab compute minutes](https://about.gitlab.com/pricing/faq-compute-minutes/) and [hosted runners on Linux](https://docs.gitlab.com/ci/runners/hosted_runners/linux/)
+- CI service rates: [cicdpipelinecost.com platform comparison](https://cicdpipelinecost.com/platform-comparison), [craci.com runner comparison](https://craci.com/compare/github-actions-runner-providers)
+- OVHcloud: [Public Cloud prices](https://www.ovhcloud.com/en-ie/public-cloud/prices/), [price changes](https://blog.ovhcloud.com/en/posts/pricing-evolution-of-public-cloud-bare-metal-and-vps-at-ovhcloud/) and [the October 2026 update](https://blog.ovhcloud.com/en/posts/public-cloud-pricing-update-october-2026/), [billing per second](https://help.ovhcloud.com/csm/en-public-cloud-compute-billing-options?id=kb_article_view&sysparm_article=KB0050466), [nested virtualization](https://support.us.ovhcloud.com/hc/en-us/articles/22118850832787-Public-Cloud-FAQ), [dedicated servers H2 2026 prices](https://blog.ovhcloud.com/en/posts/dedicated-servers-pricing-update-h2-2026/)
 - [EC2 Mac instances](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-mac-instances.html) and [dedicated host pricing](https://aws.amazon.com/ec2/dedicated-hosts/pricing)
