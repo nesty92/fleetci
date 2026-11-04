@@ -12,6 +12,8 @@ NET=fleetci-m0
 # file holding a token that may register runners on them.
 GITHUB_REPOS=${FLEETCI_GITHUB_REPOS:-}
 GITHUB_TOKEN_FILE=${FLEETCI_GITHUB_TOKEN_FILE:-$HOME/.config/fleetci/github.token}
+# Optional Actions cache server (hack/cache/up.sh prints its URL).
+GITHUB_CACHE_URL=${FLEETCI_GITHUB_CACHE_URL:-}
 
 umask 077
 mkdir -p "$DATA/work" "$DATA/bin"
@@ -29,6 +31,8 @@ if [ -n "$GITHUB_REPOS" ]; then
 [github]
 repos = $repos
 token_file = \"$GITHUB_TOKEN_FILE\""
+  [ -n "$GITHUB_CACHE_URL" ] && github="$github
+cache_url = \"$GITHUB_CACHE_URL\""
 fi
 
 # fleetci's own settings. Every VM boots for its job (no warm VMs); see

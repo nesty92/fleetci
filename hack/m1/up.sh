@@ -11,6 +11,8 @@ TOKEN_FILE=${FLEETCI_M1_TOKEN:-$HOME/.config/fleetci/m0-runner.token}
 NET=fleetci-m0
 GITHUB_REPOS=${FLEETCI_GITHUB_REPOS:-}
 GITHUB_TOKEN_FILE=${FLEETCI_GITHUB_TOKEN_FILE:-$HOME/.config/fleetci/github.token}
+# Optional Actions cache server (hack/cache/up.sh prints its URL).
+GITHUB_CACHE_URL=${FLEETCI_GITHUB_CACHE_URL:-}
 RUNNER_VERSION=2.338.2
 
 [ -c /dev/kvm ] || { echo "no /dev/kvm" >&2; exit 1; }
@@ -30,6 +32,8 @@ if [ -n "$GITHUB_REPOS" ]; then
 [github]
 repos = $repos
 token_file = \"$GITHUB_TOKEN_FILE\""
+  [ -n "$GITHUB_CACHE_URL" ] && github="$github
+cache_url = \"$GITHUB_CACHE_URL\""
 fi
 
 # fleetingd builds its image once (Ubuntu 26.04 cloud image, then these
@@ -58,10 +62,13 @@ vm_memory_mb = 6144
 vm_disk_size_gb = 30
 vm_enable_virtio_console = true
 vm_prebuild_cloudinit_extra_cmds = [
-  "DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-buildx git",
+  "DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-buildx git zstd",
   "usermod -aG docker ubuntu",
   "su - ubuntu -c 'mkdir -p actions-runner-$RUNNER_VERSION && curl -fsSL https://github.com/actions/runner/releases/download/v$RUNNER_VERSION/actions-runner-linux-x64-$RUNNER_VERSION.tar.gz | tar -xz -C actions-runner-$RUNNER_VERSION'",
   "/home/ubuntu/actions-runner-$RUNNER_VERSION/bin/installdependencies.sh",
+  "DEBIAN_FRONTEND=noninteractive apt-get purge -y --auto-remove snapd modemmanager udisks2 multipath-tools open-iscsi unattended-upgrades",
+  "systemctl disable fail2ban.service",
+  "systemctl mask apt-daily.timer apt-daily-upgrade.timer motd-news.timer update-notifier-download.timer fwupd-refresh.timer",
 ]
 $github
 TOML
