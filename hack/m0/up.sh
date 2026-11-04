@@ -85,9 +85,6 @@ log_level = "info"
 $github
     [runners.autoscaler.connector_config]
       timeout = "2m"
-    [[runners.autoscaler.policy]]
-      idle_count = 1
-      idle_time = "30m"
     [runners.autoscaler.vm_isolation]
       enabled = true
       nesting_host = "unix:///fleetci/nesting.sock"
