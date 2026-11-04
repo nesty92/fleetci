@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/nesty92/fleetci/compare/v0.1.0...v0.2.0) (2026-11-04)
+
+
+### Features
+
+* fleetci ci-include, and install steps from nothing to a first job ([4065de9](https://github.com/nesty92/fleetci/commit/4065de9b2510b1cc00d825887cfbc5906f37f220))
+
 ## 0.1.0 (2026-11-04)
 
 
