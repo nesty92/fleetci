@@ -21,6 +21,17 @@ MAC=52:54:00:12:34:56
 GW=172.16.200.1
 IP=172.16.200.2
 
+# FLAVOR=ubuntu boots the image's own kernel, the one fleetingd gives Cloud
+# Hypervisor, uncompressed from its bzImage (Firecracker takes ELF only).
+LEGACY_IPTABLES=1
+if [ "${FLAVOR:-ci}" = ubuntu ]; then
+  bz=$(dirname "$BASE")/resolute-server-cloudimg-amd64-vmlinuz-generic
+  off=$(grep -obUaP '\x28\xb5\x2f\xfd' "$bz" | head -1 | cut -d: -f1)
+  tail -c +$((off + 1)) "$bz" | zstd -dcq > "$W/vmlinux-ubuntu" 2>/dev/null || true
+  echo "kernel: $(file -b "$W/vmlinux-ubuntu" | cut -c1-80)"
+  KERNEL=$W/vmlinux-ubuntu
+  LEGACY_IPTABLES=0
+fi
 now() { date +%s.%N; }
 since() { echo "$(now) - $1" | bc; }
 SSH="ssh -i $W/key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=1 ubuntu@$IP"
@@ -48,13 +59,19 @@ cat > user-data <<EOF
 #cloud-config
 hostname: template
 ssh_authorized_keys: ["$(cat key.pub)"]
+runcmd:
+  - ufw allow from $GW proto tcp to any port 22
+  - loginctl enable-linger ubuntu
+EOF
+# Firecracker's CI kernel has no nf_tables: Docker needs iptables-legacy.
+if [ "${LEGACY_IPTABLES:-1}" = 1 ]; then
+  cat >> user-data <<EOF
 bootcmd:
   - update-alternatives --set iptables /usr/sbin/iptables-legacy
   - update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
-runcmd:
   - systemctl restart docker
-  - loginctl enable-linger ubuntu
 EOF
+fi
 echo "instance-id: template" > meta-data
 cat > network-config <<EOF
 version: 2

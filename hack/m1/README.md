@@ -91,6 +91,21 @@ the EFI mount from fstab, and the guest switches to iptables-legacy.
 | RNG after restore | reseed by hand | VMGenID reseeds it |
 | `docker run` on the default bridge | works | fails: the CI kernel lacks the iptables raw table |
 
+`fc-run.sh 3 ubuntu` boots Firecracker with Ubuntu's own kernel instead, the one
+fleetingd gives Cloud Hypervisor, uncompressed from its bzImage. Its modules are in
+the image, so nf_tables and the raw table load and Docker works as is.
+
+| Firecracker with Ubuntu's kernel | |
+| --- | --- |
+| cold boot to `docker version` | 6.3 s (kernel 0.7 s, userspace 4.3 s) |
+| restore to `docker version` | 1.54 s, all 3 clones |
+| memory per clone, resident / private | 370 / 97 MB |
+| `docker run` on the default bridge | works |
+
+The restore is slower than with the CI kernel (0.62 s), and the cause isn't measured yet.
+With Firecracker's own kernel, `DOCKER_INSECURE_NO_IPTABLES_RAW=1` in
+Docker's environment skips the raw-table rule instead. That's untested here.
+
 Firecracker uses less memory, but it needs a kernel of our own for Docker's
 networking. Without reflinks or device-mapper snapshots, every clone copies
 its disk. Cloud Hypervisor runs Ubuntu's own kernel and image as they are.
