@@ -40,8 +40,39 @@ Measured on a 16-thread laptop (2026-11-04):
 | Step | Time |
 | --- | --- |
 | Image download, resize and prebuild (once) | 2 min 57 s |
-| microVM start to ready (cloud-init, SSH, Docker) | 16.1–22.8 s, 6 VMs |
+| microVM start to ready (cloud-init, SSH, Docker), stock image | 16.1–22.8 s, 6 VMs |
+| same, image without snapd & co. and with `chrony-wait` masked | 9.3–15.1 s, 4 VMs |
+| fleetingd's copy of the 5.4 GB image before each start | 1.9–3.0 s |
 | GitHub JIT runner: VM ready to job running | about 7 s |
+
+What is left of a cold boot is fleetingd's own per-VM user-data: `apt update`
+and `apt upgrade` on every boot, 3 s, or 12 s when Ubuntu has published
+updates. The same image booted without them reaches Docker in 6.7 s
+(kernel 0.2 s, userspace 5.4 s). `chrony-wait.service` alone held boot up
+for 6 s: `multi-user.target`, and so the end of cloud-init, waits for the
+clock to sync.
+
+## Snapshots
+
+`snap/run.sh [copyonwrite|ondemand|copy] [clones]` boots one VM from
+fleetingd's image, snapshots it once Docker answers, and restores clones
+side by side. Each clone runs in its own network namespace with the
+template's IP and MAC, so its network needs no change. Its disk is a qcow2
+overlay on the frozen template disk. After the restore it gets a stepped
+clock, new SSH host keys and a random machine id.
+
+3 clones at once, 4 vCPU and 6 GB each:
+
+| Restore mode | Restore to `docker version` over SSH | Memory per clone |
+| --- | --- | --- |
+| `copyonwrite` | 0.34–0.37 s | 620–650 MB resident, 91–101 MB private |
+| `ondemand` (userfaultfd) | 0.80–0.88 s | 6.1 GB, all private |
+
+Identity fixes take another 0.35–0.48 s, and `docker run` works in each clone.
+Writing the snapshot takes 2.3 s and 6.1 GB of disk: the guest's whole memory.
+With `copyonwrite` the clones share the snapshot's pages through the page
+cache, so three cost about one copy of what they read plus 100 MB each.
+`ondemand` faults in all 6 GB per clone. No fleeting plugin does this yet.
 
 ## Limits
 

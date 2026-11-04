@@ -67,7 +67,7 @@ vm_prebuild_cloudinit_extra_cmds = [
   "su - ubuntu -c 'mkdir -p actions-runner-$RUNNER_VERSION && curl -fsSL https://github.com/actions/runner/releases/download/v$RUNNER_VERSION/actions-runner-linux-x64-$RUNNER_VERSION.tar.gz | tar -xz -C actions-runner-$RUNNER_VERSION'",
   "/home/ubuntu/actions-runner-$RUNNER_VERSION/bin/installdependencies.sh",
   "DEBIAN_FRONTEND=noninteractive apt-get purge -y --auto-remove snapd modemmanager udisks2 multipath-tools open-iscsi unattended-upgrades",
-  "systemctl disable fail2ban.service",
+  "systemctl mask fail2ban.service chrony-wait.service",
   "systemctl mask apt-daily.timer apt-daily-upgrade.timer motd-news.timer update-notifier-download.timer fwupd-refresh.timer",
 ]
 $github
