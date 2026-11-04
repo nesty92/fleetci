@@ -6,7 +6,8 @@
       "release-type": "go",
       "package-name": "fleetci",
       "bump-minor-pre-major": true,
-      "changelog-path": "CHANGELOG.md"
+      "changelog-path": "CHANGELOG.md",
+      "include-component-in-tag": false
     }
   }
 }

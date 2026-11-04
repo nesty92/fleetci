@@ -6,14 +6,24 @@ name: Release
 on:
   push:
     branches: [main]
+  # Build the binaries again for an existing release.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, such as v0.1.0
+        required: true
 
 permissions:
   contents: write
   pull-requests: write
 
 jobs:
-  release:
+  release-please:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    outputs:
+      created: ${{ steps.release.outputs.release_created }}
+      tag: ${{ steps.release.outputs.tag_name }}
     steps:
       - id: release
         uses: googleapis/release-please-action@v4
@@ -21,16 +31,19 @@ jobs:
           config-file: .github/release-please.json
           manifest-file: .github/release-please-manifest.json
 
-      - if: steps.release.outputs.release_created
-        uses: actions/checkout@v7.0.1
+  binaries:
+    needs: release-please
+    if: always() && (needs.release-please.outputs.created == 'true' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
         with:
+          ref: ${{ needs.release-please.outputs.tag || inputs.tag }}
           fetch-depth: 0
-      - if: steps.release.outputs.release_created
-        uses: actions/setup-go@v6
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - if: steps.release.outputs.release_created
-        uses: goreleaser/goreleaser-action@v6
+      - uses: goreleaser/goreleaser-action@v6
         with:
           version: "~> v2"
           args: release --clean
