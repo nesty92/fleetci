@@ -38,6 +38,8 @@ is the label:
 
 ```yaml
 jobs:
+  pr-title:
+    runs-on: fleetci-1vcpu-2gb   # a PR title and description check needs little
   build:
     runs-on: fleetci-4vcpu-8gb   # class 4vcpu-8gb; runs-on: fleetci → default class
 ```
@@ -168,7 +170,7 @@ gitlab-runner's `config.toml` only points at fleetci's own file
 # /etc/fleetci/fleetci.toml
 default_class = "2vcpu-4gb"
 
-[classes.1vcpu-2gb]            # linters
+[classes.1vcpu-2gb]            # linters, PR title and description checks
 plugin = "fleeting-plugin-aws"
 max_instances = 6
 plugin_config = { name = "fleetci-1vcpu-2gb", region = "eu-north-1" }
