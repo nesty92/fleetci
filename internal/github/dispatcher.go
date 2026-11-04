@@ -79,7 +79,7 @@ type Dispatcher struct {
 
 	mu     sync.Mutex
 	taken  map[int64]time.Time // job id → when a runner was started for it
-	warned map[int64]bool // jobs already logged as unservable
+	warned map[int64]bool      // jobs already logged as unservable
 	wg     sync.WaitGroup
 }
 
