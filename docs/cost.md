@@ -126,6 +126,26 @@ So:
   save is a paid upload.
 - Behind one NAT address, every VM shares Docker Hub's anonymous pull limit.
 
+## The smallest jobs
+
+46% of Linux 2-core jobs finish in under a minute. For them the cost is small
+either way; the boot is what hurts. What others do:
+
+- **GitHub's `ubuntu-slim`** is 1 vCPU in a container, not a VM, at
+  $0.002/min, for jobs of at most 15 minutes and without Docker. It is meant
+  for labelling, triage and similar automation.
+- **Firecracker microVM runners** such as Blacksmith claim boots under
+  3 seconds, at $0.004/min for 2 vCPU. Depot publishes 10–45 s from request to
+  job start.
+- **Self-hosted on spot**, as fleetci does: RunsOn publishes about
+  $0.0009/min for 2 ARM vCPUs, plus its licence.
+
+A sub-minute job on fleetci's `1vcpu-2gb` (c7a.medium spot, disk included)
+costs about $0.0004, against $0.002 on `ubuntu-slim`. The price is fine; the 45–90 s
+boot is not. A warm VM (`idle_count`) removes the wait, at the cost of its
+idle hours. A container per job on a shared VM, as `ubuntu-slim` does, would
+remove the wait without paying for idle time, but gives up a VM per job.
+
 ## Fixed costs
 
 | | Per month |
@@ -146,8 +166,13 @@ gateway of its own.
 ## macOS, next
 
 macOS is where the money is. fleetci already gives gitlab-runner its VMs
-through the nesting protocol, the same one GitLab's own macOS runners use with
-Tart, so a macOS class is an extension of what fleetci has, not a rewrite.
+through the nesting protocol, the one GitLab's own macOS runners use, so a
+macOS class is an extension of what fleetci has, not a rewrite. GitLab no
+longer runs job VMs with Tart: after Tart's license changed (AGPL-3.0 to Fair
+Source, with a 100-core limit), nesting gained a `virtualizationframework`
+hypervisor that drives Apple's Virtualization.framework directly (merged July
+2023, in nesting's releases since). It reads Tart's VM layout, so Tart remains
+a tool for building images only.
 On AWS that means an EC2 Mac instance on a dedicated host (one per host,
 allocated for at least 24 hours; mac2.metal $0.65/h, mac2-m2.metal $0.88/h in
 us-east-1), running up to two macOS VMs, as Apple's license allows.
@@ -176,4 +201,6 @@ bills whether or not jobs run, so warm hours count.
   AWS's public price feeds for Europe (Stockholm), 2026-11-04
 - NAT gateway: [AWS VPC pricing](https://aws.amazon.com/vpc/pricing/), Stockholm
 - [Burstable instances: unlimited mode](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/burstable-performance-instances-unlimited-mode-concepts.html) and [credits](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/burstable-credits-baseline-concepts.html)
+- [nesting: Virtualization.framework hypervisor](https://gitlab.com/gitlab-org/fleeting/nesting/-/merge_requests/7) and [why GitLab replaced Tart](https://gitlab.com/gitlab-org/ci-cd/shared-runners/infrastructure/-/issues/97)
+- [GitHub's ubuntu-slim runner](https://docs.github.com/en/billing/reference/actions-runner-pricing), and runner vendor prices compared: [cicdpipelinecost.com](https://cicdpipelinecost.com/depot-vs-namespace-vs-blacksmith), [craci.com](https://craci.com/compare/github-actions-runner-providers), [runnerbench.com](https://runnerbench.com/)
 - [EC2 Mac instances](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-mac-instances.html) and [dedicated host pricing](https://aws.amazon.com/ec2/dedicated-hosts/pricing)
