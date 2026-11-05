@@ -60,6 +60,23 @@ A job asking for a class fleetci lacks, or for other labels besides
 carry actions/runner in `~/actions-runner-<version>` (both kits do); otherwise
 it is downloaded for each job.
 
+### Without gitlab-runner
+
+`fleetci serve -config fleetci.toml` runs the GitHub side as a process of its
+own, for GitHub-only installs or to keep GitHub jobs going when gitlab-runner
+or its fleetci plugin stops. Run it under a service manager that restarts it:
+
+```ini
+[Service]
+ExecStart=/usr/bin/fleetci serve -config /etc/fleetci/github.toml
+Restart=always
+```
+
+Its classes are its own. A class's group driven by two processes would have
+each remove the other's VMs, so `serve` and gitlab-runner's plugin need
+separate files with separate groups (on EC2 separate Auto Scaling groups),
+and only `serve`'s has `[github]`. When `serve` stops it removes its VMs.
+
 ### Cache on your own storage
 
 By default `actions/cache`, the caches built into `setup-node`, `setup-go`
