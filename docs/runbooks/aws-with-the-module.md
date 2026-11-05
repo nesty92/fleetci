@@ -166,10 +166,27 @@ label.
 On the Manager (SSH, or Session Manager with `runner_manager.enable_ssm_agent = true`):
 
 ```sh
-grep -A20 'fleetci check' /var/log/cloud-init-output.log   # every class, GitHub access, config.toml
+grep -E '^(ok|FAIL)  ' /var/log/cloud-init-output.log   # what fleetci check found at boot
 systemctl status gitlab-runner fleetci-watchdog@ci
 journalctl -u gitlab-runner -f
 ```
+
+`fleetci check` ran at boot for each pool, one line per part:
+
+```
+ok    fleetci.toml                     /etc/fleetci/ci.toml: 3 classes, default 2vcpu-4gb
+ok    class 1vcpu-2gb                  plugin /usr/bin/fleeting-plugin-aws works; group gitlab-runner-ci-1vcpu-2gb-asg has 0 instances
+ok    class 2vcpu-4gb                  plugin /usr/bin/fleeting-plugin-aws works; group gitlab-runner-ci-asg has 0 instances
+ok    class 8vcpu-16gb                 plugin /usr/bin/fleeting-plugin-aws works; group gitlab-runner-ci-8vcpu-16gb-asg has 0 instances
+ok    gitlab ci                        public template: 3 of its classes are here (1vcpu-2gb, 2vcpu-4gb, 8vcpu-16gb)
+ok    github owner/api                 token can list jobs and runners
+ok    config.toml                      /etc/gitlab-runner/config.toml: fleetci's [[runners]] entry is complete
+```
+
+A `FAIL` line says what is wrong. Run it again by hand with
+`AWS_DEFAULT_REGION=<region> fleetci check -config /etc/fleetci/ci.toml -runner-config /etc/gitlab-runner/config.toml`.
+`config.toml: no [[runners]] entry` means the pool's GitLab token was
+invalid at boot, so its runner was left out (`on_invalid_token`).
 
 Start one job on each forge:
 
@@ -183,6 +200,7 @@ runner starting   repo=owner/api queued_job=build class=8vcpu-16gb vm=… waited
 | What | How |
 | --- | --- |
 | A GitLab job fails waiting for a VM | its class was full for `acquire_timeout`. Raise the class's `max_instances` (and the account's spot quota), or its `acquire_timeout`. |
+| `fleetci check` fails on `concurrent` | the pool's classes hold more jobs than gitlab-runner's `concurrent`. The module adds the extra classes' share to `runner_manager.maximum_concurrent_jobs`; raise that for the pool's own class. |
 | A GitHub job never starts | the gitlab-runner log says why: an unknown class, an extra label, or no VM. It stays queued and is tried again. |
 | A spot VM is reclaimed mid-job | the GitLab job fails and can be retried. A GitHub job stays "in progress" for about 4 minutes, then fails; re-run it. |
 | fleetci's plugin dies | `fleetci-watchdog@ci` restarts gitlab-runner after 30 s, which also ends the other runners' jobs. |
