@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // HostConfig is fleetci.toml's [host]: the CPUs and memory this machine
@@ -29,6 +30,12 @@ type HostConfig struct {
 	// Reserve is what a detected budget leaves the host: default 1 CPU and
 	// a tenth of the memory, at least 2GB.
 	Reserve *Reserve `json:"reserve" toml:"reserve"`
+	// NominateAfter is how long a job may wait for room before it is
+	// nominated: from then on the room that frees is held for it, and later
+	// jobs only fill what it doesn't need. Until then, any waiting job that
+	// fits starts, earliest first. Default 10m; 0 nominates the oldest
+	// waiting job at once.
+	NominateAfter *Duration `json:"nominate_after" toml:"nominate_after"`
 }
 
 // Reserve is what the host keeps for itself out of a detected budget.
@@ -67,7 +74,13 @@ type Budget struct {
 	Resources
 	// Detected and Reserve are set for the parts that were detected.
 	Detected, Reserve Resources
+	// NominateAfter is HostConfig.NominateAfter, with its default.
+	NominateAfter time.Duration
 }
+
+// defaultNominateAfter keeps a large job from waiting much longer than
+// this while smaller ones keep the host busy.
+const defaultNominateAfter = 10 * time.Minute
 
 func (b Budget) String() string {
 	s := b.Resources.String()
@@ -108,8 +121,15 @@ func HostBudget(h *HostConfig, classes map[string]Class) (Budget, bool, error) {
 	if h.CPUs < 0 || h.Memory < 0 {
 		return Budget{}, false, errors.New("host: cpus and memory can't be negative")
 	}
+	if h.NominateAfter != nil && *h.NominateAfter < 0 {
+		return Budget{}, false, errors.New("host: nominate_after can't be negative")
+	}
 
 	var b Budget
+	b.NominateAfter = defaultNominateAfter
+	if h.NominateAfter != nil {
+		b.NominateAfter = time.Duration(*h.NominateAfter)
+	}
 	b.CPUs, b.MemoryMB = h.CPUs, int64(h.Memory)
 	if b.CPUs == 0 || b.MemoryMB == 0 {
 		found, err := detect()
@@ -374,9 +394,10 @@ func cgroupLimits(selfCgroup, root string) (cpus int, memMB int64) {
 // CheckHost works out the host's budget as New would, and the fixed shares
 // its classes take of it. It is false when there is no budget.
 func CheckHost(h *HostConfig, classes map[string]Class) (Budget, Resources, bool, error) {
-	hb, err := newHostBudget(h, classes)
-	if err != nil || hb == nil {
+	q, err := newHostQueue(h, classes)
+	if err != nil || q == nil {
 		return Budget{}, Resources{}, false, err
 	}
-	return hb.Budget, hb.used, true, nil
+	local := q.hosts[localHost]
+	return local.Budget, local.fixed, true, nil
 }

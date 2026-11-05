@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestHostInTheConfigFile(t *testing.T) {
@@ -35,12 +36,13 @@ plugin_config = { vm_num_cpu_cores = 4, vm_memory_mb = 8192 }
 cpus = 10
 memory = "20GB"
 reserve = { cpus = 2 }
+nominate_after = "90s"
 `)
 	c, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Host == nil || c.Host.CPUs != 10 || c.Host.Memory != 20*1024 || *c.Host.Reserve.CPUs != 2 {
+	if c.Host == nil || c.Host.CPUs != 10 || c.Host.Memory != 20*1024 || *c.Host.Reserve.CPUs != 2 || time.Duration(*c.Host.NominateAfter) != 90*time.Second {
 		t.Fatalf("host %+v", c.Host)
 	}
 	if err := c.Validate(); err != nil {

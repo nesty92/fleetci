@@ -41,10 +41,11 @@ type pool struct {
 	timeout  time.Duration
 	overflow *pool
 
-	// host is the budget the class's VMs count against, or nil. A dynamic
-	// class takes size from it for each job; the others hold a fixed share
-	// (see Class.Reserved).
-	host    *hostBudget
+	// host is the host the class's VMs run on and count against, or nil;
+	// queue is the hosts' queue. A dynamic class takes size from its host
+	// for each job; the others hold a fixed share (see Class.Reserved).
+	queue   *hostQueue
+	host    *host
 	size    Resources
 	dynamic bool
 
@@ -52,84 +53,41 @@ type pool struct {
 	jobs int // jobs on the class's VMs or waiting for one
 }
 
-// hostBudget is the host's budget and what of it is in use. Jobs waiting
-// for room are served in arrival order: a waiting job that is short of room
-// keeps what it needs from the jobs behind it, so a large job isn't starved
-// by small ones.
-type hostBudget struct {
-	Budget
-
-	mu      sync.Mutex
-	used    Resources
-	waiting []*waiter
-}
-
-// waiter is a job waiting for a VM of a class on the host.
-type waiter struct {
-	need    Resources
-	blocked bool // its last try found the class free but the host short
-}
-
-func (h *hostBudget) enqueue(need Resources) *waiter {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	w := &waiter{need: need}
-	h.waiting = append(h.waiting, w)
-	return w
-}
-
-func (h *hostBudget) dequeue(w *waiter) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.waiting = slices.DeleteFunc(h.waiting, func(x *waiter) bool { return x == w })
-}
-
-// ahead is what the blocked jobs before w need; with w nil, all of them.
-func (h *hostBudget) ahead(w *waiter) Resources {
-	var r Resources
-	for _, x := range h.waiting {
-		if x == w {
-			break
-		}
-		if x.blocked {
-			r = r.add(x.need)
-		}
-	}
-	return r
-}
-
 // take counts a job in, if the class has a free slot for it and, for a
-// dynamic class, the host has room for one more of its VMs. w is the job's
-// place in the host's queue, or nil.
+// dynamic class, its host has room for one more of its VMs. w is the job's
+// place in the queue, or nil.
 func (p *pool) take(w *waiter) bool {
-	h := p.host
-	if h != nil && p.dynamic {
-		h.mu.Lock()
-		defer h.mu.Unlock()
+	q := p.queue
+	if p.dynamic {
+		q.mu.Lock()
+		defer q.mu.Unlock()
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.jobs >= p.class.Slots() {
 		return false
 	}
-	if h != nil && p.dynamic {
-		if !h.used.add(h.ahead(w)).add(p.size).fits(h.Resources) {
+	if p.dynamic {
+		if !q.fits(p.host, w, p.size) {
 			if w != nil {
 				w.blocked = true
 			}
 			return false
 		}
-		h.used = h.used.add(p.size)
+		p.host.used = p.host.used.add(p.size)
+		if w != nil {
+			q.started(w)
+		}
 	}
 	p.jobs++
 	return true
 }
 
 func (p *pool) done() {
-	if h := p.host; h != nil && p.dynamic {
-		h.mu.Lock()
-		h.used = h.used.add(p.size.times(-1))
-		defer h.mu.Unlock()
+	if p.dynamic {
+		p.queue.mu.Lock()
+		p.host.used = p.host.used.add(p.size.times(-1))
+		defer p.queue.mu.Unlock()
 	}
 	p.mu.Lock()
 	p.jobs--
@@ -172,12 +130,14 @@ func (b *Backend) notify() {
 // [host], or nil for its defaults.
 func New(ctx context.Context, classes map[string]Class, host *HostConfig, log hclog.Logger) (*Backend, error) {
 	b := &Backend{log: log, pools: map[string]*pool{}, vms: map[string]*pool{}}
-	hb, err := newHostBudget(host, classes)
+	hq, err := newHostQueue(host, classes)
 	if err != nil {
 		return nil, err
 	}
-	if hb != nil {
-		log.Info("host budget", "budget", hb.Budget.String(), "reserved", hb.used.String())
+	if hq != nil {
+		hq.log = log
+		local := hq.hosts[localHost]
+		log.Info("host budget", "host", local.name, "budget", local.Budget.String(), "reserved", local.fixed.String(), "nominate_after", hq.NominateAfter.String())
 	}
 	groups := map[string]string{} // group id → class
 	for _, name := range slices.Sorted(maps.Keys(classes)) {
@@ -191,9 +151,9 @@ func New(ctx context.Context, classes map[string]Class, host *HostConfig, log hc
 			_ = b.Shutdown(ctx)
 			return nil, fmt.Errorf("class %q: %w", name, err)
 		}
-		if hb != nil && c.OnHost() {
-			p.host, p.dynamic = hb, !c.Reuses()
-			p.size, _ = c.Size() // checked by newHostBudget
+		if hq != nil && c.OnHost() {
+			p.queue, p.host, p.dynamic = hq, hq.hosts[localHost], !c.Reuses()
+			p.size, _ = c.Size() // checked by newHostQueue
 		}
 		b.pools[name] = p
 	}
@@ -209,14 +169,18 @@ func New(ctx context.Context, classes map[string]Class, host *HostConfig, log hc
 	return b, nil
 }
 
-// newHostBudget works out the host's budget and the fixed shares of its
+// localHost is the name of the machine fleetci runs on, the one host there
+// is until classes can run on others.
+const localHost = "local"
+
+// newHostQueue works out the host's budget and the fixed shares of its
 // classes, or nil when there is none. Every class on the host must fit.
-func newHostBudget(h *HostConfig, classes map[string]Class) (*hostBudget, error) {
+func newHostQueue(h *HostConfig, classes map[string]Class) (*hostQueue, error) {
 	budget, on, err := HostBudget(h, classes)
 	if err != nil || !on {
 		return nil, err
 	}
-	hb := &hostBudget{Budget: budget}
+	local := &host{name: localHost, Budget: budget}
 	var largest Resources
 	var largestName string
 	for _, name := range slices.Sorted(maps.Keys(classes)) {
@@ -228,18 +192,21 @@ func newHostBudget(h *HostConfig, classes map[string]Class) (*hostBudget, error)
 		if err != nil {
 			return nil, fmt.Errorf("class %q: %w", name, err)
 		}
-		hb.used = hb.used.add(c.Reserved(size))
+		local.fixed = local.fixed.add(c.Reserved(size))
 		if !c.Reuses() && !size.fits(largest) {
 			largest, largestName = Resources{max(size.CPUs, largest.CPUs), max(size.MemoryMB, largest.MemoryMB)}, name
 		}
 	}
-	if !hb.used.fits(hb.Resources) {
-		return nil, fmt.Errorf("host: the classes' fixed shares (warm and reused VMs, %s) are more than the budget (%s)", hb.used, budget)
+	if !local.fixed.fits(local.Resources) {
+		return nil, fmt.Errorf("host: the classes' fixed shares (warm and reused VMs, %s) are more than the budget (%s)", local.fixed, budget)
 	}
-	if largestName != "" && !hb.used.add(largest).fits(hb.Resources) {
-		return nil, fmt.Errorf("host: a VM of class %q (%s) never fits: the budget is %s and the fixed shares take %s", largestName, largest, budget, hb.used)
+	if largestName != "" && !local.fixed.add(largest).fits(local.Resources) {
+		return nil, fmt.Errorf("host: a VM of class %q (%s) never fits: the budget is %s and the fixed shares take %s", largestName, largest, budget, local.fixed)
 	}
-	return hb, nil
+	local.used = local.fixed
+	q := emptyQueue(budget.NominateAfter)
+	q.hosts[localHost] = local
+	return q, nil
 }
 
 // checkOverflow checks that the class's overflow is another class with no
@@ -382,7 +349,7 @@ func (b *Backend) Create(ctx context.Context, class string) (VM, error) {
 		// has room, its own class first.
 		var w *waiter
 		if asked.dynamic {
-			w = asked.host.enqueue(asked.size)
+			w = asked.queue.enqueue(asked.name, asked.size, asked.host)
 		}
 		for p == nil {
 			wake := b.woken()
@@ -394,17 +361,19 @@ func (b *Backend) Create(ctx context.Context, class string) (VM, error) {
 			default:
 				select {
 				case <-actx.Done():
+					held := ""
 					if w != nil {
-						asked.host.dequeue(w)
+						held = asked.queue.heldFor(w)
+						asked.queue.dequeue(w)
 					}
-					return VM{}, fmt.Errorf("acquiring a %s vm: %s: %w", class, b.full(asked), actx.Err())
+					return VM{}, fmt.Errorf("acquiring a %s vm: %s: %w", class, b.full(asked, held), actx.Err())
 				case <-wake:
 				case <-time.After(overflowPoll):
 				}
 			}
 		}
 		if w != nil {
-			asked.host.dequeue(w)
+			asked.queue.dequeue(w)
 		}
 	}
 
@@ -439,16 +408,20 @@ func (b *Backend) Create(ctx context.Context, class string) (VM, error) {
 	return VM{ID: id, Class: p.name, Instance: acq.InstanceID(), Connect: connect}, nil
 }
 
-// full says why a job of the class found no room.
-func (b *Backend) full(p *pool) string {
+// full says why a job of the class found no room. held is the class of the
+// nominated job the host held room for, if any.
+func (b *Backend) full(p *pool, held string) string {
 	why := p.name + " is full"
 	if o := p.overflow; o != nil {
 		why = fmt.Sprintf("%s and its overflow %s are full", p.name, o.name)
 	}
-	if h := p.host; h != nil && p.dynamic {
-		h.mu.Lock()
-		why += fmt.Sprintf(", or the host has no room for one more of its VMs (%s; host %s in use of %s)", p.size, h.used, h.Resources)
-		h.mu.Unlock()
+	if h := p.host; p.dynamic {
+		p.queue.mu.Lock()
+		why += fmt.Sprintf(", or host %s has no room for one more of its VMs (%s; %s in use of %s)", h.name, p.size, h.used, h.Resources)
+		p.queue.mu.Unlock()
+		if held != "" {
+			why += fmt.Sprintf(", which holds the room that frees for a %s job that has waited past nominate_after", held)
+		}
 	}
 	return why
 }

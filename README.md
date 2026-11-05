@@ -361,6 +361,7 @@ classes could ask for at once. `[host]` overrides it:
 reserve = { cpus = 4, memory = "16GB" }  # keep the detection, change the reserve
 cpus    = 48                             # or set the budget outright; more than
 memory  = "100GB"                        #   the machine over-commits on purpose
+nominate_after = "10m"                   # see below; "0s" holds room for the oldest job at once
 enabled = false                          # no budget: each class keeps its max_instances
 
 [classes.mine]
@@ -372,9 +373,13 @@ memory = "8GB"
 
 A class can also set `host = false` to stay off the budget.
 
-Jobs waiting for room start in the order they came: a waiting job keeps
-the room it needs from the jobs behind it, so small jobs don't starve a
-big one. A later job goes to its `overflow` instead of waiting, if it has
-one. Warm VMs (`idle_count`, or a policy's) and the VMs of a class that
+Waiting jobs are served as the Kubernetes scheduler serves pods. Room
+that frees goes to the earliest waiting job it fits, and a job that doesn't
+fit yet doesn't hold up later ones that do, so the server stays busy. A job
+that has waited `nominate_after` (10 minutes) is *nominated*: from then on
+the room that frees is held for it, and later jobs fill only what it
+doesn't need, so small jobs can't starve a big one. One job is nominated at
+a time, the one waiting longest; fleetci logs "job nominated". A job that
+finds no room goes to its `overflow`, if it has one, instead of waiting. Warm VMs (`idle_count`, or a policy's) and the VMs of a class that
 reuses them hold their share all the time; fleetci refuses a budget they
 don't fit, or one with no room left for a class's VM.
