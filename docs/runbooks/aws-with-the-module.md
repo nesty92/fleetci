@@ -50,7 +50,7 @@ Every class of an architecture can share its AMI.
 
 ```hcl
 module "runners" {
-  source = "github.com/nesty92/terraform-aws-gitlab-runner-autoscaler?ref=v3.9.0"
+  source = "github.com/nesty92/terraform-aws-gitlab-runner-autoscaler?ref=3.9.0"
   # … VPC, subnets, the Manager, the per-architecture runners
 
   runner_pools = {
