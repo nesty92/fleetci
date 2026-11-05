@@ -2,6 +2,7 @@
 //
 //	fleetci runner-config   writes gitlab-runner's [[runners]] entry for fleetci.toml
 //	fleetci check           proves every class, the GitHub access and config.toml work
+//	fleetci watchdog        restarts gitlab-runner when its fleetci plugin is gone
 package main
 
 import (
@@ -49,6 +50,8 @@ func main() {
 		if err == nil && !ok {
 			os.Exit(1)
 		}
+	case "watchdog":
+		err = watchdogCmd(os.Args[2:])
 	case "version", "--version":
 		fmt.Println("fleetci", version, revision)
 		return
@@ -70,6 +73,7 @@ func usage(w io.Writer) {
   fleetci runner-config [flags]   print gitlab-runner's [[runners]] entry for fleetci.toml
   fleetci check [flags]           check fleetci.toml, every class, GitHub access and config.toml
   fleetci ci-include [flags]      print a GitLab CI include with one hidden job per class
+  fleetci watchdog [flags]        restart gitlab-runner when its fleetci plugin is gone
   fleetci version
 
 Run "fleetci <command> -h" for its flags. Both read fleetci.toml from -config,
