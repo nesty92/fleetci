@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 // context ends when full.
 type fakeScaler struct {
 	taskscaler.Taskscaler
+	mu   sync.Mutex
 	free int
 }
 
@@ -23,15 +25,22 @@ type fakeAcq struct{ taskscaler.Acquisition }
 func (fakeAcq) InstanceID() string { return "i-1" }
 
 func (f *fakeScaler) Acquire(ctx context.Context, _ string, _ ...taskscaler.AcquireOption) (taskscaler.Acquisition, error) {
+	f.mu.Lock()
 	if f.free == 0 {
+		f.mu.Unlock()
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
 	f.free--
+	f.mu.Unlock()
 	return fakeAcq{}, nil
 }
 
-func (f *fakeScaler) Release(string) { f.free++ }
+func (f *fakeScaler) Release(string) {
+	f.mu.Lock()
+	f.free++
+	f.mu.Unlock()
+}
 
 func fakePool(name string, max int, overflow string) *pool {
 	return &pool{name: name, class: Class{MaxInstances: max, Overflow: overflow},

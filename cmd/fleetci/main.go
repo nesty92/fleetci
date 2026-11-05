@@ -171,6 +171,24 @@ func check(args []string, out io.Writer) (bool, error) {
 		return false, nil
 	}
 	r.pass("fleetci.toml", fmt.Sprintf("%s: %d classes, default %s", c.ConfigFile, len(c.Classes), c.DefaultClass))
+	if budget, reserved, on, _ := fleet.CheckHost(c.Host, c.Classes); on {
+		var want fleet.Resources // what the classes' max_instances could ask for at once
+		var onHost []string
+		for _, name := range slices.Sorted(maps.Keys(c.Classes)) {
+			class := c.Classes[name]
+			if !class.OnHost() {
+				continue
+			}
+			onHost = append(onHost, name)
+			size, _ := class.Size()
+			want.CPUs += size.CPUs * class.MaxInstances
+			want.MemoryMB += size.MemoryMB * int64(class.MaxInstances)
+		}
+		r.pass("host", fmt.Sprintf("budget %s for %s; fixed shares %s", budget, strings.Join(onHost, ", "), reserved))
+		if want.CPUs > budget.CPUs || want.MemoryMB > budget.MemoryMB {
+			r.note(fmt.Sprintf("their max_instances could ask for %s at once: past the budget, jobs wait or overflow", want))
+		}
+	}
 
 	// Classes in parallel: each starts its plugin and lists its group.
 	log := hclog.New(&hclog.LoggerOptions{Level: hclog.Error, Output: os.Stderr})

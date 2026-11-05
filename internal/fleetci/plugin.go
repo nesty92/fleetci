@@ -46,6 +46,9 @@ type Config struct {
 	Classes      map[string]fleet.Class `json:"classes" toml:"classes"`
 	// GitHub, when set, also runs GitHub Actions jobs on the classes.
 	GitHub *github.Config `json:"github" toml:"github"`
+	// Host is the CPUs and memory this machine lends to the VMs of its
+	// classes; detected when unset.
+	Host *fleet.HostConfig `json:"host" toml:"host"`
 }
 
 type InstanceGroup struct {
@@ -84,7 +87,7 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 	g.settings = settings
 
 	// Each class starts its own fleeting plugin and taskscaler.
-	backend, err := fleet.New(ctx, g.Classes, log)
+	backend, err := fleet.New(ctx, g.Classes, g.Host, log)
 	if err != nil {
 		return provider.ProviderInfo{}, err
 	}

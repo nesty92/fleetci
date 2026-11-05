@@ -41,6 +41,9 @@ OVERFLOW=${FLEETCI_LOCAL_OVERFLOW:-false}
 # n: each VM runs n jobs before it is removed (max_use_count), GitLab only;
 # fleetci refuses it together with GitHub.
 REUSE=${FLEETCI_LOCAL_REUSE:-}
+# [host] for fleetci.toml, such as 'cpus = 5, memory = "10GB"': a budget
+# smaller than this machine, so jobs wait for room. Unset, it is detected.
+HOST=${FLEETCI_LOCAL_HOST:-}
 
 case $VMS in
   microvm) small=microvm big=microvm ;;
@@ -145,7 +148,8 @@ $github
 TOML
 fi
 cat > "$DATA/fleetci.toml" <<TOML
-default_class = "1vcpu-2gb"
+default_class = "1vcpu-2gb"${HOST:+
+host = { $HOST \}}
 
 $(class "$small" 1vcpu-2gb vm1 1 2048 3 172.16.121.)
 $(if [ "$OVERFLOW" = true ]; then
