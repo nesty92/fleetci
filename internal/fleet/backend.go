@@ -36,7 +36,7 @@ type VM struct {
 type pool struct {
 	name    string
 	class   Class
-	runner  *fleeting.Runner
+	group   *supervised
 	ts      taskscaler.Taskscaler
 	timeout time.Duration
 }
@@ -84,42 +84,48 @@ func startPool(ctx context.Context, name string, c Class, groups map[string]stri
 	if len(cfg) == 0 {
 		cfg = []byte("{}")
 	}
-	runner, err := fleeting.RunPlugin(c.Plugin, cfg, fleeting.WithPluginLogger(log.Named("plugin")))
-	if err != nil {
-		return nil, fmt.Errorf("starting plugin %s: %w", c.Plugin, err)
+	start := func(ctx context.Context, exited func()) (provider.InstanceGroup, provider.ProviderInfo, func(), error) {
+		runner, err := fleeting.RunPlugin(c.Plugin, cfg, fleeting.WithPluginLogger(watchExit(log.Named("plugin"), exited)))
+		if err != nil {
+			return nil, provider.ProviderInfo{}, nil, fmt.Errorf("starting plugin %s: %w", c.Plugin, err)
+		}
+		info, err := runner.InstanceGroup().Init(ctx, log.Named("plugin"), settings)
+		if err != nil {
+			runner.Kill()
+			return nil, provider.ProviderInfo{}, nil, fmt.Errorf("initialising plugin %s: %w", c.Plugin, err)
+		}
+		return runner.InstanceGroup(), info, runner.Kill, nil
 	}
-
-	info, err := runner.InstanceGroup().Init(ctx, log.Named("plugin"), settings)
+	group, info, err := supervise(ctx, start, log.Named("plugin"))
 	if err != nil {
-		runner.Kill()
-		return nil, fmt.Errorf("initialising plugin %s: %w", c.Plugin, err)
+		return nil, err
 	}
 	if other, ok := groups[info.ID]; ok {
-		runner.Kill()
+		group.Close()
 		return nil, fmt.Errorf("uses group %s, as class %q does; each class needs a group of its own", info.ID, other)
 	}
 	groups[info.ID] = name
 
-	ts, err := taskscaler.New(ctx, initialised{runner.InstanceGroup(), info},
+	ts, err := taskscaler.New(ctx, initialised{group, info},
 		taskscaler.WithLogger(log.Named("taskscaler")),
 		taskscaler.WithInstanceGroupSettings(settings),
 		taskscaler.WithCapacityPerInstance(1),
 		taskscaler.WithMaxUseCount(1),
 		taskscaler.WithMaxInstances(c.MaxInstances),
-		taskscaler.WithInstanceUpFunc(dockerReady(runner.InstanceGroup(), c.Connector.UseExternalAddr, log)),
+		taskscaler.WithInstanceUpFunc(dockerReady(group, c.Connector.UseExternalAddr, log)),
 		taskscaler.WithDeleteInstancesOnShutdown(),
 		// A job is waiting while instances are expected: look every second
 		// instead of every two. One list call per second per scaling class.
 		taskscaler.WithUpdateIntervalWhenExpecting(time.Second),
 	)
 	if err != nil {
-		runner.Kill()
+		group.Close()
 		return nil, fmt.Errorf("starting taskscaler: %w", err)
 	}
 
 	if err := ts.ConfigureSchedule(c.schedules()...); err != nil {
 		ts.Shutdown(ctx)
-		runner.Kill()
+		group.Close()
 		return nil, err
 	}
 
@@ -128,7 +134,7 @@ func startPool(ctx context.Context, name string, c Class, groups map[string]stri
 		timeout = 10 * time.Minute
 	}
 	log.Info("class ready", "group", info.ID, "plugin", c.Plugin, "max_instances", c.MaxInstances, "policies", len(c.schedules()))
-	return &pool{name: name, class: c, runner: runner, ts: ts, timeout: timeout}, nil
+	return &pool{name: name, class: c, group: group, ts: ts, timeout: timeout}, nil
 }
 
 // initialised is an instance group whose Init already ran; taskscaler's own
@@ -218,8 +224,8 @@ func (b *Backend) Shutdown(ctx context.Context) error {
 			go func() {
 				defer wg.Done()
 				p.ts.Shutdown(ctx)
-				sweep(ctx, p.runner.InstanceGroup(), b.log.With("class", p.name))
-				p.runner.Kill()
+				sweep(ctx, p.group, b.log.With("class", p.name))
+				p.group.Close()
 			}()
 		}
 		wg.Wait()
