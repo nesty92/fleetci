@@ -23,7 +23,8 @@ restarts.
 Install gitlab-runner, fleetci, its plugin and each class's fleeting plugin
 as the [README](../../README.md#install) describes, or as
 [Bare metal with cloud spikes](bare-metal-with-cloud-spikes.md) does on your
-own server. On AWS, the module's `fleetci.github` input does all of this.
+own server. On AWS, `fleetci.github` on a runner pool of the terraform module
+does all of this ([AWS with the terraform module](aws-with-the-module.md)).
 
 ## 2. Tokens
 
@@ -75,6 +76,13 @@ systemctl restart gitlab-runner
 `fleetci runner-config` raises `concurrent` by the classes' limits. GitHub
 jobs don't count against it: fleetci starts their runners itself, within
 each class's `max_instances`.
+
+Every class must run one job per VM (`capacity_per_instance` and
+`max_use_count` 1, the defaults): GitHub steps run on the VM itself, so a
+job could read or change another job's VM, and `fleetci check` fails on a
+class that reuses VMs. To reuse VMs for GitLab, keep `[github]` out of that
+file and serve GitHub from another (a second plugin config, or
+`fleetci serve`) with single-use classes and groups of their own.
 
 Run fleetci's watchdog beside gitlab-runner, as in
 [Bare metal with cloud spikes](bare-metal-with-cloud-spikes.md#4-gitlab-runner-and-the-watchdog):

@@ -23,6 +23,10 @@
         },
         {
           "type": "generic",
+          "path": "docs/runbooks/aws-with-the-module.md"
+        },
+        {
+          "type": "generic",
           "path": "docs/runbooks/github-only.md"
         }
       ]
