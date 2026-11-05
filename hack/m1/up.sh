@@ -21,10 +21,13 @@ SMALL=${FLEETCI_M1_SMALL:-dockervm}
 FD_SRC=${FLEETCI_FLEETINGD_SRC:-$REPO/../fleeting-plugin-fleetingd}
 # Restore VMs from a snapshot instead of booting them (the fork only).
 SNAPSHOT=${FLEETCI_M1_SNAPSHOT:-true}
+# serve: GitHub jobs run in a "fleetci serve" of their own, on classes of
+# their own, instead of inside gitlab-runner's fleetci plugin.
+GITHUB_MODE=${FLEETCI_M1_GITHUB:-plugin}
 
 [ -c /dev/kvm ] || { echo "no /dev/kvm" >&2; exit 1; }
 umask 077
-mkdir -p "$DATA/work" "$DATA/bin" "$DATA/vms" "$DATA/vms-small" "$DATA/images"
+mkdir -p "$DATA/work" "$DATA/bin" "$DATA/vms" "$DATA/vms-small" "$DATA/vms-gh" "$DATA/vms-gh-small" "$DATA/images"
 
 (cd "$REPO" && CGO_ENABLED=0 go build -o "$DATA/bin/" ./cmd/fleeting-plugin-fleetci ./cmd/fleetci ./cmd/fleeting-plugin-dockervm)
 fleetingd=/usr/local/bin/fleeting-plugin-fleetingd
@@ -97,12 +100,25 @@ fi
 # fleetingd builds its image once (Ubuntu 26.04 cloud image, then these
 # commands, then cloud-init clean) and clones it per VM. The commands are
 # cloud-init runcmd entries: keep them free of ': ' and ' #'.
+plugin_github=$github
+rm -f "$DATA/fleetci-github.toml"
+if [ "$GITHUB_MODE" = serve ] && [ -n "$github" ]; then
+  plugin_github=
+  cat > "$DATA/fleetci-github.toml" <<TOML
+default_class = "1vcpu-2gb"
+
+$(fleetingd_class 1vcpu-2gb gh1 172.16.123. "$DATA/vms-gh-small" 1 2048 1)
+$(fleetingd_class 4vcpu-6gb gh4 172.16.122. "$DATA/vms-gh" 4 6144 1)
+$github
+TOML
+  chmod 600 "$DATA/fleetci-github.toml"
+fi
 cat > "$DATA/fleetci.toml" <<TOML
 default_class = "1vcpu-2gb"
 
 $small
 $(fleetingd_class 4vcpu-6gb fd4 172.16.120. "$DATA/vms" 4 6144 2)
-$github
+$plugin_github
 TOML
 
 "$DATA/bin/fleetci" runner-config -global -config "$DATA/fleetci.toml" \
@@ -117,12 +133,20 @@ host="--network $NET --device /dev/kvm --device /dev/net/tun --cap-add NET_ADMIN
 docker run --rm $host --entrypoint "$DATA/bin/fleetci" fleetci-m1-host \
   check -config "$DATA/fleetci.toml" -runner-config "$DATA/config.toml" ||
   echo "fleetci check found problems; see above" >&2
+if [ -f "$DATA/fleetci-github.toml" ]; then
+  docker run --rm $host --entrypoint "$DATA/bin/fleetci" fleetci-m1-host \
+    check -config "$DATA/fleetci-github.toml" -runner-config "" ||
+    echo "fleetci check found problems in fleetci-github.toml; see above" >&2
+fi
 # tini reaps what gitlab-runner leaves; gitlab-runner runs in a loop with
 # fleetci's watchdog beside it, which stops it when its fleetci plugin is
 # gone (gitlab-runner never starts a dead plugin again).
 docker run -d --init --name fleetci-m1 $host --entrypoint sh fleetci-m1-host -c '
   "$0/bin/fleetci" watchdog -plugin "$0/bin/fleeting-plugin-fleetci" \
     -restart "p=\$(pgrep -x gitlab-runner); kill \$p; sleep 15; kill -9 \$p 2>/dev/null || true" &
+  if [ -f "$0/fleetci-github.toml" ]; then
+    while :; do "$0/bin/fleetci" serve -config "$0/fleetci-github.toml"; sleep 2; done &
+  fi
   while :; do gitlab-runner run --config "$0/config.toml" --working-directory "$0/work"; sleep 1; done
 ' "$DATA" >/dev/null
 

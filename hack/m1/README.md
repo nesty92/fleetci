@@ -32,6 +32,7 @@ hack/m1/down.sh
 | --- | --- | --- |
 | `FLEETCI_M1_SMALL` | `dockervm` | `fleetingd` makes `1vcpu-2gb` a second fleetingd group |
 | `FLEETCI_M1_SNAPSHOT` | `true` | `false` boots every VM (fork only) |
+| `FLEETCI_M1_GITHUB` | `plugin` | `serve` runs GitHub jobs in a `fleetci serve` of their own, on groups `gh1` and `gh4` |
 | `FLEETCI_FLEETINGD_SRC` | `../fleeting-plugin-fleetingd` | the fork's checkout |
 | `FLEETCI_GITHUB_CACHE_URL` | | the Actions cache server from `hack/cache/up.sh` |
 

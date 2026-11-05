@@ -95,5 +95,13 @@ On M1, with real jobs running on both forges.
 | a job powers its VM off | dropped after about 30 s; GitHub reports "lost communication" |
 | the whole M1 container restarted | new VMs 6 s later; no taps, files or processes left over |
 
+With GitHub on `fleetci serve` (`FLEETCI_M1_GITHUB=serve`) and GitLab on
+gitlab-runner's plugin, each on its own groups:
+
+| Fault | What happened |
+| --- | --- |
+| `fleetci serve` killed, both forges busy | back in 2 s (its restart loop); its VMs died with it; GitLab's kept running |
+| the gitlab-runner plugin killed, both busy | GitHub's run passed untouched; the GitLab job on the plugin failed; the watchdog had it back in 46 s |
+
 A job whose VM is lost stays "in progress" on GitHub until GitHub gives up
 on its runner, about 4 minutes later; GitHub never queues it again.
