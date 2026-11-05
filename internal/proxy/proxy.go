@@ -115,27 +115,59 @@ func (v *VM) upstream(ctx context.Context) (*ssh.Client, error) {
 // keepalive forgets a dead connection so the next runner connection dials
 // again with fresh credentials.
 func (v *VM) keepalive(c *ssh.Client) {
-	done := make(chan struct{})
-	go func() { _ = c.Wait(); close(done) }()
+	<-KeepAlive(c, KeepAliveInterval, KeepAliveTimeout)
+	v.mu.Lock()
+	if v.client == c {
+		v.client = nil
+	}
+	v.mu.Unlock()
+}
 
-	tick := time.NewTicker(30 * time.Second)
-	defer tick.Stop()
-	for {
-		select {
-		case <-done:
-		case <-tick.C:
-			if _, _, err := c.SendRequest("keepalive@openssh.com", true, nil); err == nil {
-				continue
+// How often a VM connection is checked, and how long a reply may take. A
+// VM that vanished answers nothing, and TCP alone gives up only after
+// minutes (about 15 on EC2), while the job looks alive.
+const (
+	KeepAliveInterval = 15 * time.Second
+	KeepAliveTimeout  = 15 * time.Second
+)
+
+// KeepAlive checks c every interval and closes it when a check fails or
+// gets no reply within timeout, so whatever waits on c ends. The channel
+// closes when c is closed, by this or by anyone else.
+func KeepAlive(c *ssh.Client, interval, timeout time.Duration) <-chan struct{} {
+	done := make(chan struct{})
+	closed := make(chan struct{})
+	go func() { _ = c.Wait(); close(closed) }()
+	go func() {
+		defer close(done)
+		tick := time.NewTicker(interval)
+		defer tick.Stop()
+		for {
+			select {
+			case <-closed:
+				return
+			case <-tick.C:
+			}
+			reply := make(chan error, 1)
+			go func() {
+				_, _, err := c.SendRequest("keepalive@openssh.com", true, nil)
+				reply <- err
+			}()
+			select {
+			case err := <-reply:
+				if err == nil {
+					continue
+				}
+			case <-closed:
+				return
+			case <-time.After(timeout):
 			}
 			_ = c.Close()
+			<-closed
+			return
 		}
-		v.mu.Lock()
-		if v.client == c {
-			v.client = nil
-		}
-		v.mu.Unlock()
-		return
-	}
+	}()
+	return done
 }
 
 // Dial opens an SSH connection to a VM, retrying until ctx or the target's

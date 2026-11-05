@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/hashicorp/go-hclog"
 
@@ -59,6 +60,9 @@ func SSHStart(version, cacheURL string, log hclog.Logger) StartFunc {
 		defer client.Close()
 		stop := context.AfterFunc(ctx, func() { _ = client.Close() })
 		defer stop()
+		// A VM that dies mid-job ends the session in seconds, not when TCP
+		// gives up.
+		alive := proxy.KeepAlive(client, proxy.KeepAliveInterval, proxy.KeepAliveTimeout)
 
 		s, err := client.NewSession()
 		if err != nil {
@@ -72,6 +76,13 @@ func SSHStart(version, cacheURL string, log hclog.Logger) StartFunc {
 		s.Stdout = out
 		s.Stderr = out
 		if err := s.Run(fmt.Sprintf(runScript, version, cacheURL)); err != nil {
+			select {
+			case <-alive:
+				if ctx.Err() == nil {
+					return fmt.Errorf("lost the vm: no answer for %s: %w", proxy.KeepAliveTimeout, err)
+				}
+			case <-time.After(time.Second):
+			}
 			return fmt.Errorf("runner exited: %w", err)
 		}
 		return nil
