@@ -22,7 +22,7 @@ FD_SRC=${FLEETCI_FLEETINGD_SRC:-$REPO/../fleeting-plugin-fleetingd}
 
 [ -c /dev/kvm ] || { echo "no /dev/kvm" >&2; exit 1; }
 umask 077
-mkdir -p "$DATA/work" "$DATA/bin" "$DATA/vms" "$DATA/vms-small"
+mkdir -p "$DATA/work" "$DATA/bin" "$DATA/vms" "$DATA/vms-small" "$DATA/images"
 
 (cd "$REPO" && CGO_ENABLED=0 go build -o "$DATA/bin/" ./cmd/fleeting-plugin-fleetci ./cmd/fleetci ./cmd/fleeting-plugin-dockervm)
 fleetingd=/usr/local/bin/fleeting-plugin-fleetingd
@@ -61,12 +61,14 @@ connector_config = { username = "ubuntu", timeout = "5m" }
 name = "$2"
 egress_interface = "eth0"
 vm_disk_directory = "$4"
+vm_image_directory = "$DATA/images"
 vm_subnet = "$3"
 vm_num_cpu_cores = $5
 vm_memory_mb = $6
 vm_disk_size_gb = 30
 vm_enable_virtio_console = true
 vm_package_upgrade = false
+vm_prebuild_on_start = true
 vm_prebuild_cloudinit_extra_cmds = [
   "DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-buildx git zstd",
   "usermod -aG docker ubuntu",
