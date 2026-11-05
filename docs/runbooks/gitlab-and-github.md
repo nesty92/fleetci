@@ -23,7 +23,7 @@ restarts.
 Install gitlab-runner, fleetci, its plugin and each class's fleeting plugin
 as the [README](../../README.md#install) describes, or as
 [Bare metal with cloud spikes](bare-metal-with-cloud-spikes.md) does on your
-own server. On AWS, `fleetci.github` on a runner pool of the terraform module
+own server. On AWS, `github` in the fleetci block of a terraform module runner
 does all of this ([AWS with the terraform module](aws-with-the-module.md)).
 
 ## 2. Tokens

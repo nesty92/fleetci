@@ -126,7 +126,7 @@ so a VM without zstd (gzip) misses what a VM with it saved.
 ## Install
 
 On AWS, [terraform-aws-gitlab-runner-autoscaler](https://github.com/nesty92/terraform-aws-gitlab-runner-autoscaler)
-does all of this from `fleetci` on a runner pool. [docs/runbooks](docs/runbooks)
+does all of this when fleetci is turned on for one of its runners. [docs/runbooks](docs/runbooks)
 has whole setups: AWS with that module, your own servers with cloud spikes,
 GitLab and GitHub from one runner, and GitHub only. By hand, from nothing to a first job:
 
