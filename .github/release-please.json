@@ -12,6 +12,18 @@
         {
           "type": "generic",
           "path": "README.md"
+        },
+        {
+          "type": "generic",
+          "path": "docs/runbooks/bare-metal-with-cloud-spikes.md"
+        },
+        {
+          "type": "generic",
+          "path": "docs/runbooks/gitlab-and-github.md"
+        },
+        {
+          "type": "generic",
+          "path": "docs/runbooks/github-only.md"
         }
       ]
     }

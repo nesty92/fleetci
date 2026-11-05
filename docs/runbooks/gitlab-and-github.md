@@ -1,0 +1,122 @@
+# GitLab and GitHub from one runner
+
+One gitlab-runner serves GitLab jobs and GitHub Actions jobs on the same
+classes. fleetci's plugin inside gitlab-runner does both; no other process
+runs. GitLab jobs pick a class with `extends: .fleetci-<class>`, GitHub
+jobs with `runs-on: fleetci-<class>`, and both share each class's VMs and
+limits.
+
+```
+gitlab-runner ─ fleeting-plugin-fleetci
+  GitLab:  gitlab-runner takes a job, asks fleetci for a VM of its class
+  GitHub:  fleetci lists the repos' queued jobs, gets a VM, starts a one-job runner on it
+  classes: 1vcpu-2gb, 4vcpu-8gb, …  (any fleeting plugin: aws, fleetingd, …)
+```
+
+Use this when one machine serves both forges and you want one thing to run.
+Choose [GitHub only](github-only.md) instead, or `fleetci serve` beside
+gitlab-runner, when GitHub jobs must keep running while gitlab-runner
+restarts.
+
+## 1. Install
+
+Install gitlab-runner, fleetci, its plugin and each class's fleeting plugin
+as the [README](../../README.md#install) describes, or as
+[Bare metal with cloud spikes](bare-metal-with-cloud-spikes.md) does on your
+own server. On AWS, the module's `fleetci.github` input does all of this.
+
+## 2. Tokens
+
+- **GitLab:** a runner with the tag `fleetci` and "Run untagged jobs" off;
+  its token in `/etc/fleetci/runner.token`.
+- **GitHub:** a fine-grained token for the repos with *Actions: Read* and
+  *Administration: Read and write* (it registers one runner per job), in
+  `/etc/fleetci/github.token`, mode 0600.
+
+## 3. fleetci.toml
+
+Add a `[github]` table to the file gitlab-runner's plugin reads:
+
+```toml
+default_class = "2vcpu-4gb"
+
+[classes.2vcpu-4gb]
+# …
+
+[classes.4vcpu-8gb]
+# …
+
+[github]
+repos = ["owner/api", "owner/web"]
+token_file = "/etc/fleetci/github.token"
+# cache_url = "http://10.0.1.5:3000/"   # optional: Actions cache on your storage
+```
+
+| Key | Default | |
+| --- | --- | --- |
+| `repos` | | `owner/name`, each repo whose jobs fleetci serves |
+| `token_file` | | the GitHub token |
+| `label_prefix` | `fleetci` | `runs-on: fleetci` is the default class, `fleetci-<class>` a class |
+| `poll_interval` | `10s` | how often queued jobs are listed |
+| `idle_timeout` | `10m` | how long a runner may wait for a job (say its job was cancelled while the VM booted) before its VM is given back |
+| `runner_version` | `2.338.2` | the actions/runner release to run; images with it in `~/actions-runner-<version>` skip the download |
+| `runner_group_id` | `1` | the runner group to register in |
+| `cache_url` | | an Actions cache server, see the README |
+| `api_url` | `https://api.github.com` | GitHub Enterprise Server's API |
+
+Then:
+
+```sh
+fleetci runner-config -global -token-file /etc/fleetci/runner.token > /etc/gitlab-runner/config.toml
+fleetci check            # lists "github owner/api: token can list jobs and runners"
+systemctl restart gitlab-runner
+```
+
+`fleetci runner-config` raises `concurrent` by the classes' limits. GitHub
+jobs don't count against it: fleetci starts their runners itself, within
+each class's `max_instances`.
+
+Run fleetci's watchdog beside gitlab-runner, as in
+[Bare metal with cloud spikes](bare-metal-with-cloud-spikes.md#4-gitlab-runner-and-the-watchdog):
+both forges stop while fleetci's plugin is gone.
+
+## 4. The workflows
+
+```yaml
+# GitHub
+jobs:
+  build:
+    runs-on: fleetci-4vcpu-8gb     # or fleetci for the default class
+```
+
+<!-- x-release-please-start-version -->
+```yaml
+# GitLab
+include:
+  - remote: https://raw.githubusercontent.com/nesty92/fleetci/v0.3.0/templates/gitlab-ci.yml
+build:
+  extends: .fleetci-4vcpu-8gb
+```
+<!-- x-release-please-end -->
+
+A GitHub job asking for a class fleetci lacks, or with other labels than
+`self-hosted` and `linux`, stays queued and is logged once.
+
+## 5. Check it
+
+Start one job on each forge and watch gitlab-runner's log:
+
+```
+runner starting   repo=owner/api queued_job=build class=4vcpu-8gb vm=fleetci-4vcpu-8gb-… waited=1s
+vm acquired       vm=fleetci-4vcpu-8gb-… class=4vcpu-8gb      (the GitLab job)
+```
+
+## Operating it
+
+| What | How |
+| --- | --- |
+| A GitHub job never starts | the log says why: an unknown class, an extra label, or no VM ("no vm for job; retrying on the next poll"). It stays queued and is tried again. |
+| A VM is lost during a GitHub job | the job stays "in progress" on GitHub for about 4 minutes, then fails. GitHub never queues it again; re-run it. |
+| gitlab-runner restarts | GitHub jobs running on its VMs fail with it, like GitLab's. To keep GitHub apart, move `[github]` to a `fleetci serve` with classes of its own ([GitHub only](github-only.md)). |
+| Token expires | `fleetci check` fails on the GitHub line, and the log shows 401s. Replace the file and restart gitlab-runner: the token is read at start. |
+| Add a repo | add it to `repos` and restart gitlab-runner. |

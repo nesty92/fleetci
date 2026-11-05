@@ -126,14 +126,15 @@ so a VM without zstd (gzip) misses what a VM with it saved.
 ## Install
 
 On AWS, [terraform-aws-gitlab-runner-autoscaler](https://github.com/nesty92/terraform-aws-gitlab-runner-autoscaler)
-does all of this when given a `fleetci` input. By hand, from nothing to a
-first job:
+does all of this when given a `fleetci` input. [docs/runbooks](docs/runbooks)
+has whole setups: your own servers with cloud spikes, GitLab and GitHub from
+one runner, and GitHub only. By hand, from nothing to a first job:
 
 **1. Binaries.** Each [release](https://github.com/nesty92/fleetci/releases)
 has plain binaries for Linux and macOS (amd64, arm64) and a `checksums.txt`:
 
 ```sh
-v=0.1.0 arch=linux-amd64
+v=0.3.0 arch=linux-amd64 # x-release-please-version
 base=https://github.com/nesty92/fleetci/releases/download/v$v
 curl -fsSLO "$base/fleetci-$arch" -fsSLO "$base/fleeting-plugin-fleetci-$arch" -fsSLO "$base/checksums.txt"
 sha256sum --ignore-missing -c checksums.txt
