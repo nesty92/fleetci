@@ -55,3 +55,6 @@ func CheckClass(ctx context.Context, name string, c Class, log hclog.Logger) (Ch
 	}
 	return res, nil
 }
+
+// CheckOverflow checks the class's overflow against the other classes.
+func CheckOverflow(name string, classes map[string]Class) error { return checkOverflow(name, classes) }

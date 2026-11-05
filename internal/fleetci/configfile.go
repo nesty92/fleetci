@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/nesty92/fleetci/internal/fleet"
 )
 
 // loadFile reads ConfigFile, a TOML file with fleetci's own settings, so
@@ -110,7 +112,7 @@ func (c Config) Validate() error {
 	}
 	var errs []error
 	for _, name := range slices.Sorted(maps.Keys(c.Classes)) {
-		errs = append(errs, c.Classes[name].Validate(name))
+		errs = append(errs, c.Classes[name].Validate(name), fleet.CheckOverflow(name, c.Classes))
 	}
 	return errors.Join(errs...)
 }

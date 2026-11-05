@@ -35,6 +35,9 @@ SNAPSHOT=${FLEETCI_LOCAL_SNAPSHOT:-true}
 # serve: GitHub jobs run in a "fleetci serve" of their own, on groups of
 # their own, instead of inside gitlab-runner's fleetci plugin.
 GITHUB_MODE=${FLEETCI_LOCAL_GITHUB:-plugin}
+# true: 4vcpu-8gb's jobs beyond its 2 VMs go to 4vcpu-8gb-cloud, containers
+# standing in for a cloud's VMs (fleetci's overflow).
+OVERFLOW=${FLEETCI_LOCAL_OVERFLOW:-false}
 
 case $VMS in
   microvm) small=microvm big=microvm ;;
@@ -57,7 +60,7 @@ if [ "$big" = microvm ] && [ -d "$FD_SRC/cmd/fleeting-plugin-fleetingd" ]; then
   (cd "$FD_SRC" && CGO_ENABLED=0 go build -o "$DATA/bin/fleeting-plugin-fleetingd" ./cmd/fleeting-plugin-fleetingd)
   fleetingd=$DATA/bin/fleeting-plugin-fleetingd
 fi
-[ "$small" = container ] && docker build -q -t fleetci-local-vm "$HERE/vm" >/dev/null
+{ [ "$small" = container ] || [ "$OVERFLOW" = true ]; } && docker build -q -t fleetci-local-vm "$HERE/vm" >/dev/null
 docker build -q -t fleetci-local-host "$HERE" >/dev/null
 docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null
 
@@ -73,7 +76,7 @@ token_file = \"$GITHUB_TOKEN_FILE\""
 cache_url = \"$GITHUB_CACHE_URL\""
 fi
 
-# class <container|microvm> <class> <group> <cpus> <MB> <max> <subnet>
+# class <container|microvm> <class> <group> <cpus> <MB> <max> <subnet> [overflow]
 # A group is one plugin's set of VMs; each needs its own name, and a microVM
 # group its own subnet and disk directory.
 class() {
@@ -81,7 +84,8 @@ class() {
     cat <<CLASS
 [classes.$2]
 plugin = "$DATA/bin/fleeting-plugin-dockervm"
-max_instances = $6
+max_instances = $6${8:+
+overflow = \"$8\"}
 plugin_config = { name = "$3", image = "fleetci-local-vm", network = "$NET", cpus = "$4", memory = "$5m" }
 connector_config = { username = "fleetci", timeout = "2m" }
 CLASS
@@ -94,7 +98,8 @@ CLASS
   cat <<CLASS
 [classes.$2]
 plugin = "$fleetingd"
-max_instances = $6
+max_instances = $6${8:+
+overflow = \"$8\"}
 connector_config = { username = "ubuntu", timeout = "5m" }
 
 [classes.$2.plugin_config]
@@ -138,7 +143,13 @@ cat > "$DATA/fleetci.toml" <<TOML
 default_class = "1vcpu-2gb"
 
 $(class "$small" 1vcpu-2gb vm1 1 2048 3 172.16.121.)
-$(class "$big" 4vcpu-8gb vm4 4 8192 2 172.16.120.)
+$(if [ "$OVERFLOW" = true ]; then
+  class "$big" 4vcpu-8gb vm4 4 8192 2 172.16.120. 4vcpu-8gb-cloud
+  echo
+  class container 4vcpu-8gb-cloud cloud4 4 8192 3
+else
+  class "$big" 4vcpu-8gb vm4 4 8192 2 172.16.120.
+fi)
 $plugin_github
 TOML
 

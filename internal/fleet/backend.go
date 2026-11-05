@@ -34,11 +34,32 @@ type VM struct {
 }
 
 type pool struct {
-	name    string
-	class   Class
-	group   *supervised
-	ts      taskscaler.Taskscaler
-	timeout time.Duration
+	name     string
+	class    Class
+	group    *supervised
+	ts       taskscaler.Taskscaler
+	timeout  time.Duration
+	overflow *pool
+
+	mu   sync.Mutex
+	jobs int // VMs acquired or being acquired; each serves one job
+}
+
+// take counts a job in, if the class has room for it.
+func (p *pool) take() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.jobs >= p.class.MaxInstances {
+		return false
+	}
+	p.jobs++
+	return true
+}
+
+func (p *pool) done() {
+	p.mu.Lock()
+	p.jobs--
+	p.mu.Unlock()
 }
 
 type Backend struct {
@@ -67,7 +88,35 @@ func New(ctx context.Context, classes map[string]Class, log hclog.Logger) (*Back
 		}
 		b.pools[name] = p
 	}
+	for name, p := range b.pools {
+		if err := checkOverflow(name, classes); err != nil {
+			_ = b.Shutdown(ctx)
+			return nil, err
+		}
+		if o := p.class.Overflow; o != "" {
+			p.overflow = b.pools[o]
+		}
+	}
 	return b, nil
+}
+
+// checkOverflow checks that the class's overflow is another class with no
+// overflow of its own.
+func checkOverflow(name string, classes map[string]Class) error {
+	o := classes[name].Overflow
+	if o == "" {
+		return nil
+	}
+	oc, ok := classes[o]
+	switch {
+	case o == name:
+		return fmt.Errorf("class %q: overflow can't be the class itself", name)
+	case !ok:
+		return fmt.Errorf("class %q: overflow class %q doesn't exist", name, o)
+	case oc.Overflow != "":
+		return fmt.Errorf("class %q: overflow class %q has an overflow of its own (%q); one step only", name, o, oc.Overflow)
+	}
+	return nil
 }
 
 // startPool starts the class's plugin and then its taskscaler. The plugin is
@@ -129,10 +178,7 @@ func startPool(ctx context.Context, name string, c Class, groups map[string]stri
 		return nil, err
 	}
 
-	timeout := time.Duration(c.AcquireTimeout)
-	if timeout == 0 {
-		timeout = 10 * time.Minute
-	}
+	timeout := c.acquireTimeout()
 	log.Info("class ready", "group", info.ID, "plugin", c.Plugin, "max_instances", c.MaxInstances, "policies", len(c.schedules()))
 	return &pool{name: name, class: c, group: group, ts: ts, timeout: timeout}, nil
 }
@@ -164,28 +210,62 @@ func (b *Backend) Classes() []string {
 	return names
 }
 
+// overflowPoll is how often a job whose class and overflow are both full
+// looks for room in either.
+var overflowPoll = time.Second
+
 // Create acquires a VM of the class, waiting for one to boot if none is idle.
+// While all of the class's VMs are in use, its overflow class serves the job;
+// when both are full, the job takes the first room in either, its own class
+// first.
 func (b *Backend) Create(ctx context.Context, class string) (VM, error) {
-	p, ok := b.pools[class]
+	asked, ok := b.pools[class]
 	if !ok {
 		return VM{}, fmt.Errorf("unknown class %q", class)
 	}
-
-	id := "fleetci-" + class + "-" + randomHex(4)
 	start := time.Now()
-
-	actx, cancel := context.WithTimeout(ctx, p.timeout)
+	actx, cancel := context.WithTimeout(ctx, asked.timeout)
 	defer cancel()
+
+	p := asked
+	if o := asked.overflow; o != nil {
+		for p = nil; p == nil; {
+			switch {
+			case asked.take():
+				p = asked
+			case o.take():
+				p = o
+			default:
+				select {
+				case <-actx.Done():
+					return VM{}, fmt.Errorf("acquiring a %s vm: %s and its overflow %s are full: %w", class, class, o.name, actx.Err())
+				case <-time.After(overflowPoll):
+				}
+			}
+		}
+	} else {
+		// No overflow: taskscaler queues the job itself.
+		asked.mu.Lock()
+		asked.jobs++
+		asked.mu.Unlock()
+	}
+
+	id := "fleetci-" + p.name + "-" + randomHex(4)
 	acq, err := p.ts.Acquire(actx, id)
 	if err != nil {
-		return VM{}, fmt.Errorf("acquiring a %s vm: %w", class, err)
+		p.done()
+		return VM{}, fmt.Errorf("acquiring a %s vm: %w", p.name, err)
 	}
 
 	b.mu.Lock()
 	b.vms[id] = p
 	b.mu.Unlock()
 
-	b.log.Info("vm acquired", "vm", id, "class", class, "instance", acq.InstanceID(), "waited", time.Since(start).Round(time.Millisecond).String())
+	log := []any{"vm", id, "class", p.name, "instance", acq.InstanceID(), "waited", time.Since(start).Round(time.Millisecond).String()}
+	if p != asked {
+		log = append(log, "overflow_of", asked.name)
+	}
+	b.log.Info("vm acquired", log...)
 
 	// Each call asks the plugin again, so plugins that issue short-lived
 	// keys hand out a fresh one for every connection.
@@ -197,7 +277,7 @@ func (b *Backend) Create(ctx context.Context, class string) (VM, error) {
 		}
 		return target(info, external), nil
 	}
-	return VM{ID: id, Class: class, Instance: acq.InstanceID(), Connect: connect}, nil
+	return VM{ID: id, Class: p.name, Instance: acq.InstanceID(), Connect: connect}, nil
 }
 
 // Delete releases the VM. It was used once, so fleeting removes it.
@@ -210,6 +290,7 @@ func (b *Backend) Delete(_ context.Context, id string) error {
 		return nil
 	}
 	p.ts.Release(id)
+	p.done()
 	b.log.Info("vm released", "vm", id, "class", p.name)
 	return nil
 }

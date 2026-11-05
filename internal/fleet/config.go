@@ -34,8 +34,15 @@ type Class struct {
 	// [[runners.autoscaler.policy]] does. Of the policies whose periods
 	// match, the last one applies; when none matches, no VMs are kept warm.
 	Policy []Policy `json:"policy" toml:"policy"`
-	// AcquireTimeout is how long a job waits for a VM. Default 10m.
+	// AcquireTimeout is how long a job waits for a VM. Default 10m, or 50m
+	// for a class with an overflow, whose jobs wait while both are busy
+	// rather than because something is broken.
 	AcquireTimeout Duration `json:"acquire_timeout" toml:"acquire_timeout"`
+	// Overflow names another class that takes this class's jobs while all
+	// of this class's max_instances are in use, such as cloud VMs for the
+	// spikes of a class on your own machines. When both are full, the job
+	// waits for this class. The overflow class can't have one of its own.
+	Overflow string `json:"overflow" toml:"overflow"`
 }
 
 // Connector mirrors the runner's connector_config.
@@ -75,6 +82,23 @@ type Policy struct {
 }
 
 const defaultIdleTime = 10 * time.Minute
+
+const (
+	defaultAcquireTimeout = 10 * time.Minute
+	// Under GitLab's default job timeout (1h), so a job that never got a VM
+	// still fails as fleetci's, with its reason, rather than as a timeout.
+	defaultOverflowAcquireTimeout = 50 * time.Minute
+)
+
+func (c Class) acquireTimeout() time.Duration {
+	switch {
+	case c.AcquireTimeout != 0:
+		return time.Duration(c.AcquireTimeout)
+	case c.Overflow != "":
+		return defaultOverflowAcquireTimeout
+	}
+	return defaultAcquireTimeout
+}
 
 // schedules turns the class's policies into taskscaler's.
 func (c Class) schedules() []taskscaler.Schedule {

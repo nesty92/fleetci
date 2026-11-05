@@ -289,6 +289,37 @@ should scale those groups either, such as another runner.
 
 A class without `policy` can set `idle_count` and `idle_time` directly, for
 one policy at all times. Every class takes `acquire_timeout` (how long a job
-waits for a VM, default 10m). Unknown keys are errors; relative paths are
+waits for a VM, default 10m, or 50m with an `overflow`). Unknown keys are errors; relative paths are
 relative to the file. Each class's `plugin_config` goes to its fleeting plugin
 as it is.
+
+### Your machines first, the cloud for spikes
+
+`overflow` names a class that takes a class's jobs while all of its
+`max_instances` are in use. For example, microVMs on your own server, with
+EC2 for the rest:
+
+```toml
+[classes.4vcpu-8gb]
+plugin = "fleeting-plugin-fleetingd"   # our fork, on this machine
+max_instances = 6
+overflow = "4vcpu-8gb-aws"
+# plugin_config: vm_num_cpu_cores = 4, vm_memory_mb = 8192, …
+
+[classes.4vcpu-8gb-aws]
+plugin = "fleeting-plugin-aws"
+max_instances = 20
+plugin_config = { name = "fleetci-4vcpu-8gb", region = "eu-west-3" }
+connector_config = { username = "ubuntu", use_external_addr = true }
+```
+
+Jobs keep asking for `4vcpu-8gb`, on GitLab and GitHub alike. The seventh
+job running at once gets an EC2 VM, and once a job on the server ends, the
+next one goes to the server again. When the overflow class is full too, the
+job takes the first room in either, its own class first, for up to the
+class's `acquire_timeout`, 50 minutes by default here. On GitLab the job
+already shows as running while it waits, and the wait counts towards its job
+timeout; on GitHub it stays queued.
+
+The overflow class is a class like any other, so jobs can also ask for it by
+name, but it can't have an overflow of its own.
