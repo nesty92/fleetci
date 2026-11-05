@@ -47,6 +47,8 @@ Measured on a 16-thread laptop (2026-11-04):
 | our fork, 1 vCPU | 9.3–10.2 s, 2 VMs |
 | our fork: shared image, built once at start for both groups | 3 min 1 s; the second group reused it in 1 s |
 | GitHub JIT runner: VM ready to job running | about 7 s |
+| our fork, `vm_snapshot = true`: snapshot build (once per size, after the image) | template ready in 6.6 s (4 vCPU) and 10.1 s (1 vCPU) |
+| our fork, `vm_snapshot = true`: VM start to SSH with its own address and key | 0.29–0.58 s, 6 VMs, GitHub and GitLab jobs passed |
 
 What is left of a cold boot is fleetingd's own per-VM user-data: `apt update`
 and `apt upgrade` on every boot, 3 s, or 12 s when Ubuntu has published
@@ -56,6 +58,15 @@ for 6 s: `multi-user.target`, and so the end of cloud-init, waits for the
 clock to sync.
 
 ## Snapshots
+
+The fork's `vm_snapshot = true` (on by default here, `FLEETCI_M1_SNAPSHOT=false`
+turns it off) does what `snap/reip.sh` tried: after the prebuild, one template
+VM per size boots with a vsock agent, waits for Docker, and is saved. Each job
+VM is then restored from it with its memory mapped copy-on-write, its own disk
+overlay, tap and /30, and gets its address, SSH key, host keys and machine-id
+over the agent before fleeting sees it. A restart reuses the snapshot.
+
+The experiments behind it:
 
 `snap/run.sh [copyonwrite|ondemand|copy] [clones]` boots one VM from
 fleetingd's image, snapshots it once Docker answers, and restores clones

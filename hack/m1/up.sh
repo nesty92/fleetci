@@ -19,6 +19,8 @@ GITHUB_CACHE_URL=${FLEETCI_GITHUB_CACHE_URL:-}
 RUNNER_VERSION=2.338.2
 SMALL=${FLEETCI_M1_SMALL:-dockervm}
 FD_SRC=${FLEETCI_FLEETINGD_SRC:-$REPO/../fleeting-plugin-fleetingd}
+# Restore VMs from a snapshot instead of booting them (the fork only).
+SNAPSHOT=${FLEETCI_M1_SNAPSHOT:-true}
 
 [ -c /dev/kvm ] || { echo "no /dev/kvm" >&2; exit 1; }
 umask 077
@@ -69,6 +71,7 @@ vm_disk_size_gb = 30
 vm_enable_virtio_console = true
 vm_package_upgrade = false
 vm_prebuild_on_start = true
+vm_snapshot = $SNAPSHOT
 vm_prebuild_cloudinit_extra_cmds = [
   "DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-buildx git zstd",
   "usermod -aG docker ubuntu",
