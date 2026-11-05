@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/go-hclog"
@@ -78,7 +79,9 @@ type Backend interface {
 }
 
 // StartFunc runs a just-in-time runner on the VM and returns when it exits.
-type StartFunc func(ctx context.Context, vm fleet.VM, jitConfig string) error
+// It calls took with the name of the job GitHub gives the runner: any
+// queued job with matching labels, not always the one it was started for.
+type StartFunc func(ctx context.Context, vm fleet.VM, jitConfig string, took func(job string)) error
 
 type Dispatcher struct {
 	cfg          Config
@@ -355,7 +358,9 @@ func (d *Dispatcher) prune(queued map[int64]bool) {
 // queued job with the same labels; the count is what matters.
 func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string) {
 	// IDs as strings: plugin logs travel as JSON, which turns them into floats.
-	log := d.log.With("repo", repo, "job", j.Name, "job_id", strconv.FormatInt(j.ID, 10), "class", class)
+	// The job this runner is started for; GitHub may give it another with
+	// the same labels, logged as job once the runner says which.
+	log := d.log.With("repo", repo, "queued_job", j.Name, "queued_job_id", strconv.FormatInt(j.ID, 10), "class", class)
 	start := time.Now()
 
 	vm, err := d.backend.Create(ctx, class)
@@ -391,7 +396,14 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 	defer cancel()
 	go d.watchIdle(rctx, cancel, repo, runnerID, log)
 
-	err = d.start(rctx, vm, jit)
+	var took atomic.Pointer[string]
+	err = d.start(rctx, vm, jit, func(job string) {
+		took.Store(&job)
+		log.Info("runner took a job", "job", job)
+	})
+	if job := took.Load(); job != nil {
+		log = log.With("job", *job)
+	}
 	switch {
 	case ctx.Err() != nil:
 	case err != nil || rctx.Err() != nil:

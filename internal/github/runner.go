@@ -48,7 +48,7 @@ exec ./run.sh --jitconfig "$jit"
 // SSHStart runs the runner on the VM over SSH and logs its output.
 // With cacheURL set, jobs use that cache server instead of GitHub's.
 func SSHStart(version, cacheURL string, log hclog.Logger) StartFunc {
-	return func(ctx context.Context, vm fleet.VM, jit string) error {
+	return func(ctx context.Context, vm fleet.VM, jit string, took func(job string)) error {
 		target, err := vm.Connect(ctx)
 		if err != nil {
 			return err
@@ -70,7 +70,7 @@ func SSHStart(version, cacheURL string, log hclog.Logger) StartFunc {
 		}
 		defer s.Close()
 
-		out := logWriter(log.With("vm", vm.ID))
+		out := logWriter(log.With("vm", vm.ID), took)
 		defer out.Close()
 		s.Stdin = strings.NewReader(jit + "\n")
 		s.Stdout = out
@@ -89,16 +89,30 @@ func SSHStart(version, cacheURL string, log hclog.Logger) StartFunc {
 	}
 }
 
-// logWriter logs each line the runner prints.
-func logWriter(log hclog.Logger) io.WriteCloser {
+// logWriter logs each line the runner prints, and calls took with the job
+// named in its "Running job: <name>" line.
+func logWriter(log hclog.Logger, took func(job string)) io.WriteCloser {
 	r, w := io.Pipe()
 	go func() {
 		sc := bufio.NewScanner(r)
 		for sc.Scan() {
-			if line := strings.TrimSpace(sc.Text()); line != "" {
-				log.Info("runner: " + line)
+			line := strings.TrimSpace(sc.Text())
+			if line == "" {
+				continue
+			}
+			log.Info("runner: " + line)
+			if job, ok := runningJob(line); ok && took != nil {
+				took(job)
 			}
 		}
 	}()
 	return w
+}
+
+// runningJob reads the job's name from the runner's line
+// "2026-11-05 00:49:12Z: Running job: with-service".
+func runningJob(line string) (string, bool) {
+	_, job, ok := strings.Cut(line, "Running job: ")
+	job = strings.TrimSpace(job)
+	return job, ok && job != ""
 }

@@ -121,7 +121,7 @@ func TestDispatcher(t *testing.T) {
 	release := make(chan struct{})
 	var mu sync.Mutex
 	started := map[string]string{} // vm id → jit config
-	start := func(ctx context.Context, vm fleet.VM, jit string) error {
+	start := func(ctx context.Context, vm fleet.VM, jit string, took func(string)) error {
 		mu.Lock()
 		started[vm.ID] = jit
 		mu.Unlock()
@@ -227,7 +227,7 @@ func TestDispatcherRetriesFailedRunner(t *testing.T) {
 	_ = os.WriteFile(tokenFile, []byte("test-token"), 0o600)
 
 	var starts atomic.Int32
-	start := func(context.Context, fleet.VM, string) error {
+	start := func(context.Context, fleet.VM, string, func(string)) error {
 		starts.Add(1)
 		return fmt.Errorf("download failed")
 	}
