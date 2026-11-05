@@ -1,19 +1,19 @@
 #!/bin/sh
 # Runs fleetci on this machine: gitlab-runner with fleetci's plugin, and
 # optionally the GitHub side, in the fleetci-local container. Two classes,
-# 1vcpu-2gb and 4vcpu-6gb, each a fleeting plugin's group:
+# 1vcpu-2gb and 4vcpu-8gb, each a fleeting plugin's group:
 #
 #   FLEETCI_LOCAL_VMS=microvm    both on fleeting-plugin-fleetingd (Cloud
 #                                Hypervisor microVMs); needs /dev/kvm
 #   FLEETCI_LOCAL_VMS=container  both on fleeting-plugin-dockervm (privileged
 #                                containers on this machine's Docker)
-#   FLEETCI_LOCAL_VMS=mixed      1vcpu-2gb on dockervm, 4vcpu-6gb on fleetingd
+#   FLEETCI_LOCAL_VMS=mixed      1vcpu-2gb on dockervm, 4vcpu-8gb on fleetingd
 #
 # The default is microvm when /dev/kvm exists, else container. fleetingd's
 # tap devices and nftables rules live in the container's network namespace,
-# so the machine's network and firewall are left alone. fleetingd is built
-# from our fork when it is checked out next to fleetci (FLEETCI_FLEETINGD_SRC),
-# else the upstream release in the image is used.
+# so the machine's network and firewall are left alone. fleetingd is our
+# fork: built from its checkout next to fleetci (FLEETCI_FLEETINGD_SRC) when
+# there is one, else its release in the image.
 #
 # The runner token is read from ~/.config/fleetci/runner.token and only
 # written into the 0600 config.toml.
@@ -30,7 +30,7 @@ GITHUB_CACHE_URL=${FLEETCI_GITHUB_CACHE_URL:-}
 RUNNER_VERSION=2.338.2
 if [ -c /dev/kvm ]; then VMS=${FLEETCI_LOCAL_VMS:-microvm}; else VMS=${FLEETCI_LOCAL_VMS:-container}; fi
 FD_SRC=${FLEETCI_FLEETINGD_SRC:-$REPO/../fleeting-plugin-fleetingd}
-# Restore microVMs from a snapshot instead of booting them (the fork only).
+# Restore microVMs from a snapshot instead of booting them.
 SNAPSHOT=${FLEETCI_LOCAL_SNAPSHOT:-true}
 # serve: GitHub jobs run in a "fleetci serve" of their own, on groups of
 # their own, instead of inside gitlab-runner's fleetci plugin.
@@ -130,7 +130,7 @@ if [ "$GITHUB_MODE" = serve ] && [ -n "$github" ]; then
 default_class = "1vcpu-2gb"
 
 $(class "$small" 1vcpu-2gb gh1 1 2048 1 172.16.123.)
-$(class "$big" 4vcpu-6gb gh4 4 6144 1 172.16.122.)
+$(class "$big" 4vcpu-8gb gh4 4 8192 1 172.16.122.)
 $github
 TOML
 fi
@@ -138,14 +138,12 @@ cat > "$DATA/fleetci.toml" <<TOML
 default_class = "1vcpu-2gb"
 
 $(class "$small" 1vcpu-2gb vm1 1 2048 3 172.16.121.)
-$(class "$big" 4vcpu-6gb vm4 4 6144 2 172.16.120.)
+$(class "$big" 4vcpu-8gb vm4 4 8192 2 172.16.120.)
 $plugin_github
 TOML
 
 "$DATA/bin/fleetci" runner-config -global -config "$DATA/fleetci.toml" \
   -name fleetci-local -token-file "$TOKEN_FILE" -plugin "$DATA/bin/fleeting-plugin-fleetci" > "$DATA/config.toml"
-"$DATA/bin/fleetci" ci-include -config "$DATA/fleetci.toml" > "$DATA/fleetci.yml"
-chmod 644 "$DATA/fleetci.yml"
 
 docker rm -f fleetci-local >/dev/null 2>&1 || true
 # Same paths inside as outside, so the generated configs work in both.
@@ -173,6 +171,5 @@ docker run -d --init --name fleetci-local $host --entrypoint sh fleetci-local-ho
 ' "$DATA" >/dev/null
 
 echo "running ($VMS): docker logs -f fleetci-local"
-echo "  GitLab CI include: copy $DATA/fleetci.yml to .gitlab/fleetci.yml in your project"
 [ "$big" = microvm ] && echo "  the first microVM waits for fleetingd's image build (several minutes, once)"
 exit 0

@@ -1,26 +1,26 @@
 # Local kit: fleetci on one machine
 
 Stock gitlab-runner, fleetci's plugin and, optionally, the GitHub side, in
-one container, `fleetci-local`. Two classes, `1vcpu-2gb` and `4vcpu-6gb`;
+one container, `fleetci-local`. Two classes, `1vcpu-2gb` and `4vcpu-8gb`;
 GitLab jobs and GitHub Actions jobs pick either one.
 
 ```
 fleetci-local container
   gitlab-runner ─ fleeting-plugin-fleetci        (and fleetci serve, optionally)
     class 1vcpu-2gb ─┐
-    class 4vcpu-6gb ─┴─ microvm:   fleetingd ─ cloud-hypervisor ─ tap + nftables SNAT ─► microVM
+    class 4vcpu-8gb ─┴─ microvm:   fleetingd ─ cloud-hypervisor ─ tap + nftables SNAT ─► microVM
                         container: dockervm ─ machine's Docker socket ─► privileged container
 ```
 
 The VMs are of one of two kinds:
 
-- **microVMs**: Cloud Hypervisor through
-  [fleeting-plugin-fleetingd](https://github.com/helmholtzcloud/fleeting-plugin-fleetingd).
-  Needs `/dev/kvm`. The taps and nftables tables live in the container's
-  network namespace, so the machine's network and firewall are left alone.
-  When our fork, [nesty92/fleeting-plugin-fleetingd](https://github.com/nesty92/fleeting-plugin-fleetingd),
-  is checked out next to fleetci, the kit builds and uses it. Its VMs are
-  restored from a snapshot rather than booted, so they're ready in under a second.
+- **microVMs**: Cloud Hypervisor through our fork of fleetingd,
+  [nesty92/fleeting-plugin-fleetingd](https://github.com/nesty92/fleeting-plugin-fleetingd),
+  from its release, or built from its checkout next to fleetci when there
+  is one. Needs `/dev/kvm`. VMs are restored from a snapshot rather than
+  booted, so they're ready in under a second. The taps and nftables tables
+  live in the container's network namespace, so the machine's network and
+  firewall are left alone.
 - **containers**: `fleeting-plugin-dockervm`, privileged containers running
   Ubuntu 24.04 with their own Docker, like GitHub's `ubuntu-latest`. Any
   machine with Docker. Like EC2 Instance Connect, the plugin hands out a new key
@@ -36,30 +36,24 @@ hack/local/down.sh
 
 | Variable | Default | |
 | --- | --- | --- |
-| `FLEETCI_LOCAL_VMS` | `microvm` with `/dev/kvm`, else `container` | `mixed`: 1vcpu-2gb on containers, 4vcpu-6gb on microVMs |
-| `FLEETCI_LOCAL_SNAPSHOT` | `true` | `false` boots every microVM (fork only) |
+| `FLEETCI_LOCAL_VMS` | `microvm` with `/dev/kvm`, else `container` | `mixed`: 1vcpu-2gb on containers, 4vcpu-8gb on microVMs |
+| `FLEETCI_LOCAL_SNAPSHOT` | `true` | `false` boots every microVM |
 | `FLEETCI_LOCAL_GITHUB` | `plugin` | `serve` runs GitHub jobs in a `fleetci serve` of their own, on groups `gh1` and `gh4` |
 | `FLEETCI_FLEETINGD_SRC` | `../fleeting-plugin-fleetingd` | the fork's checkout |
 | `FLEETCI_GITHUB_CACHE_URL` | | the Actions cache server from `hack/cache/up.sh` |
 
 The runner token is read from `~/.config/fleetci/runner.token` and written
 only into `~/.local/share/fleetci-local/config.toml` (mode 0600). The GitHub
-token is in `~/.config/fleetci/github.token`. A GitLab job picks its class
-from the include `up.sh` writes to `~/.local/share/fleetci-local/fleetci.yml`:
-
-```yaml
-include:
-  - local: .gitlab/fleetci.yml
-build:
-  extends: .fleetci-4vcpu-6gb   # .fleetci → default class
-```
+token is in `~/.config/fleetci/github.token`. Both classes are on fleetci's
+public template, so GitLab jobs pick them with it alone; see
+[Picking a class on GitLab](../../README.md#picking-a-class-on-gitlab).
 
 Measurements are in [docs/measurements.md](../../docs/measurements.md).
 
 ## What it showed about gitlab-runner
 
 - `vm_isolation.image` is expanded with the job's variables, so
-  `class-${FLEETCI_CLASS}` reaches fleetci as `class-4vcpu-6gb`.
+  `class-${FLEETCI_CLASS}` reaches fleetci as `class-4vcpu-8gb`.
 - `vm_isolation.connector_config.key_path` is ignored. The runner logs in
   to a VM with `password` only. fleetci ends that connection itself, so the
   password is a placeholder.
@@ -72,8 +66,6 @@ Measurements are in [docs/measurements.md](../../docs/measurements.md).
 
 ## Limits
 
-- Upstream fleetingd allows one class per machine, and needs the runner
-  restarted every 24 h to get a fresh image. The fork lifts both limits.
 - Files under `~/.local/share/fleetci-local` belong to root, because the
   container writes them. Remove them with
   `docker run --rm -v ~/.local/share/fleetci-local:/d ubuntu sh -c 'rm -rf /d/vms-* /d/images'`.

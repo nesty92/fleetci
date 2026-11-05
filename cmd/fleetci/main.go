@@ -132,12 +132,20 @@ func ciInclude(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("ci-include", flag.ExitOnError)
 	path := configFlag(fs)
 	tag := fs.String("tag", "fleetci", "the tag fleetci's runner is registered with")
+	extra := fs.Bool("extra", false, "only the classes fleetci's public template lacks, to include after it")
 	_ = fs.Parse(args)
 	c, err := fleetci.Load(*path)
 	if err != nil {
 		return err
 	}
 	if err := c.Validate(); err != nil {
+		return err
+	}
+	if *extra {
+		if *tag != fleetci.StandardTag {
+			return fmt.Errorf("-extra goes with the public template, whose tag is %s", fleetci.StandardTag)
+		}
+		_, err = io.WriteString(out, c.CIExtra())
 		return err
 	}
 	_, err = io.WriteString(out, c.CIInclude(*tag))
@@ -204,6 +212,25 @@ func check(args []string, out io.Writer) (bool, error) {
 		if classes := byGroup[g]; len(classes) > 1 {
 			r.fail("group "+g, fmt.Errorf("shared by classes %s; each class needs a group of its own", strings.Join(classes, ", ")))
 		}
+	}
+
+	// Jobs on GitLab may use the public template: say which of its classes
+	// this install serves.
+	var standard, own []string
+	for _, name := range names {
+		if slices.Contains(fleetci.StandardClasses, name) {
+			standard = append(standard, name)
+		} else {
+			own = append(own, name)
+		}
+	}
+	msg := fmt.Sprintf("public template: %d of its classes are here (%s)", len(standard), strings.Join(standard, ", "))
+	if len(standard) == 0 {
+		msg = "public template: none of its classes are here"
+	}
+	r.pass("gitlab ci", msg)
+	if len(own) > 0 {
+		r.note(`others (` + strings.Join(own, ", ") + `) need "fleetci ci-include -extra" after it, or "fleetci ci-include" alone`)
 	}
 
 	if c.GitHub != nil {

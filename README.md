@@ -4,9 +4,10 @@ Per-job machine classes for GitLab CI, on top of
 [fleeting](https://gitlab.com/gitlab-org/fleeting). A job names the size it
 needs; it gets a fresh VM of that size, used once.
 
+<!-- x-release-please-start-version -->
 ```yaml
 include:
-  - local: .gitlab/fleetci.yml   # one hidden job per class
+  - remote: https://raw.githubusercontent.com/nesty92/fleetci/v0.3.0/templates/gitlab-ci.yml
 
 build:
   extends: .fleetci-4vcpu-8gb    # the one line; drop it to go back
@@ -14,6 +15,7 @@ build:
   services: [postgres:17]
   script: go build ./...
 ```
+<!-- x-release-please-end -->
 
 Stock gitlab-runner does the job as usual (`image:`, `services:`, cache,
 artifacts). fleetci only decides where it runs: gitlab-runner loads
@@ -24,16 +26,44 @@ plugin, such as a cloud's, with its own warm VMs and limits.
 Name classes after what they give, such as `2vcpu-4gb` or `8vcpu-32gb-arm`,
 so a job's class says what it gets without opening the runner's config.
 
-Each `.fleetci-<class>` sets the runner tag and `FLEETCI_CLASS` together;
-`.fleetci` alone gets the default class. `fleetci ci-include` writes the
-include from `fleetci.toml`.
-A misspelled class fails when the pipeline is created
-(`unknown keys in extends`), before any VM boots. GitLab does not pass a job's
-tags to the runner, so the class can't be a tag alone.
-
 On AWS spot a Linux job costs about a tenth of a GitHub-hosted one; see
 [docs/cost.md](docs/cost.md) for the comparison on 104M real jobs, network
 and caches included.
+
+## Picking a class on GitLab
+
+[templates/gitlab-ci.yml](templates/gitlab-ci.yml) is a public template
+with one hidden job per standard class: `1vcpu-2gb`, `2vcpu-4gb`,
+`4vcpu-8gb`, `8vcpu-16gb` and `16vcpu-32gb`, each also with `-arm`.
+`.fleetci` alone gets the runner's default class. Include it from a release
+tag, as above. When your classes carry these names, that's all a project
+needs.
+
+Classes of your own go in a local file included after the template.
+`fleetci ci-include -extra` writes one with only the classes the template
+lacks:
+
+<!-- x-release-please-start-version -->
+```yaml
+include:
+  - remote: https://raw.githubusercontent.com/nesty92/fleetci/v0.3.0/templates/gitlab-ci.yml
+  - local: .gitlab/fleetci.yml   # fleetci ci-include -extra > .gitlab/fleetci.yml
+```
+<!-- x-release-please-end -->
+
+The same file can redefine one of the template's jobs, for example to send
+`.fleetci-4vcpu-8gb` to a class of yours named otherwise: the later include
+wins.
+
+A job extending a class the runner lacks fails when it starts, with the
+runner's classes in the error; `fleetci check` lists which of the
+template's classes the runner has. Or skip the template:
+`fleetci ci-include` writes every class of yours into one local file, and a
+misspelled class then fails when the pipeline is created.
+
+Each hidden job sets the runner tag `fleetci` and the variable
+`FLEETCI_CLASS`. The variable is what carries the class, because GitLab
+never passes a job's tags to the runner.
 
 ## GitHub Actions
 
@@ -161,11 +191,12 @@ fleetci check     # every class, GitHub access and config.toml; changes nothing
 gitlab-runner run # or: systemctl restart gitlab-runner
 ```
 
-**8. In each GitLab project**, commit the include and pick classes with
-`extends:`:
+**8. In each GitLab project**, include the public template and pick
+classes with `extends:` (see [Picking a class on GitLab](#picking-a-class-on-gitlab)).
+For classes the template lacks, also commit:
 
 ```sh
-fleetci ci-include > .gitlab/fleetci.yml
+fleetci ci-include -extra > .gitlab/fleetci.yml
 ```
 
 All three commands read `/etc/fleetci/fleetci.toml` unless given `-config`
