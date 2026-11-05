@@ -19,16 +19,16 @@ import (
 //	[runners.autoscaler.plugin_config]
 //	  config_file = "/etc/fleetci/fleetci.toml"
 //
-// The file holds default_class, classes and github with short table names
-// ([classes.4vcpu-8gb], [[classes.4vcpu-8gb.policy]], [github]). Unknown
+// The file holds default_class, classes, github and host with short table
+// names ([classes.4vcpu-8gb], [[classes.4vcpu-8gb.policy]], [github], [host]). Unknown
 // keys are errors, so a misspelled setting is not silently ignored.
 // Relative paths in it are relative to the file.
 func (c *Config) loadFile() error {
 	if c.ConfigFile == "" {
 		return nil
 	}
-	if c.DefaultClass != "" || len(c.Classes) > 0 || c.GitHub != nil {
-		return errors.New("with config_file, put default_class, classes and github in that file, not in plugin_config")
+	if c.DefaultClass != "" || len(c.Classes) > 0 || c.GitHub != nil || c.Host != nil {
+		return errors.New("with config_file, put default_class, classes, github and host in that file, not in plugin_config")
 	}
 
 	var f Config
@@ -71,7 +71,7 @@ func (c *Config) loadFile() error {
 		f.GitHub.TokenFile = relativeTo(dir, f.GitHub.TokenFile)
 	}
 
-	c.DefaultClass, c.Classes, c.GitHub = f.DefaultClass, f.Classes, f.GitHub
+	c.DefaultClass, c.Classes, c.GitHub, c.Host = f.DefaultClass, f.Classes, f.GitHub, f.Host
 	if c.Listen == "" {
 		c.Listen = f.Listen
 	}
@@ -120,6 +120,9 @@ func (c Config) Validate() error {
 				"Set both to 1 here, or keep reuse for GitLab and serve GitHub from a separate config with single-use classes and groups of their own",
 				name, max(class.CapacityPerInstance, 1), max(class.MaxUseCount, 1)))
 		}
+	}
+	if _, _, _, err := fleet.CheckHost(c.Host, c.Classes); err != nil {
+		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
 }

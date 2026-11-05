@@ -48,6 +48,16 @@ type Class struct {
 	// spikes of a class on your own machines. When both are full, the job
 	// waits for this class. The overflow class can't have one of its own.
 	Overflow string `json:"overflow" toml:"overflow"`
+
+	// Host says whether the class's VMs count against the [host] budget.
+	// Unset, they do for the plugins known to boot VMs on this machine
+	// (fleetingd, dockervm).
+	Host *bool `json:"host" toml:"host"`
+	// CPUs and Memory are the size of one of the class's VMs, for the
+	// budget. Unset, they are read from fleetingd's or dockervm's
+	// plugin_config.
+	CPUs   int  `json:"cpus" toml:"cpus"`
+	Memory Size `json:"memory" toml:"memory"`
 }
 
 // Connector mirrors the runner's connector_config.
@@ -151,6 +161,9 @@ func (c Class) validate(name string) error {
 	}
 	if c.CapacityPerInstance < 0 || c.MaxUseCount < 0 {
 		return fmt.Errorf("class %q: capacity_per_instance and max_use_count can't be negative", name)
+	}
+	if c.CPUs < 0 || c.Memory < 0 {
+		return fmt.Errorf("class %q: cpus and memory can't be negative", name)
 	}
 	if c.IdleCount < 0 || c.IdleCount > c.MaxInstances {
 		return fmt.Errorf("class %q: idle_count must be between 0 and max_instances", name)

@@ -211,6 +211,8 @@ each:
 - `fleetci.toml` loads and is valid;
 - each class's plugin starts, its credentials work and its group exists, and
   no two classes share a group;
+- the host's budget, for the classes on this machine (see
+  [Sharing this machine's CPUs and memory](#sharing-this-machines-cpus-and-memory));
 - the GitHub token can list each repo's jobs and runners;
 - `config.toml` has fleetci's entry, naming each missing or wrong setting
   with the line to write.
@@ -340,3 +342,39 @@ timeout; on GitHub it stays queued.
 
 The overflow class is a class like any other, so jobs can also ask for it by
 name, but it can't have an overflow of its own.
+
+### Sharing this machine's CPUs and memory
+
+The classes whose VMs run on this machine share its CPUs and memory: by
+default those of fleetingd and dockervm, with each VM's size read from
+their `plugin_config`. A job gets a VM only while its size still fits, so
+a big job and many small ones share the server without each class keeping
+a worst-case share. `max_instances` stays each class's own ceiling.
+
+The budget is detected at start: the CPUs and memory the machine has, or
+its cgroup allows, less 1 CPU and a tenth of the memory (at least 2GB) for
+the host. fleetci logs it, and `fleetci check` prints it with what the
+classes could ask for at once. `[host]` overrides it:
+
+```toml
+[host]                                   # every key optional
+reserve = { cpus = 4, memory = "16GB" }  # keep the detection, change the reserve
+cpus    = 48                             # or set the budget outright; more than
+memory  = "100GB"                        #   the machine over-commits on purpose
+enabled = false                          # no budget: each class keeps its max_instances
+
+[classes.mine]
+plugin = "/opt/my-local-plugin"          # a local plugin fleetci doesn't know:
+host   = true                            #   put it on the budget, with its size
+cpus   = 4
+memory = "8GB"
+```
+
+A class can also set `host = false` to stay off the budget.
+
+Jobs waiting for room start in the order they came: a waiting job keeps
+the room it needs from the jobs behind it, so small jobs don't starve a
+big one. A later job goes to its `overflow` instead of waiting, if it has
+one. Warm VMs (`idle_count`, or a policy's) and the VMs of a class that
+reuses them hold their share all the time; fleetci refuses a budget they
+don't fit, or one with no room left for a class's VM.

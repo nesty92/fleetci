@@ -44,7 +44,7 @@ func serve(args []string) error {
 	defer stop()
 
 	startCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-	backend, err := fleet.New(startCtx, c.Classes, log)
+	backend, err := fleet.New(startCtx, c.Classes, c.Host, log)
 	cancel()
 	if err != nil {
 		return err

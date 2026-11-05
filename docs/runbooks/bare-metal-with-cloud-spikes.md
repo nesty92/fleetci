@@ -232,6 +232,14 @@ repos = ["owner/name"]
 token_file = "/etc/fleetci/github.token"
 ```
 
+Both classes share the server's CPUs and memory. fleetci detects them at
+start and keeps 1 CPU and a tenth of the memory for the host, then gives a
+job a VM only while its size still fits, so `max_instances` (8 and 6 here)
+is each class's ceiling, not a share kept for it. A job that doesn't fit
+goes to its `overflow`. `[host]` changes the reserve or sets the budget
+outright; see the README's
+[Sharing this machine's CPUs and memory](../../README.md#sharing-this-machines-cpus-and-memory).
+
 The image commands are cloud-init `runcmd` entries: keep them free of `: `
 and ` #`. The names `2vcpu-4gb` and `4vcpu-8gb` are on fleetci's public GitLab
 template, so projects need nothing but the template; the cloud classes
@@ -274,7 +282,12 @@ systemctl daemon-reload && systemctl enable --now fleetci-watchdog
 ## 5. Check it
 
 `fleetci check` must pass every line: each class's plugin starts and finds its
-group, and the GitHub token works. Then run more jobs of one class at once
+group, and the GitHub token works. Its `host` line is the server's budget:
+
+```
+ok    host       budget cpus=31 memory=113GB (detected 32 cpus, reserve 1; detected 125GB memory, reserve 12GB) for 2vcpu-4gb, 4vcpu-8gb; fixed shares none
+```
+ Then run more jobs of one class at once
 than the server holds, for example ten `4vcpu-8gb` jobs with
 `max_instances = 6`:
 
@@ -287,7 +300,8 @@ vm acquired  vm=fleetci-4vcpu-8gb-7b5adaca     class=4vcpu-8gb     waited=0.6s
 vm acquired  vm=fleetci-4vcpu-8gb-aws-5c03c696 class=4vcpu-8gb-aws overflow_of=4vcpu-8gb waited=48s
 ```
 
-The first six land on the server, the rest in the cloud. The first VM of
+As many as the server holds land on it, up to the six of `max_instances`,
+and the rest go to the cloud. The first VM of
 each size waits a few minutes once, while the server builds the image and
 then the snapshot.
 
@@ -296,6 +310,7 @@ then the snapshot.
 | What | How |
 | --- | --- |
 | How often you spill | count `overflow_of=` lines. Spilling every day means another server would pay off. |
+| Jobs wait although their class has room | the server's budget is full: a job without `overflow` that times out says "the host has no room for one more of its VMs" with what is in use. Add an `overflow`, or raise the budget with `[host]` if the server has more to give. |
 | A class's plugin dies | fleetci starts it again within a second; its running jobs fail and are logged. Nothing to do. |
 | fleetci's plugin dies | the watchdog restarts gitlab-runner after 30 s. Jobs running at that moment fail. |
 | Cloud VMs left behind | fleetci removes what's left in its groups when it stops and when it starts again; nothing else may scale those groups. |
