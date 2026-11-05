@@ -117,8 +117,14 @@ host="--network $NET --device /dev/kvm --device /dev/net/tun --cap-add NET_ADMIN
 docker run --rm $host --entrypoint "$DATA/bin/fleetci" fleetci-m1-host \
   check -config "$DATA/fleetci.toml" -runner-config "$DATA/config.toml" ||
   echo "fleetci check found problems; see above" >&2
-docker run -d --name fleetci-m1 $host fleetci-m1-host \
-  run --config "$DATA/config.toml" --working-directory "$DATA/work" >/dev/null
+# tini reaps what gitlab-runner leaves; gitlab-runner runs in a loop with
+# fleetci's watchdog beside it, which stops it when its fleetci plugin is
+# gone (gitlab-runner never starts a dead plugin again).
+docker run -d --init --name fleetci-m1 $host --entrypoint sh fleetci-m1-host -c '
+  "$0/bin/fleetci" watchdog -plugin "$0/bin/fleeting-plugin-fleetci" \
+    -restart "p=\$(pgrep -x gitlab-runner); kill \$p; sleep 15; kill -9 \$p 2>/dev/null || true" &
+  while :; do gitlab-runner run --config "$0/config.toml" --working-directory "$0/work"; sleep 1; done
+' "$DATA" >/dev/null
 
 echo "running: docker logs -f fleetci-m1"
 echo "  the first 4vcpu-6gb job waits for fleetingd's image build (several minutes)"

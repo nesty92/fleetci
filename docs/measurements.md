@@ -78,3 +78,22 @@ unprivileged GitLab job can't run.
 | class plugin running again | never, until fleetci restarted | same second |
 | the two jobs on its VMs fail | after 2 min 18 s (TCP gave up) | after 28 s (keepalive) |
 | new VMs for the queue | one at a time: reused IDs clashed | two, 31 s after the kill |
+
+## Chaos rounds
+
+On M1, with real jobs running on both forges.
+
+| Fault | What happened |
+| --- | --- |
+| a VM's hypervisor killed | its job failed after 19 s; the VM was replaced |
+| a VM frozen (`SIGSTOP`) | its job failed after 29 s; the frozen VM was killed and replaced |
+| the 4vcpu-6gb plugin killed | running again the same second; its two jobs failed after 28 s |
+| the fleetci plugin killed | its class plugins and VMs died with it; gitlab-runner never starts it again, so `fleetci watchdog` restarted gitlab-runner after 40 s |
+| no internet for 60 s | job listing failed every 30 s; the running job paused and passed; nothing else failed |
+| a job fills the disk | that job failed (`docker run`: exit 125); its runner still reported it |
+| a job asks for 8 GB on 6 GB | `MemoryError`; the VM and runner stayed up |
+| a job powers its VM off | dropped after about 30 s; GitHub reports "lost communication" |
+| the whole M1 container restarted | new VMs 6 s later; no taps, files or processes left over |
+
+A job whose VM is lost stays "in progress" on GitHub until GitHub gives up
+on its runner, about 4 minutes later; GitHub never queues it again.
