@@ -1,10 +1,10 @@
 # M1: real microVMs next to containers, on one machine
 
-M0 with one class swapped for real VMs. `4vcpu-6gb` boots Cloud Hypervisor
-microVMs through
+M0 with real VMs. `4vcpu-6gb` runs Cloud Hypervisor microVMs through
 [fleeting-plugin-fleetingd](https://github.com/helmholtzcloud/fleeting-plugin-fleetingd);
-`1vcpu-2gb` stays on `fleeting-plugin-dockervm`. GitLab jobs and GitHub
-Actions jobs pick either one, as in M0.
+`1vcpu-2gb` stays on `fleeting-plugin-dockervm`, or becomes a second
+fleetingd group. GitLab jobs and GitHub Actions jobs pick either one, as in
+M0.
 
 ```
 fleetci-m1 container (/dev/kvm, /dev/net/tun, NET_ADMIN, own netns)
@@ -16,6 +16,10 @@ fleetci-m1 container (/dev/kvm, /dev/net/tun, NET_ADMIN, own netns)
 fleetingd's tap devices and nftables tables live in the container's network
 namespace, so the machine's network and firewall are left alone.
 
+When our fork, [nesty92/fleeting-plugin-fleetingd](https://github.com/nesty92/fleeting-plugin-fleetingd),
+is checked out next to fleetci, the kit builds and uses it. Its VMs are
+restored from a snapshot rather than booted: ready in under a second.
+
 ## Run
 
 ```sh
@@ -24,143 +28,22 @@ docker logs -f fleetci-m1
 hack/m1/down.sh
 ```
 
+| Variable | Default | |
+| --- | --- | --- |
+| `FLEETCI_M1_SMALL` | `dockervm` | `fleetingd` makes `1vcpu-2gb` a second fleetingd group |
+| `FLEETCI_M1_SNAPSHOT` | `true` | `false` boots every VM (fork only) |
+| `FLEETCI_FLEETINGD_SRC` | `../fleeting-plugin-fleetingd` | the fork's checkout |
+| `FLEETCI_GITHUB_CACHE_URL` | | the Actions cache server from `hack/cache/up.sh` |
+
 It needs `/dev/kvm` and reuses M0's runner token
 (`~/.config/fleetci/m0-runner.token`), so don't run M0 and M1 at once.
-
-## What fleetingd does
-
-On the first job it downloads the Ubuntu 26.04 cloud image and kernel. It
-boots a prebuild VM that runs `vm_prebuild_cloudinit_extra_cmds`, which
-installs Docker and actions/runner, then cleans cloud-init and shuts down.
-Every job VM is a copy-on-write clone of that image with a fresh cloud-init
-seed. A VM runs one job and is then removed.
-
-Measured on a 16-thread laptop (2026-11-04):
-
-| Step | Time |
-| --- | --- |
-| Image download, resize and prebuild (once) | 2 min 57 s |
-| microVM start to ready (cloud-init, SSH, Docker), stock image | 16.1–22.8 s, 6 VMs |
-| same, image without snapd & co. and with `chrony-wait` masked | 9.3–15.1 s, 4 VMs |
-| fleetingd's copy of the 5.4 GB image before each start | 1.9–3.0 s |
-| our fork: qcow2 overlay, `vm_package_upgrade = false`, 4 vCPU | 5.8–7.3 s, 6 VMs |
-| our fork, 1 vCPU | 9.3–10.2 s, 2 VMs |
-| our fork: shared image, built once at start for both groups | 3 min 1 s; the second group reused it in 1 s |
-| GitHub JIT runner: VM ready to job running | about 7 s |
-| our fork, `vm_snapshot = true`: snapshot build (once per size, after the image) | template ready in 6.6 s (4 vCPU) and 10.1 s (1 vCPU) |
-| our fork, `vm_snapshot = true`: VM start to SSH with its own address and key | 0.29–0.58 s, 6 VMs, GitHub and GitLab jobs passed |
-
-What is left of a cold boot is fleetingd's own per-VM user-data: `apt update`
-and `apt upgrade` on every boot, 3 s, or 12 s when Ubuntu has published
-updates. The same image booted without them reaches Docker in 6.7 s
-(kernel 0.2 s, userspace 5.4 s). `chrony-wait.service` alone held boot up
-for 6 s: `multi-user.target`, and so the end of cloud-init, waits for the
-clock to sync.
-
-## Snapshots
-
-The fork's `vm_snapshot = true` (on by default here, `FLEETCI_M1_SNAPSHOT=false`
-turns it off) does what `snap/reip.sh` tried: after the prebuild, one template
-VM per size boots with a vsock agent, waits for Docker, and is saved. Each job
-VM is then restored from it with its memory mapped copy-on-write, its own disk
-overlay, tap and /30, and gets its address, SSH key, host keys and machine-id
-over the agent before fleeting sees it. A restart reuses the snapshot.
-
-The experiments behind it:
-
-`snap/run.sh [copyonwrite|ondemand|copy] [clones]` boots one VM from
-fleetingd's image, snapshots it once Docker answers, and restores clones
-side by side. Each clone runs in its own network namespace with the
-template's IP and MAC, so its network needs no change. Its disk is a qcow2
-overlay on the frozen template disk. After the restore it gets a stepped
-clock, new SSH host keys and a random machine id.
-
-3 clones at once, 4 vCPU and 6 GB each:
-
-| Restore mode | Restore to `docker version` over SSH | Memory per clone |
-| --- | --- | --- |
-| `copyonwrite` | 0.34–0.37 s | 620–650 MB resident, 91–101 MB private |
-| `ondemand` (userfaultfd) | 0.80–0.88 s | 6.1 GB, all private |
-
-Identity fixes take another 0.35–0.48 s, and `docker run` works in each clone.
-Writing the snapshot takes 2.3 s and 6.1 GB of disk: the guest's whole memory.
-With `copyonwrite` the clones share the snapshot's pages through the page
-cache, so three cost about one copy of what they read plus 100 MB each.
-`ondemand` faults in all 6 GB per clone. No fleeting plugin does this yet.
-
-### Firecracker, for comparison
-
-`snap/fc-run.sh` runs the same experiment on Firecracker 1.17 with its CI
-kernel (6.1) and the same image, sizes and clones. The CI kernel has no GPT,
-ISO9660/FAT or nf_tables. So the script extracts the root partition to a plain
-ext4 file (once, 53 s) and writes the cloud-init seed into it. It also drops
-the EFI mount from fstab, and the guest switches to iptables-legacy.
-
-| | Cloud Hypervisor | Firecracker |
-| --- | --- | --- |
-| cold boot to `docker version` | 6.7 s (kernel 0.2 s) | 6.6 s (kernel 0.8 s) |
-| restore to `docker version` | 0.34–0.37 s | 0.62 s |
-| memory per clone, resident / private | 620 / 93 MB | 340 / 84 MB |
-| clone disk | qcow2 overlay, instant | raw only: 4.4 GB copy, 4.6–5.3 s |
-| RNG after restore | reseed by hand | VMGenID reseeds it |
-| `docker run` on the default bridge | works | fails: the CI kernel lacks the iptables raw table |
-
-`fc-run.sh 3 ubuntu` boots Firecracker with Ubuntu's own kernel instead, the one
-fleetingd gives Cloud Hypervisor, uncompressed from its bzImage. Its modules are in
-the image, so nf_tables and the raw table load and Docker works as is.
-
-| Firecracker with Ubuntu's kernel | |
-| --- | --- |
-| cold boot to `docker version` | 6.3 s (kernel 0.7 s, userspace 4.3 s) |
-| restore to `docker version` | 1.54 s, all 3 clones |
-| memory per clone, resident / private | 370 / 97 MB |
-| `docker run` on the default bridge | works |
-
-The restore is slower than with the CI kernel (0.62 s), and the cause isn't measured yet.
-Cold boots side by side (`snap/boot-run.sh`, 3 each, Ubuntu's kernel in both,
-a new cloud-init instance every boot). Each cell gives the time from process
-start to SSH, then to `docker version`:
-
-| | SSH | ready | guest kernel + userspace |
-| --- | --- | --- | --- |
-| Cloud Hypervisor | 4.8–5.8 s | 5.2–6.3 s | 0.2 + 3.8–4.2 s |
-| Firecracker, serial console | 5.7–6.9 s | 6.2–7.3 s | 0.7 + 4.2–4.8 s |
-| Firecracker, `quiet`, i8042 off | 4.7 s | 5.1–5.2 s | 0.2 + 3.2–4.0 s |
-
-Firecracker's emulated serial console was what made its kernel slow. Quiet,
-both boot alike. Firecracker adds 1.3 s to copy the raw disk, which
-Cloud Hypervisor's qcow2 overlay avoids. In both, the slowest unit is
-`systemd-networkd-wait-online` at 1.1–2.0 s, though the network is
-static. `systemd-binfmt` costs Firecracker another 0.9 s.
-
-Copy-on-write disks for Firecracker: `fc-run.sh 3 ubuntu reflink` keeps the
-disks on a loop-mounted btrfs (in a sparse file), and each clone is a
-`cp --reflink` of the template. A device-mapper snapshot would do the same,
-but needs the `dm_snapshot` module. With the quiet console options:
-
-| Firecracker, Ubuntu's kernel | raw copy, serial console | reflink, `quiet` |
-| --- | --- | --- |
-| clone disk | 2.3–5.3 s | 0.05 s |
-| template cold boot to `docker version` | 6.3 s | 4.3 s |
-| restore to `docker version` | 1.54 s | 0.32 s |
-| memory per clone, resident / private | 370 / 97 MB | 420 / 82 MB |
-
-The slow restore came from the serial console. Quiet, Firecracker restores as
-fast as Cloud Hypervisor.
-
-With Firecracker's own kernel, `DOCKER_INSECURE_NO_IPTABLES_RAW=1` in
-Docker's environment skips the raw-table rule instead. That's untested here.
-
-Firecracker uses less memory, but it needs a kernel of our own for Docker's
-networking. Without reflinks or device-mapper snapshots, every clone copies
-its disk. Cloud Hypervisor runs Ubuntu's own kernel and image as they are.
+`snap/` holds the snapshot and Firecracker experiments.
+Measurements are in [docs/measurements.md](../../docs/measurements.md).
 
 ## Limits
 
-- fleetingd allows one class per machine: its nftables table names and
-  group ID are fixed, and `vm_subnet` must be `172.16.120.`.
-- The image follows Ubuntu's daily build and is rebuilt when that changes.
-  fleetingd's README suggests restarting the runner every 24 h.
-- Files under `~/.local/share/fleetci-m1/vms` belong to root (written from
+- Upstream fleetingd allows one class per machine and wants a runner
+  restart every 24 h for a fresh image; the fork lifts both.
+- Files under `~/.local/share/fleetci-m1` belong to root (written from
   the container). Remove them with
-  `docker run --rm -v ~/.local/share/fleetci-m1:/d ubuntu rm -rf /d/vms`.
+  `docker run --rm -v ~/.local/share/fleetci-m1:/d ubuntu rm -rf /d/vms /d/images`.
