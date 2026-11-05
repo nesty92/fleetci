@@ -1,7 +1,7 @@
 //go:build docker
 
 // Run with: go test -tags docker ./internal/fleet/
-// Needs Docker and the hack/m0 VM image (hack/m0/up.sh builds it).
+// Needs Docker and the kit's VM image: docker build -t fleetci-local-vm hack/local/vm
 package fleet
 
 import (
@@ -34,7 +34,7 @@ func TestClassWithDockerPlugin(t *testing.T) {
 
 	group := "test-" + randomHex(3)
 	pluginCfg, _ := json.Marshal(map[string]string{
-		"name": group, "image": "fleetci-m0-vm", "network": network, "cpus": "1", "memory": "2g",
+		"name": group, "image": "fleetci-local-vm", "network": network, "cpus": "1", "memory": "2g",
 	})
 
 	log := hclog.New(&hclog.LoggerOptions{Level: hclog.Info, Output: os.Stderr})
@@ -140,7 +140,7 @@ func TestClassesNeedTheirOwnGroup(t *testing.T) {
 		t.Fatalf("building plugin: %v\n%s", err, out)
 	}
 	cfg := func(group string) RawConfig {
-		b, _ := json.Marshal(map[string]string{"name": group, "image": "fleetci-m0-vm", "network": "bridge", "cpus": "1", "memory": "1g"})
+		b, _ := json.Marshal(map[string]string{"name": group, "image": "fleetci-local-vm", "network": "bridge", "cpus": "1", "memory": "1g"})
 		return b
 	}
 	class := func(group string) Class {

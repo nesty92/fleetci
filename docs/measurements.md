@@ -1,6 +1,7 @@
 # Measurements
 
-Local runs of the M1 kit (`hack/m1`) on a 16-thread laptop, November 2026.
+Runs of the local kit ([hack/local](../hack/local)) on a 16-thread laptop,
+November 2026.
 Cloud Hypervisor v54, Firecracker 1.17, Ubuntu 26.04 guests.
 
 ## VM start, fleetingd
@@ -27,7 +28,7 @@ What slowed cold boots:
 
 ## Snapshot restore modes
 
-`hack/m1/snap/run.sh`, 3 clones at once, 4 vCPU and 6 GB each.
+3 clones at once, 4 vCPU and 6 GB each.
 
 | Mode | Restore to `docker version` | Memory per clone |
 | --- | --- | --- |
@@ -36,7 +37,7 @@ What slowed cold boots:
 
 ## Cloud Hypervisor and Firecracker
 
-`hack/m1/snap/fc-run.sh` and `boot-run.sh`, same image and sizes.
+Same image and sizes.
 Firecracker uses Ubuntu's kernel, `quiet`, with disks on btrfs reflinks.
 
 | | Cloud Hypervisor | Firecracker |
@@ -81,7 +82,7 @@ unprivileged GitLab job can't run.
 
 ## Chaos rounds
 
-On M1, with real jobs running on both forges.
+With real jobs running on both forges.
 
 | Fault | What happened |
 | --- | --- |
@@ -93,9 +94,9 @@ On M1, with real jobs running on both forges.
 | a job fills the disk | that job failed (`docker run`: exit 125); its runner still reported it |
 | a job asks for 8 GB on 6 GB | `MemoryError`; the VM and runner stayed up |
 | a job powers its VM off | dropped after about 30 s; GitHub reports "lost communication" |
-| the whole M1 container restarted | new VMs 6 s later; no taps, files or processes left over |
+| the kit's container restarted | new VMs 6 s later; no taps, files or processes left over |
 
-With GitHub on `fleetci serve` (`FLEETCI_M1_GITHUB=serve`) and GitLab on
+With GitHub on `fleetci serve` (`FLEETCI_LOCAL_GITHUB=serve`) and GitLab on
 gitlab-runner's plugin, each on its own groups:
 
 | Fault | What happened |
@@ -105,3 +106,6 @@ gitlab-runner's plugin, each on its own groups:
 
 A job whose VM is lost stays "in progress" on GitHub until GitHub gives up
 on its runner, about 4 minutes later; GitHub never queues it again.
+
+The scripts behind the restore-mode and Firecracker runs were removed once
+done. They're in git history under `hack/m1/snap` (commit `3514838`).

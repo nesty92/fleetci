@@ -57,7 +57,7 @@ Docker. GitLab jobs always run in a container on the VM.
 
 A job asking for a class fleetci lacks, or for other labels besides
 `self-hosted` and `linux`, stays queued and is logged. The VM image should
-carry actions/runner in `~/actions-runner-<version>` (both kits do); otherwise
+carry actions/runner in `~/actions-runner-<version>` (the images of [hack/local](hack/local) do); otherwise
 it is downloaded for each job.
 
 ### Without gitlab-runner
@@ -91,7 +91,7 @@ cache (artifacts) to GitHub. It speaks the v2 cache protocol, which
 
 Install `zstd` on every image. The cache key includes the compression,
 so a VM without zstd (gzip) misses what a VM with it saved.
-`hack/cache/up.sh` runs the server on RustFS for the kits.
+`hack/cache/up.sh` runs the server on RustFS for [hack/local](hack/local).
 
 ## Install
 

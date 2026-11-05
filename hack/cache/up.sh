@@ -1,10 +1,11 @@
 #!/bin/sh
 # A local stand-in for the Actions cache on S3: RustFS as the bucket and
-# falcondev-oss/github-actions-cache-server in front of it, on M0's network.
+# falcondev-oss/github-actions-cache-server in front of it, on the network
+# of hack/local.
 # Prints the cache_url to put under [github] in fleetci.toml.
 set -eu
 DATA=${FLEETCI_CACHE_DATA:-$HOME/.local/share/fleetci-cache}
-NET=fleetci-m0
+NET=fleetci-local
 BUCKET=gh-actions-cache
 
 umask 077

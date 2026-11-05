@@ -1,4 +1,4 @@
-# The M1 host: gitlab-runner, fleetci, and fleetingd with Cloud Hypervisor,
+# The local kit's host: gitlab-runner, fleetci, and fleetingd with Cloud Hypervisor,
 # in one container. fleetingd's tap devices and nftables rules live in this
 # container's network namespace, so the machine's own network is untouched.
 FROM ubuntu:24.04

@@ -1,13 +1,13 @@
 #!/bin/sh
 # Writes gitlab-runner's config.toml for the AWS test from `tofu output`:
 # one fleetci class per Auto Scaling group, each run by fleeting-plugin-aws.
-# The runner token is read from ~/.config/fleetci/m0-runner.token and only
+# The runner token is read from ~/.config/fleetci/runner.token and only
 # written into the 0600 config.
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 DATA=${FLEETCI_AWS_DATA:-$HOME/.local/share/fleetci-aws}
-TOKEN_FILE=${FLEETCI_M0_TOKEN:-$HOME/.config/fleetci/m0-runner.token}
+TOKEN_FILE=${FLEETCI_LOCAL_TOKEN:-$HOME/.config/fleetci/runner.token}
 AWS_PLUGIN_VERSION=${AWS_PLUGIN_VERSION:-v1.3.1}
 # GitHub Actions on the same classes: space-separated owner/name repos, and a
 # file holding a token that may register runners on them.

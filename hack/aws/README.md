@@ -40,7 +40,7 @@ vCPU quota (Spot and On-Demand are separate) can stop a group short of it:
 You need:
 
 - an AWS CLI profile on your personal account (`aws configure sso`);
-- the runner token in `~/.config/fleetci/m0-runner.token` (from hack/m0);
+- the runner token in `~/.config/fleetci/runner.token` (as for hack/local);
 - `tofu` and `jq`.
 
 ```sh
@@ -60,7 +60,7 @@ For GitHub Actions on the same groups, put a token that may register runners
 on the repos in `~/.config/fleetci/github.token` and run
 `FLEETCI_GITHUB_REPOS="owner/name" ./runner-config.sh`.
 
-Stop the local runner from hack/m0 first, since it uses the same token.
+Stop the local kit (hack/local/down.sh) first, since it uses the same token.
 
 The credentials used by fleeting-plugin-aws need the plugin's IAM policy
 (see its README), scoped to the two groups: `autoscaling:SetDesiredCapacity`,
