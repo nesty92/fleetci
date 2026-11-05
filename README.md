@@ -126,9 +126,9 @@ so a VM without zstd (gzip) misses what a VM with it saved.
 ## Install
 
 On AWS, [terraform-aws-gitlab-runner-autoscaler](https://github.com/nesty92/terraform-aws-gitlab-runner-autoscaler)
-does all of this when given a `fleetci` input. [docs/runbooks](docs/runbooks)
-has whole setups: your own servers with cloud spikes, GitLab and GitHub from
-one runner, and GitHub only. By hand, from nothing to a first job:
+does all of this from `fleetci` on a runner pool. [docs/runbooks](docs/runbooks)
+has whole setups: AWS with that module, your own servers with cloud spikes,
+GitLab and GitHub from one runner, and GitHub only. By hand, from nothing to a first job:
 
 **1. Binaries.** Each [release](https://github.com/nesty92/fleetci/releases)
 has plain binaries for Linux and macOS (amd64, arm64) and a `checksums.txt`:
@@ -293,6 +293,22 @@ one policy at all times. Every class takes `acquire_timeout` (how long a job
 waits for a VM, default 10m, or 50m with an `overflow`). Unknown keys are errors; relative paths are
 relative to the file. Each class's `plugin_config` goes to its fleeting plugin
 as it is.
+
+### Reusing VMs
+
+By default each VM runs one job and is removed. A class can reuse them, as
+docker-autoscaler runners do, to keep pulled images and caches:
+`capacity_per_instance` (jobs on a VM at once) and `max_use_count` (jobs
+before it is removed), both 1 by default. `concurrent` grows by
+`max_instances × capacity_per_instance`.
+
+Reuse is for GitLab only, whose jobs run in containers on the VM. GitHub
+steps run on the VM itself, as a user who can use its Docker, so a job could
+read or change another job's VM. fleetci refuses to start, and
+`fleetci check` fails, when a file with `[github]` has a class that reuses
+VMs. To reuse VMs for GitLab and serve GitHub too, split them: GitHub in a
+`fleetci serve` (or another runner) with single-use classes and groups of
+their own.
 
 ### Your machines first, the cloud for spikes
 

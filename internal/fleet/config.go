@@ -25,6 +25,11 @@ type Class struct {
 
 	// MaxInstances caps the VMs of this class, running jobs and idle.
 	MaxInstances int `json:"max_instances" toml:"max_instances"`
+	// CapacityPerInstance is how many jobs a VM runs at once, and
+	// MaxUseCount how many it runs before it is removed. Both default to 1:
+	// a fresh VM per job. More reuses VMs, for GitLab only; see Reuses.
+	CapacityPerInstance int `json:"capacity_per_instance" toml:"capacity_per_instance"`
+	MaxUseCount         int `json:"max_use_count" toml:"max_use_count"`
 	// IdleCount is how many VMs to keep booted and waiting for a job. It
 	// is shorthand for one policy that applies at all times.
 	IdleCount int `json:"idle_count" toml:"idle_count"`
@@ -90,6 +95,19 @@ const (
 	defaultOverflowAcquireTimeout = 50 * time.Minute
 )
 
+// capacity is how many jobs a VM runs at once.
+func (c Class) capacity() int { return max(c.CapacityPerInstance, 1) }
+
+// useCount is how many jobs a VM runs before it is removed.
+func (c Class) useCount() int { return max(c.MaxUseCount, 1) }
+
+// Slots is how many of the class's jobs run at once.
+func (c Class) Slots() int { return c.MaxInstances * c.capacity() }
+
+// Reuses reports whether a VM of the class runs more than one job, at once
+// or one after another.
+func (c Class) Reuses() bool { return c.capacity() > 1 || c.useCount() > 1 }
+
 func (c Class) acquireTimeout() time.Duration {
 	switch {
 	case c.AcquireTimeout != 0:
@@ -130,6 +148,9 @@ func (c Class) validate(name string) error {
 	}
 	if c.MaxInstances <= 0 {
 		return fmt.Errorf("class %q: max_instances must be at least 1", name)
+	}
+	if c.CapacityPerInstance < 0 || c.MaxUseCount < 0 {
+		return fmt.Errorf("class %q: capacity_per_instance and max_use_count can't be negative", name)
 	}
 	if c.IdleCount < 0 || c.IdleCount > c.MaxInstances {
 		return fmt.Errorf("class %q: idle_count must be between 0 and max_instances", name)

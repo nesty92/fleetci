@@ -38,6 +38,9 @@ GITHUB_MODE=${FLEETCI_LOCAL_GITHUB:-plugin}
 # true: 4vcpu-8gb's jobs beyond its 2 VMs go to 4vcpu-8gb-cloud, containers
 # standing in for a cloud's VMs (fleetci's overflow).
 OVERFLOW=${FLEETCI_LOCAL_OVERFLOW:-false}
+# n: each VM runs n jobs before it is removed (max_use_count), GitLab only;
+# fleetci refuses it together with GitHub.
+REUSE=${FLEETCI_LOCAL_REUSE:-}
 
 case $VMS in
   microvm) small=microvm big=microvm ;;
@@ -85,7 +88,8 @@ class() {
 [classes.$2]
 plugin = "$DATA/bin/fleeting-plugin-dockervm"
 max_instances = $6${8:+
-overflow = \"$8\"}
+overflow = \"$8\"}${REUSE:+
+max_use_count = $REUSE}
 plugin_config = { name = "$3", image = "fleetci-local-vm", network = "$NET", cpus = "$4", memory = "$5m" }
 connector_config = { username = "fleetci", timeout = "2m" }
 CLASS
@@ -99,7 +103,8 @@ CLASS
 [classes.$2]
 plugin = "$fleetingd"
 max_instances = $6${8:+
-overflow = \"$8\"}
+overflow = \"$8\"}${REUSE:+
+max_use_count = $REUSE}
 connector_config = { username = "ubuntu", timeout = "5m" }
 
 [classes.$2.plugin_config]

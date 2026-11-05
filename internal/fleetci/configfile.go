@@ -112,17 +112,24 @@ func (c Config) Validate() error {
 	}
 	var errs []error
 	for _, name := range slices.Sorted(maps.Keys(c.Classes)) {
-		errs = append(errs, c.Classes[name].Validate(name), fleet.CheckOverflow(name, c.Classes))
+		class := c.Classes[name]
+		errs = append(errs, class.Validate(name), fleet.CheckOverflow(name, c.Classes))
+		if c.GitHub != nil && class.Reuses() {
+			errs = append(errs, fmt.Errorf("class %q reuses VMs (capacity_per_instance %d, max_use_count %d), which a config with [github] can't: "+
+				"GitHub steps run on the VM itself, so a job could read or change another job's VM. "+
+				"Set both to 1 here, or keep reuse for GitLab and serve GitHub from a separate config with single-use classes and groups of their own",
+				name, max(class.CapacityPerInstance, 1), max(class.MaxUseCount, 1)))
+		}
 	}
 	return errors.Join(errs...)
 }
 
-// MaxInstances is the sum of the classes' limits: the most VMs, and so the
-// most GitLab jobs, fleetci runs at once.
+// MaxInstances is the most GitLab jobs fleetci runs at once: the sum of
+// the classes' slots, max_instances × capacity_per_instance.
 func (c Config) MaxInstances() int {
 	n := 0
 	for _, class := range c.Classes {
-		n += class.MaxInstances
+		n += class.Slots()
 	}
 	return n
 }

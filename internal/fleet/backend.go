@@ -42,14 +42,14 @@ type pool struct {
 	overflow *pool
 
 	mu   sync.Mutex
-	jobs int // VMs acquired or being acquired; each serves one job
+	jobs int // jobs on the class's VMs or waiting for one
 }
 
-// take counts a job in, if the class has room for it.
+// take counts a job in, if the class has a free slot for it.
 func (p *pool) take() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.jobs >= p.class.MaxInstances {
+	if p.jobs >= p.class.Slots() {
 		return false
 	}
 	p.jobs++
@@ -158,8 +158,8 @@ func startPool(ctx context.Context, name string, c Class, groups map[string]stri
 	ts, err := taskscaler.New(ctx, initialised{group, info},
 		taskscaler.WithLogger(log.Named("taskscaler")),
 		taskscaler.WithInstanceGroupSettings(settings),
-		taskscaler.WithCapacityPerInstance(1),
-		taskscaler.WithMaxUseCount(1),
+		taskscaler.WithCapacityPerInstance(c.capacity()),
+		taskscaler.WithMaxUseCount(c.useCount()),
 		taskscaler.WithMaxInstances(c.MaxInstances),
 		taskscaler.WithInstanceUpFunc(dockerReady(group, c.Connector.UseExternalAddr, log)),
 		taskscaler.WithDeleteInstancesOnShutdown(),

@@ -39,6 +39,7 @@ hack/local/down.sh
 | `FLEETCI_LOCAL_VMS` | `microvm` with `/dev/kvm`, else `container` | `mixed`: 1vcpu-2gb on containers, 4vcpu-8gb on microVMs |
 | `FLEETCI_LOCAL_SNAPSHOT` | `true` | `false` boots every microVM |
 | `FLEETCI_LOCAL_OVERFLOW` | `false` | `true` adds `4vcpu-8gb-cloud`, 3 containers standing in for a cloud, as 4vcpu-8gb's `overflow` |
+| `FLEETCI_LOCAL_REUSE` | | `n`: each VM runs n jobs before it is removed (`max_use_count`); GitLab only, so leave out `FLEETCI_GITHUB_REPOS` |
 | `FLEETCI_LOCAL_GITHUB` | `plugin` | `serve` runs GitHub jobs in a `fleetci serve` of their own, on groups `gh1` and `gh4` |
 | `FLEETCI_FLEETINGD_SRC` | `../fleeting-plugin-fleetingd` | the fork's checkout |
 | `FLEETCI_GITHUB_CACHE_URL` | | the Actions cache server from `hack/cache/up.sh` |
