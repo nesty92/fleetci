@@ -236,7 +236,9 @@ Both classes share the server's CPUs and memory. fleetci detects them at
 start and keeps 1 CPU and a tenth of the memory for the host, then gives a
 job a VM only while its size still fits, so `max_instances` (8 and 6 here)
 is each class's ceiling, not a share kept for it. A job that doesn't fit
-goes to its `overflow`. `[host]` changes the reserve or sets the budget
+goes to its `overflow`. Without one it waits; jobs that fit go before it
+until it has waited 10 minutes, then the server holds the room that frees
+for it (`nominate_after`). `[host]` changes the reserve or sets the budget
 outright; see the README's
 [Sharing this machine's CPUs and memory](../../README.md#sharing-this-machines-cpus-and-memory).
 
@@ -285,7 +287,7 @@ systemctl daemon-reload && systemctl enable --now fleetci-watchdog
 group, and the GitHub token works. Its `host` line is the server's budget:
 
 ```
-ok    host       budget cpus=31 memory=113GB (detected 32 cpus, reserve 1; detected 125GB memory, reserve 12GB) for 2vcpu-4gb, 4vcpu-8gb; fixed shares none
+ok    host       budget cpus=31 memory=113GB (detected 32 cpus, reserve 1; detected 125GB memory, reserve 12GB) for 2vcpu-4gb, 4vcpu-8gb; fixed shares none; nominate_after 10m0s
 ```
  Then run more jobs of one class at once
 than the server holds, for example ten `4vcpu-8gb` jobs with
@@ -310,7 +312,7 @@ then the snapshot.
 | What | How |
 | --- | --- |
 | How often you spill | count `overflow_of=` lines. Spilling every day means another server would pay off. |
-| Jobs wait although their class has room | the server's budget is full: a job without `overflow` that times out says "the host has no room for one more of its VMs" with what is in use. Add an `overflow`, or raise the budget with `[host]` if the server has more to give. |
+| Jobs wait although their class has room | the server's budget is full: a job without `overflow` that times out says "host local has no room for one more of its VMs" with what is in use, and "which holds the room that frees for a … job" when a nominated job waited first. Add an `overflow`, or raise the budget with `[host]` if the server has more to give. |
 | A class's plugin dies | fleetci starts it again within a second; its running jobs fail and are logged. Nothing to do. |
 | fleetci's plugin dies | the watchdog restarts gitlab-runner after 30 s. Jobs running at that moment fail. |
 | Cloud VMs left behind | fleetci removes what's left in its groups when it stops and when it starts again; nothing else may scale those groups. |

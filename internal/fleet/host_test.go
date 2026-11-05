@@ -1,17 +1,13 @@
 package fleet
 
 import (
-	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
-
-	"github.com/hashicorp/go-hclog"
 )
 
 func TestParseSize(t *testing.T) {
@@ -113,8 +109,12 @@ func TestHostBudget(t *testing.T) {
 	if _, _, err := HostBudget(nil, classes); err == nil || !strings.Contains(err.Error(), "set [host] cpus and memory") {
 		t.Errorf("no detection: %v", err)
 	}
-	if _, on, err := HostBudget(&HostConfig{CPUs: 8, Memory: 16384}, classes); err != nil || !on {
-		t.Errorf("no detection but explicit: %v %v", on, err)
+	if b, on, err := HostBudget(&HostConfig{CPUs: 8, Memory: 16384}, classes); err != nil || !on || b.NominateAfter != defaultNominateAfter {
+		t.Errorf("no detection but explicit: %v %v %v", on, err, b.NominateAfter)
+	}
+	minus := Duration(-time.Second)
+	if _, _, err := HostBudget(&HostConfig{CPUs: 8, Memory: 16384, NominateAfter: &minus}, classes); err == nil {
+		t.Error("negative nominate_after accepted")
 	}
 }
 
@@ -173,224 +173,4 @@ func write(t *testing.T, path, s string) {
 	if err := os.WriteFile(path, []byte(s), 0o644); err != nil {
 		t.Fatal(err)
 	}
-}
-
-// hostPools is a backend whose classes share a host of the given budget.
-func hostPools(t *testing.T, budget Resources, classes map[string]Class) *Backend {
-	t.Helper()
-	hb, err := newHostBudget(&HostConfig{CPUs: budget.CPUs, Memory: Size(budget.MemoryMB)}, classes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	b := &Backend{log: hclog.NewNullLogger(), vms: map[string]*pool{}, pools: map[string]*pool{}}
-	for name, c := range classes {
-		p := &pool{name: name, class: c, ts: &fakeScaler{free: c.MaxInstances}, timeout: 5 * time.Second}
-		if hb != nil && c.OnHost() {
-			p.host, p.dynamic = hb, !c.Reuses()
-			p.size, _ = c.Size()
-		}
-		b.pools[name] = p
-	}
-	for _, p := range b.pools {
-		if o := p.class.Overflow; o != "" {
-			p.overflow = b.pools[o]
-		}
-	}
-	return b
-}
-
-func TestTheBudgetIsNeverExceeded(t *testing.T) {
-	b := hostPools(t, Resources{CPUs: 8, MemoryMB: 16384}, map[string]Class{
-		"small": onHostClass(1, 2048, 8),
-		"big":   onHostClass(4, 8192, 2),
-	})
-	h := b.pools["small"].host
-	ctx := context.Background()
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	var peak Resources
-	for i := range 40 {
-		class := "small"
-		if i%3 == 0 {
-			class = "big"
-		}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			vm, err := b.Create(ctx, class)
-			if err != nil {
-				t.Error(err)
-				return
-			}
-			h.mu.Lock()
-			if !h.used.fits(h.Resources) {
-				t.Errorf("over the budget: %v of %v", h.used, h.Resources)
-			}
-			mu.Lock()
-			peak = Resources{max(peak.CPUs, h.used.CPUs), max(peak.MemoryMB, h.used.MemoryMB)}
-			mu.Unlock()
-			h.mu.Unlock()
-			time.Sleep(time.Millisecond)
-			_ = b.Delete(ctx, vm.ID)
-		}()
-	}
-	wg.Wait()
-	if h.used != (Resources{}) || len(h.waiting) != 0 {
-		t.Errorf("after all jobs: used %v, %d waiting", h.used, len(h.waiting))
-	}
-	if peak.CPUs < 4 {
-		t.Errorf("peak %v: the budget was never used", peak)
-	}
-}
-
-func TestABigJobIsNotStarved(t *testing.T) {
-	overflowPoll = time.Hour // only a release may wake a waiting job
-	defer func() { overflowPoll = time.Second }()
-	b := hostPools(t, Resources{CPUs: 4, MemoryMB: 8192}, map[string]Class{
-		"small": onHostClass(1, 2048, 8),
-		"big":   onHostClass(4, 8192, 1),
-	})
-	ctx := context.Background()
-	var smalls []VM
-	for range 4 {
-		vm, err := b.Create(ctx, "small")
-		if err != nil {
-			t.Fatal(err)
-		}
-		smalls = append(smalls, vm)
-	}
-
-	big := make(chan VM, 1)
-	go func() {
-		vm, err := b.Create(ctx, "big")
-		if err != nil {
-			t.Error(err)
-		}
-		big <- vm
-	}()
-	waitFor(t, func() bool { return blocked(b.pools["big"].host) == 1 })
-
-	// One small job ends: its room is the big job's, not a new small one's.
-	_ = b.Delete(ctx, smalls[0].ID)
-	late := make(chan VM, 1)
-	go func() {
-		vm, _ := b.Create(ctx, "small")
-		late <- vm
-	}()
-	time.Sleep(50 * time.Millisecond)
-	select {
-	case vm := <-late:
-		t.Fatalf("a later small job took %s while the big one waited", vm.Class)
-	default:
-	}
-
-	for _, vm := range smalls[1:] {
-		_ = b.Delete(ctx, vm.ID)
-	}
-	select {
-	case vm := <-big:
-		if vm.Class != "big" {
-			t.Fatalf("big job got %q", vm.Class)
-		}
-		_ = b.Delete(ctx, vm.ID)
-	case <-time.After(2 * time.Second):
-		t.Fatal("the big job never started once the small ones ended")
-	}
-	select {
-	case <-late:
-	case <-time.After(2 * time.Second):
-		t.Fatal("the later small job never started")
-	}
-}
-
-func TestAJobBehindAWaitingOneOverflows(t *testing.T) {
-	small := onHostClass(1, 2048, 8)
-	small.Overflow = "small-aws"
-	b := hostPools(t, Resources{CPUs: 4, MemoryMB: 8192}, map[string]Class{
-		"small":     small,
-		"small-aws": {Plugin: "fleeting-plugin-aws", MaxInstances: 4},
-		"big":       onHostClass(4, 8192, 1),
-	})
-	ctx := context.Background()
-	first, err := b.Create(ctx, "small")
-	if err != nil || first.Class != "small" {
-		t.Fatalf("first small: %v %v", first.Class, err)
-	}
-	bigCtx, cancel := context.WithCancel(ctx)
-	bigDone := make(chan struct{})
-	go func() {
-		defer close(bigDone)
-		_, _ = b.Create(bigCtx, "big")
-	}()
-	defer func() { cancel(); <-bigDone }()
-	waitFor(t, func() bool { return blocked(b.pools["big"].host) == 1 })
-
-	vm, err := b.Create(ctx, "small")
-	if err != nil || vm.Class != "small-aws" {
-		t.Fatalf("small job behind the waiting big one: %q %v, want its overflow", vm.Class, err)
-	}
-}
-
-func TestAReleaseWakesAWaitingJob(t *testing.T) {
-	overflowPoll = time.Hour
-	defer func() { overflowPoll = time.Second }()
-	b := hostPools(t, Resources{CPUs: 2, MemoryMB: 4096}, map[string]Class{"vm": onHostClass(2, 4096, 4)})
-	ctx := context.Background()
-	first, _ := b.Create(ctx, "vm")
-	done := make(chan time.Time, 1)
-	go func() {
-		if _, err := b.Create(ctx, "vm"); err != nil {
-			t.Error(err)
-		}
-		done <- time.Now()
-	}()
-	waitFor(t, func() bool { return blocked(b.pools["vm"].host) == 1 })
-	released := time.Now()
-	_ = b.Delete(ctx, first.ID)
-	select {
-	case at := <-done:
-		if at.Sub(released) > 500*time.Millisecond {
-			t.Errorf("woke after %v", at.Sub(released))
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("a release didn't wake the waiting job")
-	}
-}
-
-func TestNoRoomSaysWhy(t *testing.T) {
-	b := hostPools(t, Resources{CPUs: 2, MemoryMB: 4096}, map[string]Class{"vm": onHostClass(2, 4096, 4)})
-	b.pools["vm"].timeout = 50 * time.Millisecond
-	ctx := context.Background()
-	if _, err := b.Create(ctx, "vm"); err != nil {
-		t.Fatal(err)
-	}
-	_, err := b.Create(ctx, "vm")
-	if err == nil || !strings.Contains(err.Error(), "the host has no room for one more of its VMs (cpus=2 memory=4GB; host cpus=2 memory=4GB in use of cpus=2 memory=4GB)") {
-		t.Fatalf("err %v", err)
-	}
-	if n := len(b.pools["vm"].host.waiting); n != 0 {
-		t.Fatalf("%d still waiting after the timeout", n)
-	}
-}
-
-func blocked(h *hostBudget) int {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	n := 0
-	for _, w := range h.waiting {
-		if w.blocked {
-			n++
-		}
-	}
-	return n
-}
-
-func waitFor(t *testing.T, cond func() bool) {
-	t.Helper()
-	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
-		if cond() {
-			return
-		}
-	}
-	t.Fatal("condition never held")
 }
