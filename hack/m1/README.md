@@ -43,6 +43,9 @@ Measured on a 16-thread laptop (2026-11-04):
 | microVM start to ready (cloud-init, SSH, Docker), stock image | 16.1–22.8 s, 6 VMs |
 | same, image without snapd & co. and with `chrony-wait` masked | 9.3–15.1 s, 4 VMs |
 | fleetingd's copy of the 5.4 GB image before each start | 1.9–3.0 s |
+| our fork: qcow2 overlay, `vm_package_upgrade = false`, 4 vCPU | 5.8–7.3 s, 6 VMs |
+| our fork, 1 vCPU | 9.3–10.2 s, 2 VMs |
+| our fork: shared image, built once at start for both groups | 3 min 1 s; the second group reused it in 1 s |
 | GitHub JIT runner: VM ready to job running | about 7 s |
 
 What is left of a cold boot is fleetingd's own per-VM user-data: `apt update`
