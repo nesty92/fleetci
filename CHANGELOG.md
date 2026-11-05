@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.0](https://github.com/nesty92/fleetci/compare/v0.3.0...v0.4.0) (2026-11-05)
+
+
+### Features
+
+* **fleet:** overflow sends a full class's jobs to another class ([77995aa](https://github.com/nesty92/fleetci/commit/77995aa3d6db0318f383d3503f00d31e93d652b8))
+* **fleet:** reuse VMs per class for GitLab ([f0dba0e](https://github.com/nesty92/fleetci/commit/f0dba0e7c91c819ebcb68d778ceb45a32c29c9de))
+
 ## [0.3.0](https://github.com/nesty92/fleetci/compare/v0.2.0...v0.3.0) (2026-11-05)
 
 
