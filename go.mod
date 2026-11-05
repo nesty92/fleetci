@@ -5,6 +5,7 @@ go 1.27.0
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/hashicorp/go-hclog v1.6.3
+	github.com/onsi/gomega v1.44.0
 	gitlab.com/gitlab-org/fleeting/fleeting v0.0.0-20261102084746-4085ca1ae366
 	gitlab.com/gitlab-org/fleeting/nesting v0.5.0
 	gitlab.com/gitlab-org/fleeting/taskscaler v0.0.0-20261103060922-6d4e8d9a9815
@@ -16,6 +17,7 @@ require (
 require (
 	github.com/fatih/color v1.18.0 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
+	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/hashicorp/go-plugin v1.8.0 // indirect
 	github.com/hashicorp/yamux v0.1.2 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
