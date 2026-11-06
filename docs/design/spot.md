@@ -96,6 +96,11 @@ capacity scales up at once; a class without gets the next host when a job
 arrives, as today. A rebalance recommendation usually comes early enough
 for the replacement to be up before the old host goes.
 
+A rebalance recommendation does nothing by default, as in Karpenter: it
+is often not followed by an interruption, and acting on it costs a new
+host each time. A class opts in with a setting, and then the
+recommendation cordons the host like an interruption notice does.
+
 The replacement should not land where the old host was reclaimed.
 Following Karpenter, fleetci keeps a short-lived list of (type, zone)
 pairs to avoid: three minutes after an interruption notice, or after an
@@ -128,13 +133,7 @@ the way it falls over to its overflow class today.
 1. Turn on taskscaler's heartbeat, so the plugin's spot check runs before
    every placement (#6). Done on `feat/spot-reclaim`.
 2. IMDS over SSH: cordon on an interruption notice (#6).
-3. Cordon on a rebalance recommendation, per class (#8).
+3. Cordon on a rebalance recommendation, when the class asks for it (#8).
 4. Lifecycle hook support (#8).
 5. SQS queue as an opt-in source.
 6. Avoid-list, then zones (#7).
-
-## Open questions
-
-- Should a rebalance recommendation cordon by default? NTH cordons;
-  Karpenter does nothing unless asked. A recommendation is often not
-  followed by an interruption, and cordoning costs a new host.
