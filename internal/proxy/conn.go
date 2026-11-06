@@ -35,6 +35,15 @@ func NewConn(connect ConnectFunc, log hclog.Logger) *Conn {
 	return &Conn{connect: connect, log: log, interval: KeepAliveInterval, timeout: KeepAliveTimeout}
 }
 
+// SetKeepAlive sets how often the connection is checked and how long an
+// answer may take before it counts as lost, for connections made from now
+// on. The default is KeepAliveInterval and KeepAliveTimeout.
+func (c *Conn) SetKeepAlive(interval, timeout time.Duration) {
+	c.mu.Lock()
+	c.interval, c.timeout = interval, timeout
+	c.mu.Unlock()
+}
+
 // Client returns the connection, dialing it if there is none, and a
 // channel that closes once that connection is gone. Callers that arrive
 // during a dial wait for it.
