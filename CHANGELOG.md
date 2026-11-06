@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.5.0](https://github.com/nesty92/fleetci/compare/v0.4.0...v0.5.0) (2026-11-06)
+
+
+### Features
+
+* **fleet:** classes on this machine share its CPUs and memory ([63b476f](https://github.com/nesty92/fleetci/commit/63b476f70d0f12db8d398258f40b4623f05dddaa))
+* **fleet:** nominate a job that waited 10 minutes to its host ([e5f2820](https://github.com/nesty92/fleetci/commit/e5f2820528327eb2766f83adb0a768338dd739dc))
+* **fleet:** place a class's jobs across its hosts, packing by default ([19a879c](https://github.com/nesty92/fleetci/commit/19a879cc1c6ebf7e1b740af5cdff68d75388e964))
+
 ## [0.4.0](https://github.com/nesty92/fleetci/compare/v0.3.0...v0.4.0) (2026-11-05)
 
 
