@@ -14,8 +14,11 @@ import (
 	"github.com/onsi/gomega/gleak"
 )
 
-// Timeout is how long the goroutines the tests started get to end.
-const Timeout = time.Minute
+// Timeout is how long the goroutines the tests started get to end. A
+// fleeting provisioner that was shut down still sleeps out its update
+// interval, a minute by default, before its loop sees it, so a minute is
+// not enough.
+const Timeout = 75 * time.Second
 
 // Main runs the tests, then waits for every goroutine they started to end. One
 // still running after Timeout fails the run, with its stack.
