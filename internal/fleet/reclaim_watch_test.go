@@ -19,15 +19,32 @@ import (
 
 	"github.com/nesty92/fleetci/internal/proxy"
 	"github.com/nesty92/fleetci/internal/sshx"
+	"gitlab.com/gitlab-org/fleeting/fleeting/provider"
+	"gitlab.com/gitlab-org/fleeting/taskscaler"
 )
 
 // fakeIMDS answers like EC2's IMDSv2: a token first, then metadata for
 // requests that carry it. A notice is served once set.
 type fakeIMDS struct {
-	mu      sync.Mutex
-	token   string
-	tokens  int
-	notices map[string]string // meta-data path → body
+	mu       sync.Mutex
+	token    string
+	tokens   int
+	requests int
+	notices  map[string]string // meta-data path → body
+	hang     bool              // accept, never answer
+	failing  bool              // answer 500
+}
+
+func (f *fakeIMDS) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.requests
+}
+
+func (f *fakeIMDS) setFailing(v bool) {
+	f.mu.Lock()
+	f.failing = v
+	f.mu.Unlock()
 }
 
 func newFakeIMDS(t *testing.T) (*fakeIMDS, string) {
@@ -52,7 +69,17 @@ func (f *fakeIMDS) expire() {
 
 func (f *fakeIMDS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
+	f.requests++
+	if f.hang {
+		f.mu.Unlock()
+		<-r.Context().Done()
+		return
+	}
 	defer f.mu.Unlock()
+	if f.failing {
+		http.Error(w, "", http.StatusInternalServerError)
+		return
+	}
 	if r.URL.Path == "/latest/api/token" {
 		if r.Method != http.MethodPut || r.Header.Get("X-aws-ec2-metadata-token-ttl-seconds") == "" {
 			http.Error(w, "", http.StatusBadRequest)
@@ -344,5 +371,144 @@ func TestReclaimIsWatchedForTheAWSPluginByDefault(t *testing.T) {
 	bad := Class{Plugin: "fleeting-plugin-dockervm", MaxInstances: 1, Reclaim: Reclaim{Rebalance: true}}
 	if err := bad.validate("x"); err == nil || !strings.Contains(err.Error(), "reclaim.rebalance") {
 		t.Fatalf("rebalance without watch: %v", err)
+	}
+}
+
+func TestAVMWhoseMetadataNeverAnswersIsLeftAlone(t *testing.T) {
+	imds, addr := newFakeIMDS(t)
+	imds.hang = true
+	vm := newVMSSH(t, addr, 0)
+	w := fastWatch(vm.open, false)
+	w.timeout = 20 * time.Millisecond
+	defer w.close()
+
+	w.start("i-1")
+	eventually(t, "never asked", func() bool { return imds.count() >= 3 })
+	time.Sleep(200 * time.Millisecond)
+	before := imds.count()
+	time.Sleep(200 * time.Millisecond)
+	if after := imds.count(); after != before {
+		t.Fatalf("still asking (%d, then %d requests); want the watch to end", before, after)
+	}
+	if n := vm.opened.Load(); n != 1 {
+		t.Fatalf("opened %d times, want once", n)
+	}
+}
+
+func TestAMetadataHiccupDoesNotEndTheWatch(t *testing.T) {
+	imds, addr := newFakeIMDS(t)
+	vm := newVMSSH(t, addr, 0)
+	w := fastWatch(vm.open, false)
+	defer w.close()
+
+	w.start("i-1")
+	eventually(t, "never answered", func() bool { return imds.count() >= 2 })
+	imds.setFailing(true)
+	failingFrom := imds.count()
+	eventually(t, "stopped asking while it failed", func() bool { return imds.count() >= failingFrom+5 })
+	imds.setFailing(false)
+	imds.set("spot/instance-action", `{"action": "terminate"}`)
+	eventually(t, "notice never seen after the hiccup", func() bool { return w.notice("i-1") != "" })
+	if n := vm.opened.Load(); n != 1 {
+		t.Fatalf("opened %d times, want the same connection throughout", n)
+	}
+}
+
+// reporting is a plugin that reports one VM in one state.
+type reporting struct {
+	cloud
+	id    string
+	state provider.State
+}
+
+func (r *reporting) Update(_ context.Context, fn func(string, provider.State)) error {
+	fn(r.id, r.state)
+	return nil
+}
+
+func TestTheWatchEndsWhenThePluginReportsTheVMDeleted(t *testing.T) {
+	_, addr := newFakeIMDS(t)
+	w := fastWatch(newVMSSH(t, addr, 0).open, false)
+	defer w.close()
+
+	for _, c := range []struct {
+		state   provider.State
+		watched bool
+	}{{provider.StateRunning, true}, {provider.StateDeleting, true}, {provider.StateDeleted, false}} {
+		w.start("i-1")
+		g := reclaimGroup{&reporting{id: "i-1", state: c.state}, w}
+		var got provider.State
+		if err := g.Update(context.Background(), func(_ string, s provider.State) { got = s }); err != nil {
+			t.Fatal(err)
+		}
+		if got != c.state {
+			t.Fatalf("taskscaler saw %v, want %v passed on", got, c.state)
+		}
+		w.mu.Lock()
+		_, watched := w.stops["i-1"]
+		w.mu.Unlock()
+		if watched != c.watched {
+			t.Fatalf("%v: watched %v, want %v", c.state, watched, c.watched)
+		}
+	}
+}
+
+func TestAnAdmittedVMIsWatched(t *testing.T) {
+	_, addr := newFakeIMDS(t)
+	w := fastWatch(newVMSSH(t, addr, 0).open, false)
+	defer w.close()
+	watched := func(id string) bool {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		_, ok := w.stops[id]
+		return ok
+	}
+
+	ok := watchOnceUp(func(taskscaler.Taskscaler, taskscaler.UpFuncInstance) error { return nil }, w)
+	if err := ok(nil, taskscaler.UpFuncInstance{ID: "i-up"}); err != nil || !watched("i-up") {
+		t.Fatalf("admitted vm: err %v, watched %v", err, watched("i-up"))
+	}
+
+	refused := errors.New("docker never answered")
+	bad := watchOnceUp(func(taskscaler.Taskscaler, taskscaler.UpFuncInstance) error { return refused }, w)
+	if err := bad(nil, taskscaler.UpFuncInstance{ID: "i-down"}); !errors.Is(err, refused) || watched("i-down") {
+		t.Fatalf("refused vm: err %v, watched %v", err, watched("i-down"))
+	}
+}
+
+func TestAWatchedClassCordonsAVMWithANotice(t *testing.T) {
+	imds, addr := newFakeIMDS(t)
+	imds.set("spot/instance-action", `{"action": "terminate"}`)
+	vm := newVMSSH(t, addr, 0)
+	up := func(taskscaler.Taskscaler, taskscaler.UpFuncInstance) error { return nil }
+	on := true
+
+	group, admit, w := withReclaim(Class{Plugin: "fleeting-plugin-x", Reclaim: Reclaim{Watch: &on}},
+		newCloud("i-1"), up, vm.open, hclog.NewNullLogger())
+	if w == nil {
+		t.Fatal("no watch for a class that asks for one")
+	}
+	defer w.close()
+	if err := admit(nil, taskscaler.UpFuncInstance{ID: "i-1"}); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the group taskscaler sees never failed the heartbeat", func() bool {
+		return errors.Is(group.Heartbeat(context.Background(), "i-1"), errReclaimNotice)
+	})
+}
+
+func TestAnUnwatchedClassGetsItsGroupAsItIs(t *testing.T) {
+	plain := newCloud("i-1")
+	called := false
+	up := func(taskscaler.Taskscaler, taskscaler.UpFuncInstance) error { called = true; return nil }
+
+	group, admit, w := withReclaim(Class{Plugin: "fleeting-plugin-dockervm"}, plain, up,
+		func(context.Context, string) (tunnel, error) { t.Fatal("opened a tunnel"); return tunnel{}, nil },
+		hclog.NewNullLogger())
+	if w != nil || group != provider.InstanceGroup(plain) {
+		t.Fatalf("watch %v, group %T: want neither changed", w, group)
+	}
+	if err := admit(nil, taskscaler.UpFuncInstance{ID: "i-1"}); err != nil || !called {
+		t.Fatalf("up: err %v, called %v", err, called)
 	}
 }
