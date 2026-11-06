@@ -156,6 +156,11 @@ func (w *reclaimWatch) poll(ctx context.Context, id string, t tunnel, seen *bool
 		case errors.As(err, &refused) && !*seen:
 			// The VM's ssh server could not reach the address at all.
 			return fmt.Errorf("%w: %w", errNoMetadata, err)
+		case busy(err), !absent(err):
+			// A service under load or restarting says so, and a
+			// connection that resets is trouble on the way; neither is
+			// a VM without a metadata service.
+			log.Debug("reading instance metadata", "err", err)
 		default:
 			failures++
 			if !*seen && failures >= 3 {
@@ -282,7 +287,7 @@ func (m *imds) get(ctx context.Context, path string) (string, error) {
 		case status == http.StatusUnauthorized && attempt == 0:
 			m.token = "" // expired early; renew once
 		default:
-			return "", fmt.Errorf("instance metadata %s: status %d", path, status)
+			return "", statusError{path, status}
 		}
 	}
 }
@@ -298,10 +303,37 @@ func (m *imds) renew(ctx context.Context) error {
 		return err
 	}
 	if status != http.StatusOK || body == "" {
-		return fmt.Errorf("instance metadata token: status %d", status)
+		return statusError{"api/token", status}
 	}
 	m.token, m.expires = body, time.Now().Add(imdsTokenTTL-time.Minute)
 	return nil
+}
+
+// statusError is an answer from the metadata service other than the one
+// asked for.
+type statusError struct {
+	path   string
+	status int
+}
+
+func (e statusError) Error() string {
+	return fmt.Sprintf("instance metadata %s: status %d", e.path, e.status)
+}
+
+// busy says whether err is the metadata service saying it is throttling or
+// failing for now, rather than that it is not there.
+func busy(err error) bool {
+	var s statusError
+	return errors.As(err, &s) && (s.status == http.StatusTooManyRequests || s.status >= 500)
+}
+
+// absent says whether err is what a VM without IMDS gives: no answer in
+// time, or an answer that isn't IMDSv2's.
+func absent(err error) bool {
+	var s statusError
+	var timeout interface{ Timeout() bool }
+	return errors.As(err, &s) || errors.Is(err, context.DeadlineExceeded) ||
+		errors.As(err, &timeout) && timeout.Timeout()
 }
 
 func (m *imds) do(req *http.Request) (int, string, error) {

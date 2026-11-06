@@ -33,6 +33,7 @@ type fakeIMDS struct {
 	notices  map[string]string // meta-data path → body
 	hang     bool              // accept, never answer
 	failing  bool              // answer 500
+	resets   int               // drop this many connections mid-request
 }
 
 func (f *fakeIMDS) count() int {
@@ -76,6 +77,13 @@ func (f *fakeIMDS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer f.mu.Unlock()
+	if f.resets > 0 {
+		f.resets--
+		if c, _, err := w.(http.Hijacker).Hijack(); err == nil {
+			_ = c.Close()
+		}
+		return
+	}
 	if f.failing {
 		http.Error(w, "", http.StatusInternalServerError)
 		return
@@ -468,6 +476,19 @@ func TestAMetadataHiccupDoesNotEndTheWatch(t *testing.T) {
 	if n := vm.opened.Load(); n != 1 {
 		t.Fatalf("opened %d times, want the same connection throughout", n)
 	}
+}
+
+func TestAVMWhoseMetadataConnectionsResetIsStillWatched(t *testing.T) {
+	imds, addr := newFakeIMDS(t)
+	imds.resets = 5 // more than the watch's three strikes
+	vm := newVMSSH(t, addr, 0)
+	w := fastWatch(vm.open, false)
+	defer w.close()
+
+	w.start("i-1")
+	eventually(t, "never asked", func() bool { return imds.count() >= 6 })
+	imds.set("spot/instance-action", `{"action": "terminate"}`)
+	eventually(t, "a reset connection ended the watch", func() bool { return w.notice("i-1") != "" })
 }
 
 // reporting is a plugin that reports one VM in one state.
