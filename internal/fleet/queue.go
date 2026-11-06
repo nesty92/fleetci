@@ -12,16 +12,19 @@ import (
 // The host queue follows the Kubernetes scheduler and Kueue, whose rules it
 // ports (Apache License 2.0, https://github.com/kubernetes/kubernetes and
 // https://github.com/kubernetes-sigs/kueue). A host is to fleetci what a
-// node is to Kubernetes: a class's VMs run on one host, and a job waits
-// until a host of its class has room.
+// node is to Kubernetes: a class runs on one host or more, and a job waits
+// until one of them has room. Of the hosts with room, a job goes to the
+// busiest, as MostAllocated scores nodes (noderesources/most_allocated.go),
+// so whole hosts stay free for large jobs; or, with [host] placement =
+// "spread", to the idlest, as LeastAllocated does.
 //
 //   - Jobs wait in the order they came, as PrioritySort orders pods of equal
 //     priority by their queue timestamp (queuesort/priority_sort.go).
 //   - A waiting job that doesn't fit doesn't hold up later ones that do, as
 //     in Kueue's default BestEffortFIFO (cache/queue/cluster_queue.go). Of
 //     the jobs room would fit, the earliest gets it: a job counts the room of
-//     each earlier waiting job that fits the host as taken, the order the
-//     scheduler's one-pod-at-a-time cycle gives.
+//     each earlier waiting job that fits as taken, on the host that job
+//     would go to, the order the scheduler's one-pod-at-a-time cycle gives.
 //   - A job that has waited NominateAfter is nominated to a host, as a pod
 //     is nominated to a node (backend/queue/nominator.go). Every other job
 //     then counts the nominated job's room on that host as taken, as
@@ -44,8 +47,10 @@ import (
 // hostQueue is the hosts the classes' VMs run on and the jobs waiting for
 // room on them.
 type hostQueue struct {
-	// NominateAfter is how long a job waits before it is nominated.
+	// NominateAfter is how long a job waits before it is nominated, and
+	// Placement which host with room it goes to (Pack or Spread).
 	NominateAfter time.Duration
+	Placement     string
 	clock         clock.PassiveClock
 	log           hclog.Logger
 
@@ -77,7 +82,7 @@ type waiter struct {
 }
 
 func emptyQueue(nominateAfter time.Duration) *hostQueue {
-	return &hostQueue{NominateAfter: nominateAfter, clock: clock.RealClock{}, log: hclog.NewNullLogger(), hosts: map[string]*host{}}
+	return &hostQueue{NominateAfter: nominateAfter, Placement: Pack, clock: clock.RealClock{}, log: hclog.NewNullLogger(), hosts: map[string]*host{}}
 }
 
 func (q *hostQueue) enqueue(class string, need Resources, hosts ...*host) *waiter {
@@ -104,24 +109,78 @@ func (q *hostQueue) started(w *waiter) {
 	}
 }
 
-// fits reports whether a VM of size fits on h in the room the jobs ahead of
-// w leave: the job nominated to h, and the earlier waiting jobs that fit
-// h. With w nil, ahead of every waiting job. q.mu is held.
-func (q *hostQueue) fits(h *host, w *waiter, size Resources) bool {
+// room is what each host has taken for the jobs ahead of w: what is in use,
+// the job nominated to it unless that is w, and each earlier waiting job,
+// placed as take would place it, if it fits. With w nil, ahead of every
+// waiting job. q.mu is held.
+func (q *hostQueue) room(w *waiter) map[*host]Resources {
 	q.nominate()
-	taken := h.used
-	if n := h.nominated; n != nil && n != w {
-		taken = taken.add(n.need)
+	taken := make(map[*host]Resources, len(q.hosts))
+	for _, h := range q.hosts {
+		taken[h] = h.used
+		if n := h.nominated; n != nil && n != w {
+			taken[h] = taken[h].add(n.need)
+		}
 	}
 	for _, x := range q.waiting {
 		if x == w {
 			break
 		}
-		if x.blocked && x.on == nil && slices.Contains(x.hosts, h) && taken.add(x.need).fits(h.Resources) {
-			taken = taken.add(x.need)
+		if !x.blocked || x.on != nil {
+			continue
+		}
+		if h := q.place(taken, x.need, x.hosts); h != nil {
+			taken[h] = taken[h].add(x.need)
 		}
 	}
-	return taken.add(size).fits(h.Resources)
+	return taken
+}
+
+// fits reports whether a VM of size fits on h in the room the jobs ahead of
+// w leave. q.mu is held.
+func (q *hostQueue) fits(h *host, w *waiter, size Resources) bool {
+	return q.room(w)[h].add(size).fits(h.Resources)
+}
+
+// place picks the host of hosts that need goes to once taken is in use, or
+// nil when it fits none.
+func (q *hostQueue) place(taken map[*host]Resources, need Resources, hosts []*host) *host {
+	var best *host
+	var bestScore float64
+	for _, h := range hosts {
+		after := taken[h].add(need)
+		if !after.fits(h.Resources) {
+			continue
+		}
+		if score := q.score(after, h.Resources); best == nil || score > bestScore {
+			best, bestScore = h, score
+		}
+	}
+	return best
+}
+
+// score rates a host that would have r in use of capacity: higher is
+// better. Pack prefers the busiest host, as MostAllocated scores a node
+// (noderesources/most_allocated.go); Spread the idlest, as LeastAllocated
+// does (noderesources/least_allocated.go).
+func (q *hostQueue) score(r, capacity Resources) float64 {
+	if q.Placement == Spread {
+		return 1 - allocated(r, capacity)
+	}
+	return allocated(r, capacity)
+}
+
+// allocated is the share of capacity r takes, the mean over CPUs and
+// memory with equal weights, as MostAllocated and LeastAllocated weigh
+// them by default.
+func allocated(r, capacity Resources) float64 {
+	share := func(used, of int64) float64 {
+		if of <= 0 {
+			return 1
+		}
+		return float64(used) / float64(of)
+	}
+	return (share(int64(r.CPUs), int64(capacity.CPUs)) + share(r.MemoryMB, capacity.MemoryMB)) / 2
 }
 
 // nominate nominates each job that has waited NominateAfter, oldest first,

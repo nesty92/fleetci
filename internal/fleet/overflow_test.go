@@ -49,9 +49,8 @@ func fakePool(name string, max int, overflow string) *pool {
 
 func TestOverflowTakesJobsWhileTheClassIsFull(t *testing.T) {
 	own, cloud := fakePool("4vcpu-8gb", 2, "4vcpu-8gb-aws"), fakePool("4vcpu-8gb-aws", 1, "")
-	own.overflow = cloud
 	b := &Backend{log: hclog.NewNullLogger(), vms: map[string]*pool{},
-		pools: map[string]*pool{own.name: own, cloud.name: cloud}}
+		pools: map[string][]*pool{own.name: {own}, cloud.name: {cloud}}}
 	ctx := context.Background()
 
 	var got []string

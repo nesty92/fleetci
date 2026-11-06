@@ -184,7 +184,7 @@ func check(args []string, out io.Writer) (bool, error) {
 			want.CPUs += size.CPUs * class.MaxInstances
 			want.MemoryMB += size.MemoryMB * int64(class.MaxInstances)
 		}
-		r.pass("host", fmt.Sprintf("budget %s for %s; fixed shares %s; nominate_after %s", budget, strings.Join(onHost, ", "), reserved, budget.NominateAfter))
+		r.pass("host", fmt.Sprintf("budget %s for %s; fixed shares %s; nominate_after %s; placement %s", budget, strings.Join(onHost, ", "), reserved, budget.NominateAfter, budget.Placement))
 		if want.CPUs > budget.CPUs || want.MemoryMB > budget.MemoryMB {
 			r.note(fmt.Sprintf("their max_instances could ask for %s at once: past the budget, jobs wait or overflow", want))
 		}

@@ -362,6 +362,7 @@ reserve = { cpus = 4, memory = "16GB" }  # keep the detection, change the reserv
 cpus    = 48                             # or set the budget outright; more than
 memory  = "100GB"                        #   the machine over-commits on purpose
 nominate_after = "10m"                   # see below; "0s" holds room for the oldest job at once
+placement = "pack"                       # or "spread"; see below
 enabled = false                          # no budget: each class keeps its max_instances
 
 [classes.mine]
@@ -380,6 +381,13 @@ that has waited `nominate_after` (10 minutes) is *nominated*: from then on
 the room that frees is held for it, and later jobs fill only what it
 doesn't need, so small jobs can't starve a big one. One job is nominated at
 a time, the one waiting longest; fleetci logs "job nominated". A job that
-finds no room goes to its `overflow`, if it has one, instead of waiting. Warm VMs (`idle_count`, or a policy's) and the VMs of a class that
+finds no room goes to its `overflow`, if it has one, instead of waiting.
+
+When a class runs on more than one host with room, `placement` picks the
+host: `pack` (the default) the busiest, so whole hosts stay free for large
+jobs, or `spread` the idlest, so jobs have quieter neighbours. They are the
+Kubernetes scheduler's MostAllocated and LeastAllocated scoring. Today
+fleetci has one host, the machine it runs on, so this only matters once
+classes run on more. Warm VMs (`idle_count`, or a policy's) and the VMs of a class that
 reuses them hold their share all the time; fleetci refuses a budget they
 don't fit, or one with no room left for a class's VM.

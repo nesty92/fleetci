@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"iter"
 	"maps"
 	"slices"
 	"strings"
@@ -34,15 +35,14 @@ type VM struct {
 }
 
 type pool struct {
-	name     string
-	class    Class
-	group    *supervised
-	ts       taskscaler.Taskscaler
-	timeout  time.Duration
-	overflow *pool
+	name    string
+	class   Class
+	group   *supervised
+	ts      taskscaler.Taskscaler
+	timeout time.Duration
 
-	// host is the host the class's VMs run on and count against, or nil;
-	// queue is the hosts' queue. A dynamic class takes size from its host
+	// host is the host this pool's VMs run on and count against, or nil: a
+	// class has a pool on each host it runs on. queue is the hosts' queue. A dynamic class takes size from its host
 	// for each job; the others hold a fixed share (see Class.Reserved).
 	queue   *hostQueue
 	host    *host
@@ -53,31 +53,71 @@ type pool struct {
 	jobs int // jobs on the class's VMs or waiting for one
 }
 
-// take counts a job in, if the class has a free slot for it and, for a
-// dynamic class, its host has room for one more of its VMs. w is the job's
-// place in the queue, or nil.
-func (p *pool) take(w *waiter) bool {
-	q := p.queue
-	if p.dynamic {
-		q.mu.Lock()
-		defer q.mu.Unlock()
+// take counts a job in on one of a class's pools, one per host it runs on:
+// of those with a free slot whose host has room for one more of its VMs,
+// the one the queue's placement prefers (see hostQueue.score). w is the job's place
+// in the queue, or nil. It returns the pool, or nil.
+//
+// A pool's slots are its class's max_instances; what max_instances means
+// for a class on more than one host is decided with multi-host.
+func take(w *waiter, pools []*pool) *pool {
+	if len(pools) == 0 {
+		return nil
 	}
+	if !pools[0].dynamic {
+		for _, p := range pools {
+			if p.takeSlot() {
+				return p
+			}
+		}
+		return nil
+	}
+	q := pools[0].queue
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	taken := q.room(w)
+	var best *pool
+	var bestScore float64
+	slot := false
+	for _, p := range pools {
+		p.mu.Lock()
+		free := p.jobs < p.class.Slots()
+		p.mu.Unlock()
+		if !free {
+			continue
+		}
+		slot = true
+		after := taken[p.host].add(p.size)
+		if !after.fits(p.host.Resources) {
+			continue
+		}
+		if score := q.score(after, p.host.Resources); best == nil || score > bestScore {
+			best, bestScore = p, score
+		}
+	}
+	if best == nil {
+		if slot && w != nil {
+			w.blocked = true
+		}
+		return nil
+	}
+	// q.mu, held, keeps the slot free: done gives one back under it.
+	best.mu.Lock()
+	best.jobs++
+	best.mu.Unlock()
+	best.host.used = best.host.used.add(best.size)
+	if w != nil {
+		q.started(w)
+	}
+	return best
+}
+
+// takeSlot counts a job in if the pool has a free slot.
+func (p *pool) takeSlot() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.jobs >= p.class.Slots() {
 		return false
-	}
-	if p.dynamic {
-		if !q.fits(p.host, w, p.size) {
-			if w != nil {
-				w.blocked = true
-			}
-			return false
-		}
-		p.host.used = p.host.used.add(p.size)
-		if w != nil {
-			q.started(w)
-		}
 	}
 	p.jobs++
 	return true
@@ -96,7 +136,7 @@ func (p *pool) done() {
 
 type Backend struct {
 	log      hclog.Logger
-	pools    map[string]*pool
+	pools    map[string][]*pool // class → its pools, one per host it runs on
 	shutdown sync.Once
 
 	mu  sync.Mutex
@@ -129,7 +169,7 @@ func (b *Backend) notify() {
 // New starts every class's plugin and taskscaler. host is fleetci.toml's
 // [host], or nil for its defaults.
 func New(ctx context.Context, classes map[string]Class, host *HostConfig, log hclog.Logger) (*Backend, error) {
-	b := &Backend{log: log, pools: map[string]*pool{}, vms: map[string]*pool{}}
+	b := &Backend{log: log, pools: map[string][]*pool{}, vms: map[string]*pool{}}
 	hq, err := newHostQueue(host, classes)
 	if err != nil {
 		return nil, err
@@ -137,7 +177,7 @@ func New(ctx context.Context, classes map[string]Class, host *HostConfig, log hc
 	if hq != nil {
 		hq.log = log
 		local := hq.hosts[localHost]
-		log.Info("host budget", "host", local.name, "budget", local.Budget.String(), "reserved", local.fixed.String(), "nominate_after", hq.NominateAfter.String())
+		log.Info("host budget", "host", local.name, "budget", local.Budget.String(), "reserved", local.fixed.String(), "nominate_after", hq.NominateAfter.String(), "placement", hq.Placement)
 	}
 	groups := map[string]string{} // group id → class
 	for _, name := range slices.Sorted(maps.Keys(classes)) {
@@ -155,15 +195,12 @@ func New(ctx context.Context, classes map[string]Class, host *HostConfig, log hc
 			p.queue, p.host, p.dynamic = hq, hq.hosts[localHost], !c.Reuses()
 			p.size, _ = c.Size() // checked by newHostQueue
 		}
-		b.pools[name] = p
+		b.pools[name] = []*pool{p}
 	}
-	for name, p := range b.pools {
+	for name := range b.pools {
 		if err := checkOverflow(name, classes); err != nil {
 			_ = b.Shutdown(ctx)
 			return nil, err
-		}
-		if o := p.class.Overflow; o != "" {
-			p.overflow = b.pools[o]
 		}
 	}
 	return b, nil
@@ -205,6 +242,7 @@ func newHostQueue(h *HostConfig, classes map[string]Class) (*hostQueue, error) {
 	}
 	local.used = local.fixed
 	q := emptyQueue(budget.NominateAfter)
+	q.Placement = budget.Placement
 	q.hosts[localHost] = local
 	return q, nil
 }
@@ -328,52 +366,57 @@ var overflowPoll = time.Second
 // when both are full, the job takes the first room in either, its own class
 // first.
 func (b *Backend) Create(ctx context.Context, class string) (VM, error) {
-	asked, ok := b.pools[class]
-	if !ok {
+	pools := b.pools[class]
+	if len(pools) == 0 {
 		return VM{}, fmt.Errorf("unknown class %q", class)
 	}
+	first := pools[0]
 	start := time.Now()
-	actx, cancel := context.WithTimeout(ctx, asked.timeout)
+	actx, cancel := context.WithTimeout(ctx, first.timeout)
 	defer cancel()
 
-	o := asked.overflow
+	overflow := b.pools[first.class.Overflow]
 	var p *pool
-	if o == nil && !asked.dynamic {
-		// No overflow and no budget: taskscaler queues the job itself.
-		p = asked
-		asked.mu.Lock()
-		asked.jobs++
-		asked.mu.Unlock()
+	if len(pools) == 1 && overflow == nil && !first.dynamic {
+		// One pool, no overflow and no budget: taskscaler queues the job
+		// itself.
+		p = first
+		p.mu.Lock()
+		p.jobs++
+		p.mu.Unlock()
 	} else {
-		// fleetci holds the job until its class, its overflow or the host
+		// fleetci holds the job until its class, its overflow or a host
 		// has room, its own class first.
 		var w *waiter
-		if asked.dynamic {
-			w = asked.queue.enqueue(asked.name, asked.size, asked.host)
+		if first.dynamic {
+			hosts := make([]*host, len(pools))
+			for i, p := range pools {
+				hosts[i] = p.host
+			}
+			w = first.queue.enqueue(class, first.size, hosts...)
 		}
 		for p == nil {
 			wake := b.woken()
-			switch {
-			case asked.take(w):
-				p = asked
-			case o != nil && o.take(w):
-				p = o
-			default:
-				select {
-				case <-actx.Done():
-					held := ""
-					if w != nil {
-						held = asked.queue.heldFor(w)
-						asked.queue.dequeue(w)
-					}
-					return VM{}, fmt.Errorf("acquiring a %s vm: %s: %w", class, b.full(asked, held), actx.Err())
-				case <-wake:
-				case <-time.After(overflowPoll):
+			if p = take(w, pools); p == nil {
+				p = take(w, overflow)
+			}
+			if p != nil {
+				break
+			}
+			select {
+			case <-actx.Done():
+				held := ""
+				if w != nil {
+					held = first.queue.heldFor(w)
+					first.queue.dequeue(w)
 				}
+				return VM{}, fmt.Errorf("acquiring a %s vm: %s: %w", class, full(class, pools, overflow, held), actx.Err())
+			case <-wake:
+			case <-time.After(overflowPoll):
 			}
 		}
 		if w != nil {
-			asked.queue.dequeue(w)
+			first.queue.dequeue(w)
 		}
 	}
 
@@ -390,8 +433,8 @@ func (b *Backend) Create(ctx context.Context, class string) (VM, error) {
 	b.mu.Unlock()
 
 	log := []any{"vm", id, "class", p.name, "instance", acq.InstanceID(), "waited", time.Since(start).Round(time.Millisecond).String()}
-	if p != asked {
-		log = append(log, "overflow_of", asked.name)
+	if p.name != class {
+		log = append(log, "overflow_of", class)
 	}
 	b.log.Info("vm acquired", log...)
 
@@ -409,18 +452,22 @@ func (b *Backend) Create(ctx context.Context, class string) (VM, error) {
 }
 
 // full says why a job of the class found no room. held is the class of the
-// nominated job the host held room for, if any.
-func (b *Backend) full(p *pool, held string) string {
-	why := p.name + " is full"
-	if o := p.overflow; o != nil {
-		why = fmt.Sprintf("%s and its overflow %s are full", p.name, o.name)
+// nominated job a host held room for, if any.
+func full(class string, pools, overflow []*pool, held string) string {
+	why := class + " is full"
+	if len(overflow) > 0 {
+		why = fmt.Sprintf("%s and its overflow %s are full", class, overflow[0].name)
 	}
-	if h := p.host; p.dynamic {
-		p.queue.mu.Lock()
-		why += fmt.Sprintf(", or host %s has no room for one more of its VMs (%s; %s in use of %s)", h.name, p.size, h.used, h.Resources)
-		p.queue.mu.Unlock()
+	if first := pools[0]; first.dynamic {
+		var hosts []string
+		first.queue.mu.Lock()
+		for _, p := range pools {
+			hosts = append(hosts, fmt.Sprintf("host %s: %s in use of %s", p.host.name, p.host.used, p.host.Resources))
+		}
+		first.queue.mu.Unlock()
+		why += fmt.Sprintf(", or none of its hosts has room for one more of its VMs (%s; %s)", first.size, strings.Join(hosts, "; "))
 		if held != "" {
-			why += fmt.Sprintf(", which holds the room that frees for a %s job that has waited past nominate_after", held)
+			why += fmt.Sprintf(", as room is held for a %s job that has waited past nominate_after", held)
 		}
 	}
 	return why
@@ -442,12 +489,25 @@ func (b *Backend) Delete(_ context.Context, id string) error {
 	return nil
 }
 
+// allPools yields every class's pools.
+func (b *Backend) allPools() iter.Seq[*pool] {
+	return func(yield func(*pool) bool) {
+		for _, pools := range b.pools {
+			for _, p := range pools {
+				if !yield(p) {
+					return
+				}
+			}
+		}
+	}
+}
+
 // Shutdown removes every VM of every class and stops the plugins. Calls
 // after the first do nothing.
 func (b *Backend) Shutdown(ctx context.Context) error {
 	b.shutdown.Do(func() {
 		var wg sync.WaitGroup
-		for _, p := range b.pools {
+		for p := range b.allPools() {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()

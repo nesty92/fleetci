@@ -37,12 +37,13 @@ cpus = 10
 memory = "20GB"
 reserve = { cpus = 2 }
 nominate_after = "90s"
+placement = "spread"
 `)
 	c, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Host == nil || c.Host.CPUs != 10 || c.Host.Memory != 20*1024 || *c.Host.Reserve.CPUs != 2 || time.Duration(*c.Host.NominateAfter) != 90*time.Second {
+	if c.Host == nil || c.Host.CPUs != 10 || c.Host.Memory != 20*1024 || *c.Host.Reserve.CPUs != 2 || time.Duration(*c.Host.NominateAfter) != 90*time.Second || c.Host.Placement != "spread" {
 		t.Fatalf("host %+v", c.Host)
 	}
 	if err := c.Validate(); err != nil {

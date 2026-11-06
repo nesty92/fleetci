@@ -36,6 +36,12 @@ type HostConfig struct {
 	// fits starts, earliest first. Default 10m; 0 nominates the oldest
 	// waiting job at once.
 	NominateAfter *Duration `json:"nominate_after" toml:"nominate_after"`
+	// Placement is which host a job goes to when its class runs on more
+	// than one with room: "pack" (the default) the busiest, keeping whole
+	// hosts free for large jobs, or "spread" the idlest, for quieter
+	// neighbours. They are the Kubernetes scheduler's MostAllocated and
+	// LeastAllocated scoring.
+	Placement string `json:"placement" toml:"placement"`
 }
 
 // Reserve is what the host keeps for itself out of a detected budget.
@@ -74,13 +80,20 @@ type Budget struct {
 	Resources
 	// Detected and Reserve are set for the parts that were detected.
 	Detected, Reserve Resources
-	// NominateAfter is HostConfig.NominateAfter, with its default.
+	// NominateAfter and Placement are HostConfig's, with their defaults.
 	NominateAfter time.Duration
+	Placement     string
 }
 
 // defaultNominateAfter keeps a large job from waiting much longer than
 // this while smaller ones keep the host busy.
 const defaultNominateAfter = 10 * time.Minute
+
+// The placements: which of a class's hosts with room a job goes to.
+const (
+	Pack   = "pack"   // the busiest (MostAllocated)
+	Spread = "spread" // the idlest (LeastAllocated)
+)
 
 func (b Budget) String() string {
 	s := b.Resources.String()
@@ -126,6 +139,14 @@ func HostBudget(h *HostConfig, classes map[string]Class) (Budget, bool, error) {
 	}
 
 	var b Budget
+	switch h.Placement {
+	case "", Pack:
+		b.Placement = Pack
+	case Spread:
+		b.Placement = Spread
+	default:
+		return Budget{}, false, fmt.Errorf("host: placement %q: want %q or %q", h.Placement, Pack, Spread)
+	}
 	b.NominateAfter = defaultNominateAfter
 	if h.NominateAfter != nil {
 		b.NominateAfter = time.Duration(*h.NominateAfter)
