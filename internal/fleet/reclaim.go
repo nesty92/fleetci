@@ -14,7 +14,6 @@ import (
 	"github.com/hashicorp/go-hclog"
 	"golang.org/x/crypto/ssh"
 
-	"github.com/nesty92/fleetci/internal/proxy"
 	"gitlab.com/gitlab-org/fleeting/fleeting/provider"
 )
 
@@ -33,8 +32,9 @@ const (
 const imdsEvery = 2 * time.Second
 
 // A tunnel reaches addresses from inside one VM: fleetci's own HTTP
-// requests to the metadata service go through the VM's SSH server, so
-// nothing runs on the VM and its image needs nothing.
+// requests to the metadata service go through the VM's SSH server, on the
+// instance's shared connection, so nothing runs on the VM and its image
+// needs nothing.
 type tunnel struct {
 	dial  func(ctx context.Context, network, addr string) (net.Conn, error)
 	lost  <-chan struct{} // closed once the connection is gone
@@ -43,23 +43,15 @@ type tunnel struct {
 
 type opener func(ctx context.Context, id string) (tunnel, error)
 
-// sshTunnel opens one SSH connection to the VM and forwards through it.
-// Keepalives close it when the VM stops answering.
-func sshTunnel(group provider.InstanceGroup, external bool) opener {
+// sshTunnel forwards through the instance's shared connection.
+func sshTunnel(conns *vmConns) opener {
 	return func(ctx context.Context, id string) (tunnel, error) {
-		info, err := group.ConnectInfo(ctx, id)
+		client, lost, err := conns.get(id).Client(ctx)
 		if err != nil {
 			return tunnel{}, err
 		}
-		client, err := proxy.Dial(ctx, target(info, external))
-		if err != nil {
-			return tunnel{}, err
-		}
-		return tunnel{
-			dial:  client.DialContext,
-			lost:  proxy.KeepAlive(client, proxy.KeepAliveInterval, proxy.KeepAliveTimeout),
-			close: func() { _ = client.Close() },
-		}, nil
+		// The connection is the instance's: the watch leaves it open.
+		return tunnel{dial: client.DialContext, lost: lost, close: func() {}}, nil
 	}
 }
 
@@ -322,33 +314,45 @@ func (m *imds) do(req *http.Request) (int, string, error) {
 	return resp.StatusCode, string(body), err
 }
 
-// reclaimGroup is an instance group whose heartbeat also fails for a VM
-// with a reclaim notice.
-type reclaimGroup struct {
+// vmGroup is the instance group taskscaler sees. It drops an instance's
+// shared connection, and ends its reclaim watch, once the instance is
+// gone, and fails the heartbeat of an instance with a reclaim notice.
+type vmGroup struct {
 	provider.InstanceGroup
-	w *reclaimWatch
+	conns *vmConns
+	w     *reclaimWatch // nil: the class isn't watched
 }
 
-func (g reclaimGroup) Heartbeat(ctx context.Context, id string) error {
-	if n := g.w.notice(id); n != "" {
-		return fmt.Errorf("%w: %s", errReclaimNotice, n)
+func (g vmGroup) Heartbeat(ctx context.Context, id string) error {
+	if g.w != nil {
+		if n := g.w.notice(id); n != "" {
+			return fmt.Errorf("%w: %s", errReclaimNotice, n)
+		}
 	}
 	return g.InstanceGroup.Heartbeat(ctx, id)
 }
 
-func (g reclaimGroup) Update(ctx context.Context, fn func(string, provider.State)) error {
+func (g vmGroup) Update(ctx context.Context, fn func(string, provider.State)) error {
 	return g.InstanceGroup.Update(ctx, func(id string, state provider.State) {
 		if state == provider.StateDeleted {
-			g.w.stop(id)
+			g.forget(id)
 		}
 		fn(id, state)
 	})
 }
 
-func (g reclaimGroup) Decrease(ctx context.Context, ids []string) ([]string, error) {
+func (g vmGroup) Decrease(ctx context.Context, ids []string) ([]string, error) {
 	removed, err := g.InstanceGroup.Decrease(ctx, ids)
 	for _, id := range removed {
-		g.w.stop(id)
+		g.forget(id)
 	}
 	return removed, err
+}
+
+// forget lets go of an instance that is gone.
+func (g vmGroup) forget(id string) {
+	if g.w != nil {
+		g.w.stop(id)
+	}
+	g.conns.drop(id)
 }

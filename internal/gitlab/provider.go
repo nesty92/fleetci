@@ -31,7 +31,6 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"gitlab.com/gitlab-org/fleeting/fleeting/connector"
-	fleetingprovider "gitlab.com/gitlab-org/fleeting/fleeting/provider"
 	"gitlab.com/gitlab-org/gitlab-runner/common"
 	"gitlab.com/gitlab-org/gitlab-runner/common/buildlogger"
 	"gitlab.com/gitlab-org/gitlab-runner/executors"
@@ -61,7 +60,7 @@ type reservation interface {
 type vms interface {
 	Reserve(class string) (reservation, error)
 	Create(ctx context.Context, class string) (source.VM, error)
-	Connect(ctx context.Context, vm string) (proxy.Target, error)
+	Conn(vm string) (*proxy.Conn, error)
 	Delete(ctx context.Context, vm string) error
 }
 
@@ -159,7 +158,7 @@ func (p *provider) Acquire(config *common.RunnerConfig) (common.ExecutorData, er
 		if err != nil {
 			return nil, err
 		}
-		return &acquisitionRef{res: res, byJob: true, connect: p.vms.Connect, dial: connector.Dial}, nil
+		return &acquisitionRef{res: res, byJob: true, conn: p.vms.Conn}, nil
 	}
 	res, err := p.vms.Reserve(class)
 	if err != nil {
@@ -172,7 +171,7 @@ func (p *provider) Acquire(config *common.RunnerConfig) (common.ExecutorData, er
 
 	logrus.WithField("class", class).Trace("Reserved capacity...")
 
-	return &acquisitionRef{res: res, connect: p.vms.Connect, dial: connector.Dial}, nil
+	return &acquisitionRef{res: res, conn: p.vms.Conn}, nil
 }
 
 func (p *provider) Release(_ *common.RunnerConfig, data common.ExecutorData) {
@@ -313,10 +312,8 @@ type acquisitionRef struct {
 	tried bool
 	vm    *source.VM
 
-	// connect returns a VM's connection details.
-	connect func(ctx context.Context, vm string) (proxy.Target, error)
-	// test hook
-	dial connector.DialFn
+	// conn returns the connection to a VM's machine.
+	conn func(vm string) (*proxy.Conn, error)
 }
 
 // AcquisitionKey labels the job's containers with its VM.
@@ -339,52 +336,34 @@ func (ref *acquisitionRef) Prepare(
 	dialCtx, cancel := ref.WithContext(ctx)
 	defer cancel()
 
-	// fleetci: the VM's connect details, with the external address
-	// already chosen when the class's connector_config asks for it.
-	target, err := ref.connect(dialCtx, ref.vm.ID)
+	// fleetci: the job runs over the VM's one connection, which its other
+	// jobs and fleetci's reclaim watch share, in place of a connection of
+	// its own from fleeting's connector.Dial.
+	conn, err := ref.conn(ref.vm.ID)
+	if err != nil {
+		return nil, fmt.Errorf("getting instance connection: %w", err)
+	}
+
+	options.Build.Log().WithFields(logrus.Fields{
+		"instance-id": ref.vm.Instance,
+		"vm":          ref.vm.ID,
+	}).Info("Dialing instance")
+
+	logger.Println(fmt.Sprintf("Dialing instance %s...", ref.vm.Instance))
+	_, _, err = conn.Client(dialCtx)
 	if cause := context.Cause(dialCtx); cause != nil {
 		return nil, buildErrorFromContextCause(cause)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("getting instance connect info: %w", err)
-	}
-	info := target.Info
-
-	options.Build.Log().WithFields(logrus.Fields{
-		"address":     info.InternalAddr,
-		"instance-id": info.ID,
-		"vm":          ref.vm.ID,
-	}).Info("Dialing instance")
-
-	logger.Println(fmt.Sprintf("Dialing instance %s...", info.ID))
-	fleetingDialer, err := dialWithCancelCheck(dialCtx, ref.dial, info, connector.DialOptions{})
-	if err != nil {
 		return nil, err
 	}
-	logger.Println(fmt.Sprintf("Instance %s connected", info.ID))
+	logger.Println(fmt.Sprintf("Instance %s connected", ref.vm.Instance))
 
-	return &client{client: fleetingDialer, cleanup: nil}, nil
+	return &client{client: sharedClient{conn: conn}, cleanup: nil}, nil
 }
 
 func (ref *acquisitionRef) WithContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithCancel(ctx)
-}
-
-func dialWithCancelCheck(
-	ctx context.Context,
-	dial connector.DialFn,
-	info fleetingprovider.ConnectInfo,
-	options connector.DialOptions,
-) (connector.Client, error) {
-	client, err := dial(ctx, info, options)
-	if cause := context.Cause(ctx); cause != nil {
-		if client != nil {
-			client.Close()
-		}
-		return nil, buildErrorFromContextCause(cause)
-	}
-
-	return client, err
 }
 
 // buildErrorFromContextCause maps a context cancellation cause to the
@@ -418,7 +397,9 @@ func (c *client) DialRun(ctx context.Context, command string) (net.Conn, error) 
 func (c *client) Run(ctx context.Context, opts executors.RunOptions) error {
 	err := c.client.Run(ctx, connector.RunOptions(opts))
 
-	var exitErr *connector.ExitError
+	// fleetci: an exit code from fleeting's connector.ExitError or from
+	// sharedClient's exitError.
+	var exitErr interface{ ExitCode() int }
 	if errors.As(err, &exitErr) {
 		return &common.BuildError{
 			Inner:    err,

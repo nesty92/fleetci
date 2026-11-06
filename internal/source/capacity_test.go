@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/hashicorp/go-hclog"
+
 	"gitlab.com/gitlab-org/fleeting/fleeting/provider"
 
 	"github.com/nesty92/fleetci/internal/fleet"
@@ -20,6 +22,7 @@ type fakeBackend struct {
 	free    map[string]int
 	n       int
 	deleted []string
+	made    map[string]fleet.VM
 }
 
 type fakeHeld struct {
@@ -52,11 +55,16 @@ func (b *fakeBackend) vm(class string) fleet.VM {
 	b.mu.Lock()
 	b.n++
 	id := class + "-" + strconv.Itoa(b.n)
-	b.mu.Unlock()
-	return fleet.VM{ID: id, Class: class, Instance: "i-" + id,
-		Connect: func(context.Context) (proxy.Target, error) {
+	vm := fleet.VM{ID: id, Class: class, Instance: "i-" + id,
+		Conn: proxy.NewConn(func(context.Context) (proxy.Target, error) {
 			return proxy.Target{Info: provider.ConnectInfo{ID: id}}, nil
-		}}
+		}, hclog.NewNullLogger())}
+	if b.made == nil {
+		b.made = map[string]fleet.VM{}
+	}
+	b.made[id] = vm
+	b.mu.Unlock()
+	return vm
 }
 
 func (b *fakeBackend) Reserve(class string) (held, error) {
@@ -148,15 +156,15 @@ func TestConnectKnowsAVMUntilItIsDeleted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	target, err := c.Connect(ctx, vm.ID)
-	if err != nil || target.Info.ID != vm.ID {
-		t.Fatalf("Connect: %+v %v", target, err)
+	conn, err := c.Conn(vm.ID)
+	if err != nil || conn == nil || conn != b.made[vm.ID].Conn {
+		t.Fatalf("Conn: %v, not the vm's own connection", err)
 	}
 	if err := c.Delete(ctx, vm.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Connect(ctx, vm.ID); err == nil {
-		t.Error("Connect to a deleted VM")
+	if _, err := c.Conn(vm.ID); err == nil {
+		t.Error("Conn of a deleted VM")
 	}
 	if !slices.Equal(b.deleted, []string{vm.ID}) {
 		t.Errorf("deleted %v", b.deleted)

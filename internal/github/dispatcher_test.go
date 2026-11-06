@@ -30,6 +30,7 @@ type fakeBackend struct {
 	mu      sync.Mutex
 	created []string // classes
 	deleted []string // vm ids
+	conns   map[string]*proxy.Conn
 }
 
 func (b *fakeBackend) Classes(context.Context) ([]source.Class, string, error) {
@@ -48,8 +49,19 @@ func (b *fakeBackend) Release(context.Context, source.Reservation) error {
 	return errors.New("no reservations")
 }
 
-func (b *fakeBackend) Connect(context.Context, string) (proxy.Target, error) {
-	return proxy.Target{}, errors.New("fake vm")
+// Conn hands out one connection per vm, never dialed.
+func (b *fakeBackend) Conn(id string) (*proxy.Conn, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.conns == nil {
+		b.conns = map[string]*proxy.Conn{}
+	}
+	if b.conns[id] == nil {
+		b.conns[id] = proxy.NewConn(func(context.Context) (proxy.Target, error) {
+			return proxy.Target{}, errors.New("fake vm")
+		}, hclog.NewNullLogger())
+	}
+	return b.conns[id], nil
 }
 
 func (b *fakeBackend) Create(_ context.Context, class string) (source.VM, error) {
@@ -143,9 +155,11 @@ func TestDispatcher(t *testing.T) {
 	release := make(chan struct{})
 	var mu sync.Mutex
 	started := map[string]string{} // vm id → jit config
+	conns := map[string]*proxy.Conn{}
 	start := func(ctx context.Context, vm VM, jit string, took func(string)) error {
 		mu.Lock()
 		started[vm.ID] = jit
+		conns[vm.ID] = vm.Conn
 		mu.Unlock()
 		select {
 		case <-release:
@@ -190,6 +204,9 @@ func TestDispatcher(t *testing.T) {
 		}
 		if started[name] != "jit-"+name {
 			t.Errorf("runner %s started with %q", name, started[name])
+		}
+		if want, _ := backend.Conn(name); conns[name] == nil || conns[name] != want {
+			t.Errorf("runner %s started without its vm's connection", name)
 		}
 	}
 	gh.mu.Unlock()

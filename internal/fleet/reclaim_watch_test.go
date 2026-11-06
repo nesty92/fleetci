@@ -235,7 +235,7 @@ func TestANoticeReadThroughTheTunnelFailsTheHeartbeat(t *testing.T) {
 	vm := newVMSSH(t, addr, 0)
 	w := fastWatch(vm.open, false)
 	defer w.close()
-	g := reclaimGroup{newCloud("i-1"), w}
+	g := vmGroup{newCloud("i-1"), newVMConns(newCloud(), false, hclog.NewNullLogger()), w}
 
 	w.start("i-1")
 	eventually(t, "never read the metadata", func() bool {
@@ -333,14 +333,25 @@ func TestALostConnectionIsOpenedAgain(t *testing.T) {
 	eventually(t, "notice never seen on the new connection", func() bool { return w.notice("i-1") != "" })
 }
 
-func TestTheWatchEndsWithTheVM(t *testing.T) {
+func TestTheWatchAndTheConnectionEndWithTheVM(t *testing.T) {
 	_, addr := newFakeIMDS(t)
-	w := fastWatch(newVMSSH(t, addr, 0).open, false)
+	vm := newVMSSH(t, addr, 0)
+	w := fastWatch(vm.open, false)
 	defer w.close()
-	g := reclaimGroup{newCloud("i-1", "i-2"), w}
+	conns := newVMConns(newReachable(t, vm.addr), false, hclog.NewNullLogger())
+	defer conns.close()
+	g := vmGroup{newCloud("i-1", "i-2"), conns, w}
 
 	w.start("i-1")
 	w.start("i-2")
+	_, lost1, err := conns.get("i-1").Client(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, lost2, err := conns.get("i-2").Client(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := g.Decrease(context.Background(), []string{"i-1"}); err != nil {
 		t.Fatal(err)
 	}
@@ -351,6 +362,51 @@ func TestTheWatchEndsWithTheVM(t *testing.T) {
 	if one || !two {
 		t.Fatalf("watched after decrease: i-1 %v, i-2 %v; want only i-2", one, two)
 	}
+	gone(t, lost1, "the removed instance's connection stayed open")
+	if isClosedChan(lost2) {
+		t.Fatal("the other instance's connection was closed")
+	}
+}
+
+func isClosedChan(c <-chan struct{}) bool {
+	select {
+	case <-c:
+		return true
+	default:
+		return false
+	}
+}
+
+func TestTheWatchUsesTheInstancesConnection(t *testing.T) {
+	imds, addr := newFakeIMDS(t)
+	vm := newVMSSH(t, addr, 0)
+	conns := newVMConns(newReachable(t, vm.addr, "i-1"), false, hclog.NewNullLogger())
+	defer conns.close()
+	w := fastWatch(sshTunnel(conns), false)
+	defer w.close()
+
+	w.start("i-1")
+	eventually(t, "never read the metadata", func() bool {
+		imds.mu.Lock()
+		defer imds.mu.Unlock()
+		return imds.tokens > 0
+	})
+	// A job on the instance uses the same connection.
+	if _, _, err := conns.get("i-1").Client(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	imds.set("spot/instance-action", `{"action": "terminate"}`)
+	eventually(t, "notice never seen", func() bool { return w.notice("i-1") != "" })
+	if n := vm.accepted(); n != 1 {
+		t.Fatalf("%d connections to the instance, want the watch and the job on one", n)
+	}
+
+	// The watch carries on over a new connection once the old one dies.
+	vm.drop()
+	w.stop("i-1")
+	imds.set("spot/instance-action", `{"action": "stop"}`)
+	w.start("i-1")
+	eventually(t, "notice never seen on the new connection", func() bool { return w.notice("i-1") != "" })
 }
 
 func TestReclaimIsWatchedForTheAWSPluginByDefault(t *testing.T) {
@@ -426,17 +482,20 @@ func (r *reporting) Update(_ context.Context, fn func(string, provider.State)) e
 	return nil
 }
 
-func TestTheWatchEndsWhenThePluginReportsTheVMDeleted(t *testing.T) {
+func TestTheWatchAndConnectionEndWhenThePluginReportsTheVMDeleted(t *testing.T) {
 	_, addr := newFakeIMDS(t)
 	w := fastWatch(newVMSSH(t, addr, 0).open, false)
 	defer w.close()
+	conns := newVMConns(newCloud(), false, hclog.NewNullLogger())
+	defer conns.close()
 
 	for _, c := range []struct {
-		state   provider.State
-		watched bool
+		state provider.State
+		kept  bool
 	}{{provider.StateRunning, true}, {provider.StateDeleting, true}, {provider.StateDeleted, false}} {
 		w.start("i-1")
-		g := reclaimGroup{&reporting{id: "i-1", state: c.state}, w}
+		conn := conns.get("i-1")
+		g := vmGroup{&reporting{id: "i-1", state: c.state}, conns, w}
 		var got provider.State
 		if err := g.Update(context.Background(), func(_ string, s provider.State) { got = s }); err != nil {
 			t.Fatal(err)
@@ -447,8 +506,8 @@ func TestTheWatchEndsWhenThePluginReportsTheVMDeleted(t *testing.T) {
 		w.mu.Lock()
 		_, watched := w.stops["i-1"]
 		w.mu.Unlock()
-		if watched != c.watched {
-			t.Fatalf("%v: watched %v, want %v", c.state, watched, c.watched)
+		if watched != c.kept || (conns.get("i-1") == conn) != c.kept {
+			t.Fatalf("%v: watched %v, same connection %v; want both %v", c.state, watched, conns.get("i-1") == conn, c.kept)
 		}
 	}
 }
@@ -484,7 +543,7 @@ func TestAWatchedClassCordonsAVMWithANotice(t *testing.T) {
 	on := true
 
 	group, admit, w := withReclaim(Class{Plugin: "fleeting-plugin-x", Reclaim: Reclaim{Watch: &on}},
-		newCloud("i-1"), up, vm.open, hclog.NewNullLogger())
+		newCloud("i-1"), newVMConns(newCloud(), false, hclog.NewNullLogger()), up, vm.open, hclog.NewNullLogger())
 	if w == nil {
 		t.Fatal("no watch for a class that asks for one")
 	}
@@ -497,18 +556,59 @@ func TestAWatchedClassCordonsAVMWithANotice(t *testing.T) {
 	})
 }
 
-func TestAnUnwatchedClassGetsItsGroupAsItIs(t *testing.T) {
-	plain := newCloud("i-1")
+func TestAnUnwatchedClassStillDropsAGoneInstancesConnection(t *testing.T) {
+	_, addr := newFakeIMDS(t)
+	vm := newVMSSH(t, addr, 0)
+	conns := newVMConns(newReachable(t, vm.addr), false, hclog.NewNullLogger())
+	defer conns.close()
 	called := false
 	up := func(taskscaler.Taskscaler, taskscaler.UpFuncInstance) error { called = true; return nil }
 
-	group, admit, w := withReclaim(Class{Plugin: "fleeting-plugin-dockervm"}, plain, up,
+	group, admit, w := withReclaim(Class{Plugin: "fleeting-plugin-dockervm"}, newCloud("i-1"), conns, up,
 		func(context.Context, string) (tunnel, error) { t.Fatal("opened a tunnel"); return tunnel{}, nil },
 		hclog.NewNullLogger())
-	if w != nil || group != provider.InstanceGroup(plain) {
-		t.Fatalf("watch %v, group %T: want neither changed", w, group)
+	if w != nil {
+		t.Fatal("a watch for a class that isn't watched")
 	}
 	if err := admit(nil, taskscaler.UpFuncInstance{ID: "i-1"}); err != nil || !called {
 		t.Fatalf("up: err %v, called %v", err, called)
+	}
+	if err := group.Heartbeat(context.Background(), "i-1"); err != nil {
+		t.Fatalf("heartbeat %v, want the plugin's", err)
+	}
+
+	_, lost, err := conns.get("i-1").Client(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := group.Decrease(context.Background(), []string{"i-1"}); err != nil {
+		t.Fatal(err)
+	}
+	gone(t, lost, "the removed instance's connection stayed open")
+}
+
+func TestAWatchThatEndsLeavesTheInstancesConnection(t *testing.T) {
+	_, addr := newFakeIMDS(t)
+	vm := newVMSSH(t, addr, ssh.ConnectionFailed) // no metadata: the watch ends
+	conns := newVMConns(newReachable(t, vm.addr, "i-1"), false, hclog.NewNullLogger())
+	defer conns.close()
+	w := fastWatch(sshTunnel(conns), false)
+	w.start("i-1")
+	time.Sleep(200 * time.Millisecond)
+	w.close()
+
+	// The jobs on the instance still have their connection.
+	client, lost, err := conns.get("i-1").Client(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed(lost) {
+		t.Fatal("the watch closed the instance's connection")
+	}
+	if _, _, err := client.SendRequest("keepalive@openssh.com", true, nil); err != nil {
+		t.Fatalf("the watch closed the instance's connection: %v", err)
+	}
+	if n := vm.accepted(); n != 1 {
+		t.Fatalf("%d connections, want the watch's one kept for the jobs", n)
 	}
 }

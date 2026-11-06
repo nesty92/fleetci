@@ -119,7 +119,7 @@ func (c *capacity) Create(ctx context.Context, class string) (VM, error) {
 	return c.keep(c.b.Create(ctx, class))
 }
 
-// keep remembers a VM for Connect.
+// keep remembers a VM for Conn.
 func (c *capacity) keep(vm fleet.VM, err error) (VM, error) {
 	if err != nil {
 		return VM{}, err
@@ -130,14 +130,14 @@ func (c *capacity) keep(vm fleet.VM, err error) (VM, error) {
 	return VM{ID: vm.ID, Class: vm.Class, Instance: vm.Instance}, nil
 }
 
-func (c *capacity) Connect(ctx context.Context, id string) (proxy.Target, error) {
+func (c *capacity) Conn(id string) (*proxy.Conn, error) {
 	c.mu.Lock()
 	vm, ok := c.vms[id]
 	c.mu.Unlock()
 	if !ok {
-		return proxy.Target{}, fmt.Errorf("no vm %q", id)
+		return nil, fmt.Errorf("no vm %q", id)
 	}
-	return vm.Connect(ctx)
+	return vm.Conn, nil
 }
 
 func (c *capacity) Delete(ctx context.Context, id string) error {

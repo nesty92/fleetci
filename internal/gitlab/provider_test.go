@@ -66,8 +66,8 @@ func (h *fakeHost) Create(_ context.Context, class string) (source.VM, error) {
 	return source.VM{ID: "vm-" + class, Class: class}, nil
 }
 
-func (*fakeHost) Connect(context.Context, string) (proxy.Target, error) {
-	return proxy.Target{}, errors.New("fake vm")
+func (*fakeHost) Conn(string) (*proxy.Conn, error) {
+	return nil, errors.New("fake vm")
 }
 
 func (*fakeHost) Delete(context.Context, string) error { return nil }

@@ -57,19 +57,14 @@ func TestClassWithDockerPlugin(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Two connections, each with a fresh key from ConnectInfo.
+	// Two sessions on the machine's one connection.
 	for i := range 2 {
-		target, err := vm.Connect(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		c, err := proxy.Dial(ctx, target)
+		c, _, err := vm.Conn.Client(ctx)
 		if err != nil {
 			t.Fatalf("connection %d: %v", i, err)
 		}
 		s, _ := c.NewSession()
 		out, err := s.Output("docker info --format '{{.NCPU}}' && cat /sys/fs/cgroup/cpu.max")
-		c.Close()
 		if err != nil {
 			t.Fatalf("connection %d: %v: %s", i, err, out)
 		}

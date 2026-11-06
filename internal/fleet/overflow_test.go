@@ -43,7 +43,7 @@ func (f *fakeScaler) Release(string) {
 }
 
 func fakePool(name string, max int, overflow string) *pool {
-	return &pool{name: name, class: Class{MaxInstances: max, Overflow: overflow},
+	return &pool{name: name, class: Class{MaxInstances: max, Overflow: overflow}, conns: noConns(),
 		ts: &fakeScaler{free: max}, timeout: 100 * time.Millisecond}
 }
 
