@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"gitlab.com/gitlab-org/fleeting/fleeting/provider"
@@ -58,6 +61,34 @@ type Class struct {
 	// plugin_config.
 	CPUs   int  `json:"cpus" toml:"cpus"`
 	Memory Size `json:"memory" toml:"memory"`
+
+	// Reclaim is how the class learns that the cloud wants a VM back.
+	Reclaim Reclaim `json:"reclaim" toml:"reclaim"`
+}
+
+// Reclaim watches a class's VMs for the cloud's notice that it is taking
+// one back. A VM with a notice takes no new job; its running jobs go on,
+// and it is removed once they end.
+type Reclaim struct {
+	// Watch reads each VM's instance metadata (AWS IMDS) every 2 seconds.
+	// fleetci makes the HTTP requests itself, through an SSH tunnel to the
+	// VM, so nothing runs on the VM and no IAM is needed; the VM's SSH
+	// server must allow TCP forwarding (the default). Unset, it is on for
+	// the AWS plugin.
+	Watch *bool `json:"watch" toml:"watch"`
+	// Rebalance treats a rebalance recommendation, which says a spot VM is
+	// at higher risk of interruption, as a notice. Off by default: a
+	// recommendation is often not followed by an interruption, and each one
+	// acted on costs a new VM.
+	Rebalance bool `json:"rebalance" toml:"rebalance"`
+}
+
+// watchesReclaim reports whether the class's VMs are watched for reclaim.
+func (c Class) watchesReclaim() bool {
+	if c.Reclaim.Watch != nil {
+		return *c.Reclaim.Watch
+	}
+	return strings.HasPrefix(path.Base(filepath.ToSlash(c.Plugin)), "fleeting-plugin-aws")
 }
 
 // Connector mirrors the runner's connector_config.
@@ -161,6 +192,9 @@ func (c Class) validate(name string) error {
 	}
 	if c.CapacityPerInstance < 0 || c.MaxUseCount < 0 {
 		return fmt.Errorf("class %q: capacity_per_instance and max_use_count can't be negative", name)
+	}
+	if c.Reclaim.Rebalance && !c.watchesReclaim() {
+		return fmt.Errorf("class %q: reclaim.rebalance needs reclaim.watch", name)
 	}
 	if c.CPUs < 0 || c.Memory < 0 {
 		return fmt.Errorf("class %q: cpus and memory can't be negative", name)
