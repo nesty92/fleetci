@@ -6,6 +6,7 @@ import (
 	"flag"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -14,11 +15,13 @@ import (
 	"github.com/nesty92/fleetci/internal/fleet"
 	"github.com/nesty92/fleetci/internal/fleetci"
 	"github.com/nesty92/fleetci/internal/github"
+	"github.com/nesty92/fleetci/internal/gitlab"
 )
 
-// serve runs GitHub Actions jobs on fleetci.toml's classes as a process of
-// its own, without gitlab-runner, until SIGINT or SIGTERM; then it removes
-// its VMs. Run it under a service manager that restarts it.
+// serve runs GitHub Actions jobs, and with [gitlab] GitLab CI jobs, on
+// fleetci.toml's classes as a process of its own, without gitlab-runner,
+// until SIGINT or SIGTERM; then it removes its VMs. Run it under a service
+// manager that restarts it.
 //
 // Its classes are its own: a group driven by two processes (serve and a
 // gitlab-runner's fleetci plugin) has each remove the other's VMs, so
@@ -35,8 +38,8 @@ func serve(args []string) error {
 	if err := c.Validate(); err != nil {
 		return err
 	}
-	if c.GitHub == nil {
-		return errors.New(c.ConfigFile + ": serve runs GitHub Actions jobs and needs a [github] table")
+	if c.GitHub == nil && c.GitLab == nil {
+		return errors.New(c.ConfigFile + ": serve runs GitHub Actions and GitLab CI jobs and needs a [github] or [gitlab] table")
 	}
 
 	log := hclog.New(&hclog.LoggerOptions{Name: "fleetci", Output: os.Stderr, Level: hclog.Info})
@@ -56,11 +59,23 @@ func serve(args []string) error {
 		_ = backend.Shutdown(sctx)
 	}()
 
-	gh, err := github.New(*c.GitHub, c.DefaultClass, backend, nil, log.Named("github"))
-	if err != nil {
-		return err
+	var wg sync.WaitGroup
+	if c.GitHub != nil {
+		gh, err := github.New(*c.GitHub, c.DefaultClass, backend, nil, log.Named("github"))
+		if err != nil {
+			return err
+		}
+		wg.Go(func() { gh.Run(ctx) })
 	}
-	log.Info("fleetci serving", "classes", len(c.Classes), "default_class", c.DefaultClass)
-	gh.Run(ctx)
-	return nil
+	var glErr error
+	if c.GitLab != nil {
+		gl, err := gitlab.New(*c.GitLab, c.Classes, backend, log.Named("gitlab"))
+		if err != nil {
+			return err
+		}
+		wg.Go(func() { glErr = gl.Run(ctx) })
+	}
+	log.Info("fleetci serving", "classes", len(c.Classes), "default_class", c.DefaultClass, "github", c.GitHub != nil, "gitlab", c.GitLab != nil)
+	wg.Wait()
+	return glErr
 }

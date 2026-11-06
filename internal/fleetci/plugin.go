@@ -23,6 +23,7 @@ import (
 	"github.com/nesty92/fleetci/internal/fleet"
 	"github.com/nesty92/fleetci/internal/gateway"
 	"github.com/nesty92/fleetci/internal/github"
+	"github.com/nesty92/fleetci/internal/gitlab"
 )
 
 const (
@@ -46,6 +47,9 @@ type Config struct {
 	Classes      map[string]fleet.Class `json:"classes" toml:"classes"`
 	// GitHub, when set, also runs GitHub Actions jobs on the classes.
 	GitHub *github.Config `json:"github" toml:"github"`
+	// GitLab, when set, has "fleetci serve" take GitLab CI jobs itself,
+	// with no gitlab-runner.
+	GitLab *gitlab.Config `json:"gitlab" toml:"gitlab"`
 	// Host is the CPUs and memory this machine lends to the VMs of its
 	// classes; detected when unset.
 	Host *fleet.HostConfig `json:"host" toml:"host"`
