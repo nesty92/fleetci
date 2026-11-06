@@ -120,7 +120,7 @@ func (h *Hypervisor) Create(ctx context.Context, name string) (hypervisor.Virtua
 
 	h.mu.Lock()
 	host := vmHost(vm)
-	h.vms[vm.ID] = &vmEntry{name: name, host: host, proxy: proxy.NewVM(vm.ID, vm.Connect, h.log)}
+	h.vms[vm.ID] = &vmEntry{name: name, host: host, proxy: proxy.NewVM(vm.ID, vm.Conn, h.log)}
 	h.mu.Unlock()
 
 	// The address is the VM's id, which only the gateway understands. The

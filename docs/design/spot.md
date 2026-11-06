@@ -74,6 +74,14 @@ logged once and left to the plugin's own check. A lost connection is
 opened again with backoff; one EC2 Instance Connect key per connection,
 not per read.
 
+That connection is the host's only one. The watch and every job on the
+host share it, and each opens its own sessions and forwards on it: the
+plugin-mode proxy, the standalone GitLab executor (a `connector.Client`
+over it, ported from fleeting's) and the GitHub runner. A job ends its own
+sessions and leaves the connection; it closes when the host is removed.
+The checks that admit a host still log in afresh, so the login a job gets
+already has the groups setup gave the user.
+
 The watch starts once a host is admitted (Docker answers) and ends when
 the host is removed. It is on by default for the AWS plugin
 (`[classes.<name>.reclaim] watch`).
@@ -148,8 +156,9 @@ the way it falls over to its overflow class today.
 3. Cordon on a rebalance recommendation, when the class asks for it
    (`reclaim.rebalance`, #8).
 
-Steps 2 and 3 are on `feat/spot-reclaim`, tested against a fake IMDS
-behind a real SSH server, not yet on EC2.
+Steps 2 and 3 are on `feat/spot-reclaim`, with the one shared connection
+per host, tested against a fake IMDS behind a real SSH server, not yet on
+EC2.
 4. Lifecycle hook support (#8).
 5. SQS queue as an opt-in source.
 6. Avoid-list, then zones (#7).

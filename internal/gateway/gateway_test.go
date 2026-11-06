@@ -45,7 +45,9 @@ func TestRunnerPath(t *testing.T) {
 		},
 		HostKey: vmHostKey,
 	}
-	vm := proxy.NewVM("fleetci-vm-1", func(context.Context) (proxy.Target, error) { return target, nil }, log)
+	conn := proxy.NewConn(func(context.Context) (proxy.Target, error) { return target, nil }, log)
+	defer conn.Close()
+	vm := proxy.NewVM("fleetci-vm-1", conn, log)
 	defer vm.Close()
 
 	gw, err := gateway.New(gateway.Config{

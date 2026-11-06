@@ -40,8 +40,8 @@ func (*noRoom) Release(context.Context, source.Reservation) error {
 func (*noRoom) Create(context.Context, string) (source.VM, error) {
 	return source.VM{}, source.ErrNoRoom
 }
-func (*noRoom) Connect(context.Context, string) (proxy.Target, error) {
-	return proxy.Target{}, errors.New("no vms")
+func (*noRoom) Conn(string) (*proxy.Conn, error) {
+	return nil, errors.New("no vms")
 }
 func (*noRoom) Delete(context.Context, string) error { return nil }
 

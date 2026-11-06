@@ -63,10 +63,10 @@ type Capacity interface {
 	Release(ctx context.Context, r Reservation) error
 	// Create waits for room for a VM of class and takes it.
 	Create(ctx context.Context, class string) (VM, error)
-	// Connect returns fresh connection details for a VM: fleeting's
-	// ConnectInfo, with a new key from plugins that issue short-lived
-	// ones, and the host key to pin.
-	Connect(ctx context.Context, vm string) (proxy.Target, error)
+	// Conn is the SSH connection to a VM's machine, which every job on it
+	// and fleetci itself share. Callers open sessions on it and never close
+	// it.
+	Conn(vm string) (*proxy.Conn, error)
 	// Delete removes a VM.
 	Delete(ctx context.Context, vm string) error
 }

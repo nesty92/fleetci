@@ -25,7 +25,7 @@ func hostPools(t *testing.T, budget Resources, classes map[string]Class) (*Backe
 	}
 	b := &Backend{log: hclog.NewNullLogger(), vms: map[string]*pool{}, pools: map[string][]*pool{}}
 	for name, c := range classes {
-		p := &pool{name: name, class: c, ts: &fakeScaler{free: c.MaxInstances}, timeout: 5 * time.Second}
+		p := &pool{name: name, class: c, conns: noConns(), ts: &fakeScaler{free: c.MaxInstances}, timeout: 5 * time.Second}
 		if q != nil && c.OnHost() {
 			p.queue, p.host, p.dynamic = q, q.hosts[localHost], !c.Reuses()
 			p.size, _ = c.Size()
@@ -409,7 +409,7 @@ func spanning(t *testing.T, placement string) (*Backend, *host, *host) {
 	size, _ := c.Size()
 	b := &Backend{log: hclog.NewNullLogger(), vms: map[string]*pool{}, pools: map[string][]*pool{}}
 	for _, h := range []*host{a, h2} {
-		b.pools["vm"] = append(b.pools["vm"], &pool{name: "vm", class: c, ts: &fakeScaler{free: c.MaxInstances},
+		b.pools["vm"] = append(b.pools["vm"], &pool{name: "vm", class: c, conns: noConns(), ts: &fakeScaler{free: c.MaxInstances},
 			timeout: 100 * time.Millisecond, queue: q, host: h, size: size, dynamic: true})
 	}
 	return b, a, h2

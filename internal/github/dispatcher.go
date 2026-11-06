@@ -76,8 +76,9 @@ var genericLabels = []string{"self-hosted", "linux"}
 // VM is a job's VM and how to reach it.
 type VM struct {
 	source.VM
-	// Connect returns the VM's connection details.
-	Connect func(ctx context.Context) (proxy.Target, error)
+	// Conn is the connection to the VM's machine, shared: never closed by
+	// a job.
+	Conn *proxy.Conn
 }
 
 // StartFunc runs a just-in-time runner on the VM and returns when it exits.
@@ -408,8 +409,14 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 	defer func() {
 		_ = d.capacity.Delete(context.WithoutCancel(ctx), created.ID)
 	}()
-	vm := VM{VM: created, Connect: func(ctx context.Context) (proxy.Target, error) { return d.capacity.Connect(ctx, created.ID) }}
-	log = log.With("vm", vm.ID, "instance", vm.Instance)
+	log = log.With("vm", created.ID, "instance", created.Instance)
+	conn, err := d.capacity.Conn(created.ID)
+	if err != nil {
+		log.Error("no connection to the vm; retrying on the next poll", "err", err)
+		d.forget(j.ID, false)
+		return
+	}
+	vm := VM{VM: created, Conn: conn}
 
 	labels := runnerLabels(j.Labels)
 	runnerID, jit, err := d.gh.jitConfig(ctx, repo, vm.ID, d.cfg.RunnerGroupID, labels)

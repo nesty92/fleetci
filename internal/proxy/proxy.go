@@ -35,20 +35,20 @@ type Target struct {
 // expire (such as EC2 Instance Connect) issue a new key on every call.
 type ConnectFunc func(ctx context.Context) (Target, error)
 
-// VM is one job VM behind the proxy. It keeps a single SSH connection to the
-// VM and shares it between all of the runner's connections.
+// VM is one job VM behind the proxy. The runner's connections to it go
+// over conn, the VM's one connection, which the VM shares with everything
+// else that talks to the machine and leaves open when it goes.
 type VM struct {
-	ID      string
-	connect ConnectFunc
-	log     hclog.Logger
+	ID   string
+	conn *Conn
+	log  hclog.Logger
 
 	mu     sync.Mutex
-	client *ssh.Client
 	closed bool
 }
 
-func NewVM(id string, connect ConnectFunc, log hclog.Logger) *VM {
-	return &VM{ID: id, connect: connect, log: log.With("vm", id)}
+func NewVM(id string, conn *Conn, log hclog.Logger) *VM {
+	return &VM{ID: id, conn: conn, log: log.With("vm", id)}
 }
 
 // Serve ends one runner connection to this VM on conn and forwards its
@@ -75,52 +75,24 @@ func (v *VM) Serve(ctx context.Context, conn net.Conn, cfg *ssh.ServerConfig) {
 	}
 }
 
-// Close drops the connection to the VM.
+// Close refuses further runner connections. The VM's connection stays: it
+// is the machine's, not this job's.
 func (v *VM) Close() error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.closed = true
-	if v.client != nil {
-		return v.client.Close()
-	}
 	return nil
 }
 
 func (v *VM) upstream(ctx context.Context) (*ssh.Client, error) {
 	v.mu.Lock()
-	defer v.mu.Unlock()
-
-	if v.closed {
+	closed := v.closed
+	v.mu.Unlock()
+	if closed {
 		return nil, errors.New("vm is gone")
 	}
-	if v.client != nil {
-		return v.client, nil
-	}
-
-	t, err := v.connect(ctx)
-	if err != nil {
-		return nil, err
-	}
-	client, err := Dial(ctx, t)
-	if err != nil {
-		return nil, err
-	}
-	v.client = client
-	v.log.Info("connected to vm", "addr", t.Info.InternalAddr)
-
-	go v.keepalive(client)
-	return client, nil
-}
-
-// keepalive forgets a dead connection so the next runner connection dials
-// again with fresh credentials.
-func (v *VM) keepalive(c *ssh.Client) {
-	<-KeepAlive(c, KeepAliveInterval, KeepAliveTimeout)
-	v.mu.Lock()
-	if v.client == c {
-		v.client = nil
-	}
-	v.mu.Unlock()
+	client, _, err := v.conn.Client(ctx)
+	return client, err
 }
 
 // How often a VM connection is checked, and how long a reply may take. A

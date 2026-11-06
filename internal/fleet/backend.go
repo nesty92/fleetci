@@ -32,7 +32,10 @@ type VM struct {
 	Class string
 	// Instance is the plugin's id for the machine behind the VM.
 	Instance string
-	Connect  proxy.ConnectFunc
+	// Conn is the machine's one SSH connection, shared with its other
+	// jobs and its reclaim watch. Users open channels on it and never
+	// close it.
+	Conn *proxy.Conn
 }
 
 type pool struct {
@@ -40,6 +43,7 @@ type pool struct {
 	class   Class
 	group   *supervised
 	reclaim *reclaimWatch // nil when the class isn't watched
+	conns   *vmConns      // one shared connection per instance
 	ts      taskscaler.Taskscaler
 	timeout time.Duration
 
@@ -304,12 +308,14 @@ func startPool(ctx context.Context, name string, c Class, groups map[string]stri
 	}
 	groups[info.ID] = name
 
-	scaled, up, reclaim := withReclaim(c, group, dockerReady(group, c.Connector.UseExternalAddr, log),
-		sshTunnel(group, c.Connector.UseExternalAddr), log)
+	conns := newVMConns(group, c.Connector.UseExternalAddr, log.Named("conn"))
+	scaled, up, reclaim := withReclaim(c, group, conns, dockerReady(group, c.Connector.UseExternalAddr, log),
+		sshTunnel(conns), log)
 	stop := func() {
 		if reclaim != nil {
 			reclaim.close()
 		}
+		conns.close()
 		group.Close()
 	}
 
@@ -327,18 +333,19 @@ func startPool(ctx context.Context, name string, c Class, groups map[string]stri
 
 	timeout := c.acquireTimeout()
 	log.Info("class ready", "group", info.ID, "plugin", c.Plugin, "max_instances", c.MaxInstances, "policies", len(c.schedules()))
-	return &pool{name: name, class: c, group: group, reclaim: reclaim, ts: ts, timeout: timeout}, nil
+	return &pool{name: name, class: c, group: group, reclaim: reclaim, conns: conns, ts: ts, timeout: timeout}, nil
 }
 
-// withReclaim adds the reclaim watch to a class that wants one: the group
-// taskscaler sees fails the heartbeat of a VM with a notice, and up starts
-// watching a VM once it is admitted. reclaim is nil for a class without.
-func withReclaim(c Class, group provider.InstanceGroup, up taskscaler.UpFunc, open opener, log hclog.Logger) (provider.InstanceGroup, taskscaler.UpFunc, *reclaimWatch) {
+// withReclaim wraps a class's group so a gone instance's connection is
+// dropped and, for a class watched for reclaim, so the heartbeat of a VM
+// with a notice fails and up starts watching a VM once it is admitted.
+// reclaim is nil for a class that isn't watched.
+func withReclaim(c Class, group provider.InstanceGroup, conns *vmConns, up taskscaler.UpFunc, open opener, log hclog.Logger) (provider.InstanceGroup, taskscaler.UpFunc, *reclaimWatch) {
 	if !c.watchesReclaim() {
-		return group, up, nil
+		return vmGroup{group, conns, nil}, up, nil
 	}
 	w := newReclaimWatch(open, c.Reclaim.Rebalance, log.Named("reclaim"))
-	return reclaimGroup{group, w}, watchOnceUp(up, w), w
+	return vmGroup{group, conns, w}, watchOnceUp(up, w), w
 }
 
 // watchOnceUp starts watching an instance for reclaim once up admits it.
@@ -544,17 +551,9 @@ func (b *Backend) acquire(actx context.Context, p *pool, class string, start tim
 	}
 	b.log.Info("vm acquired", log...)
 
-	// Each call asks the plugin again, so plugins that issue short-lived
-	// keys hand out a fresh one for every connection.
-	external := p.class.Connector.UseExternalAddr
-	connect := func(ctx context.Context) (proxy.Target, error) {
-		info, err := acq.InstanceConnectInfo(ctx)
-		if err != nil {
-			return proxy.Target{}, err
-		}
-		return target(info, external), nil
-	}
-	return VM{ID: id, Class: p.name, Instance: acq.InstanceID(), Connect: connect}, nil
+	// The instance's one connection: every job on it, and its reclaim
+	// watch, share it.
+	return VM{ID: id, Class: p.name, Instance: acq.InstanceID(), Conn: p.conns.get(acq.InstanceID())}, nil
 }
 
 // full says why a job of the class found no room. held is the class of the
@@ -621,6 +620,7 @@ func (b *Backend) Shutdown(ctx context.Context) error {
 				if p.reclaim != nil {
 					p.reclaim.close()
 				}
+				p.conns.close()
 				sweep(ctx, p.group, b.log.With("class", p.name))
 				p.group.Close()
 			}()

@@ -48,26 +48,20 @@ exec ./run.sh --jitconfig "$jit"
 // With cacheURL set, jobs use that cache server instead of GitHub's.
 func SSHStart(version, cacheURL string, log hclog.Logger) StartFunc {
 	return func(ctx context.Context, vm VM, jit string, took func(job string)) error {
-		target, err := vm.Connect(ctx)
+		// The machine's connection, shared with its reclaim watch: the job
+		// opens a session on it and leaves it open. A VM that dies mid-job
+		// closes lost in seconds, not when TCP gives up.
+		client, lost, err := vm.Conn.Client(ctx)
 		if err != nil {
 			return err
 		}
-		client, err := proxy.Dial(ctx, target)
-		if err != nil {
-			return err
-		}
-		defer client.Close()
-		stop := context.AfterFunc(ctx, func() { _ = client.Close() })
-		defer stop()
-		// A VM that dies mid-job ends the session in seconds, not when TCP
-		// gives up.
-		alive := proxy.KeepAlive(client, proxy.KeepAliveInterval, proxy.KeepAliveTimeout)
-
 		s, err := client.NewSession()
 		if err != nil {
 			return err
 		}
 		defer s.Close()
+		stop := context.AfterFunc(ctx, func() { _ = s.Close() })
+		defer stop()
 
 		out := logWriter(log.With("vm", vm.ID), took)
 		defer out.Close()
@@ -76,7 +70,7 @@ func SSHStart(version, cacheURL string, log hclog.Logger) StartFunc {
 		s.Stderr = out
 		if err := s.Run(fmt.Sprintf(runScript, version, cacheURL)); err != nil {
 			select {
-			case <-alive:
+			case <-lost:
 				if ctx.Err() == nil {
 					return fmt.Errorf("lost the vm: no answer for %s: %w", proxy.KeepAliveTimeout, err)
 				}
