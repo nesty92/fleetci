@@ -214,7 +214,7 @@ runner starting   repo=owner/api queued_job=build class=8vcpu-16gb vm=… waited
 | A GitLab job fails waiting for a VM | its class was full for `acquire_timeout`. Raise the class's `max_instances` (and the account's spot quota), or its `acquire_timeout`. |
 | `fleetci check` fails on `concurrent` | the runner's classes hold more jobs than gitlab-runner's `concurrent`. The module adds the extra classes' share to `runner_manager.maximum_concurrent_jobs`; raise that for the runner's own class. |
 | A GitHub job never starts | the gitlab-runner log says why: an unknown class, an extra label, or no VM. It stays queued and is tried again. |
-| A spot VM is reclaimed mid-job | the GitLab job fails and can be retried. A GitHub job stays "in progress" for about 4 minutes, then fails; re-run it. |
+| A spot VM is reclaimed mid-job | the GitLab job fails and can be retried. A GitHub job stays "in progress" for about 4 minutes, then fails; re-run it. Once the notice is out, no new job goes to that VM (the log says "the cloud is taking this vm back"). |
 | fleetci's plugin dies | `fleetci-watchdog@amd64` restarts gitlab-runner after 30 s, which also ends the other runners' jobs. |
 | The GitHub token expires | put a new one in the SSM parameter and replace the Manager (`tofu apply -replace=module.runners.aws_instance.runner_manager`): the token is read at boot. |
 | Add a class or a repo | change the runner's fleetci block and apply; the Manager is replaced. |

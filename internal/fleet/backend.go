@@ -39,6 +39,7 @@ type pool struct {
 	name    string
 	class   Class
 	group   *supervised
+	reclaim *reclaimWatch // nil when the class isn't watched
 	ts      taskscaler.Taskscaler
 	timeout time.Duration
 
@@ -303,22 +304,47 @@ func startPool(ctx context.Context, name string, c Class, groups map[string]stri
 	}
 	groups[info.ID] = name
 
-	ts, err := taskscaler.New(ctx, initialised{group, info},
-		scalerOptions(c, settings, dockerReady(group, c.Connector.UseExternalAddr, log), log)...)
-	if err != nil {
+	var scaled provider.InstanceGroup = group
+	up := dockerReady(group, c.Connector.UseExternalAddr, log)
+	var reclaim *reclaimWatch
+	if c.watchesReclaim() {
+		reclaim = newReclaimWatch(sshTunnel(group, c.Connector.UseExternalAddr), c.Reclaim.Rebalance, log.Named("reclaim"))
+		scaled = reclaimGroup{group, reclaim}
+		up = watchOnceUp(up, reclaim)
+	}
+	stop := func() {
+		if reclaim != nil {
+			reclaim.close()
+		}
 		group.Close()
+	}
+
+	ts, err := taskscaler.New(ctx, initialised{scaled, info}, scalerOptions(c, settings, up, log)...)
+	if err != nil {
+		stop()
 		return nil, fmt.Errorf("starting taskscaler: %w", err)
 	}
 
 	if err := ts.ConfigureSchedule(c.schedules()...); err != nil {
 		ts.Shutdown(ctx)
-		group.Close()
+		stop()
 		return nil, err
 	}
 
 	timeout := c.acquireTimeout()
 	log.Info("class ready", "group", info.ID, "plugin", c.Plugin, "max_instances", c.MaxInstances, "policies", len(c.schedules()))
-	return &pool{name: name, class: c, group: group, ts: ts, timeout: timeout}, nil
+	return &pool{name: name, class: c, group: group, reclaim: reclaim, ts: ts, timeout: timeout}, nil
+}
+
+// watchOnceUp starts watching an instance for reclaim once up admits it.
+func watchOnceUp(up taskscaler.UpFunc, w *reclaimWatch) taskscaler.UpFunc {
+	return func(ts taskscaler.Taskscaler, inst taskscaler.UpFuncInstance) error {
+		if err := up(ts, inst); err != nil {
+			return err
+		}
+		w.start(inst.ID)
+		return nil
+	}
 }
 
 // scalerOptions configures a class's taskscaler; up readies a new instance.
@@ -587,6 +613,9 @@ func (b *Backend) Shutdown(ctx context.Context) error {
 			go func() {
 				defer wg.Done()
 				p.ts.Shutdown(ctx)
+				if p.reclaim != nil {
+					p.reclaim.close()
+				}
 				sweep(ctx, p.group, b.log.With("class", p.name))
 				p.group.Close()
 			}()

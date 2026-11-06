@@ -343,6 +343,26 @@ timeout; on GitHub it stays queued.
 The overflow class is a class like any other, so jobs can also ask for it by
 name, but it can't have an overflow of its own.
 
+### Spot VMs the cloud takes back
+
+On AWS, fleetci reads each VM's instance metadata every 2 seconds, through
+the SSH connection it already makes to the VM: nothing runs on the VM, and
+no IAM is needed. A VM with a spot interruption notice takes no new job. Its
+running jobs go on, since fleetci never stops a job for the cloud, and the
+VM is removed once they end. The cloud takes the VM two minutes after the
+notice, so a job still running then fails, as it would anyway.
+
+```toml
+[classes.4vcpu-8gb-aws.reclaim]
+watch = true      # default for the AWS plugin; false turns it off
+rebalance = true  # also act on rebalance recommendations; default false
+```
+
+A rebalance recommendation comes earlier and says the VM is at higher risk.
+It is often not followed by an interruption, so by default it is only
+logged. The VM's SSH server must allow TCP forwarding, as it does by
+default.
+
 ### Sharing this machine's CPUs and memory
 
 The classes whose VMs run on this machine share its CPUs and memory: by
