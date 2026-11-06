@@ -304,14 +304,8 @@ func startPool(ctx context.Context, name string, c Class, groups map[string]stri
 	}
 	groups[info.ID] = name
 
-	var scaled provider.InstanceGroup = group
-	up := dockerReady(group, c.Connector.UseExternalAddr, log)
-	var reclaim *reclaimWatch
-	if c.watchesReclaim() {
-		reclaim = newReclaimWatch(sshTunnel(group, c.Connector.UseExternalAddr), c.Reclaim.Rebalance, log.Named("reclaim"))
-		scaled = reclaimGroup{group, reclaim}
-		up = watchOnceUp(up, reclaim)
-	}
+	scaled, up, reclaim := withReclaim(c, group, dockerReady(group, c.Connector.UseExternalAddr, log),
+		sshTunnel(group, c.Connector.UseExternalAddr), log)
 	stop := func() {
 		if reclaim != nil {
 			reclaim.close()
@@ -334,6 +328,17 @@ func startPool(ctx context.Context, name string, c Class, groups map[string]stri
 	timeout := c.acquireTimeout()
 	log.Info("class ready", "group", info.ID, "plugin", c.Plugin, "max_instances", c.MaxInstances, "policies", len(c.schedules()))
 	return &pool{name: name, class: c, group: group, reclaim: reclaim, ts: ts, timeout: timeout}, nil
+}
+
+// withReclaim adds the reclaim watch to a class that wants one: the group
+// taskscaler sees fails the heartbeat of a VM with a notice, and up starts
+// watching a VM once it is admitted. reclaim is nil for a class without.
+func withReclaim(c Class, group provider.InstanceGroup, up taskscaler.UpFunc, open opener, log hclog.Logger) (provider.InstanceGroup, taskscaler.UpFunc, *reclaimWatch) {
+	if !c.watchesReclaim() {
+		return group, up, nil
+	}
+	w := newReclaimWatch(open, c.Reclaim.Rebalance, log.Named("reclaim"))
+	return reclaimGroup{group, w}, watchOnceUp(up, w), w
 }
 
 // watchOnceUp starts watching an instance for reclaim once up admits it.

@@ -77,6 +77,7 @@ type reclaimWatch struct {
 	base      string        // imdsBase; tests point it elsewhere
 	every     time.Duration // imdsEvery
 	retry     time.Duration // first wait after a lost connection
+	timeout   time.Duration // for one metadata request
 
 	mu      sync.Mutex
 	notices map[string]string // VM id → the notice, while watched
@@ -87,7 +88,7 @@ type reclaimWatch struct {
 
 func newReclaimWatch(open opener, rebalance bool, log hclog.Logger) *reclaimWatch {
 	return &reclaimWatch{open: open, rebalance: rebalance, log: log,
-		base: imdsBase, every: imdsEvery, retry: time.Second,
+		base: imdsBase, every: imdsEvery, retry: time.Second, timeout: 5 * time.Second,
 		notices: map[string]string{}, stops: map[string]context.CancelFunc{}}
 }
 
@@ -143,7 +144,7 @@ func (w *reclaimWatch) watch(ctx context.Context, id string) {
 func (w *reclaimWatch) poll(ctx context.Context, id string, t tunnel, seen *bool, log hclog.Logger) error {
 	transport := &http.Transport{DialContext: t.dial, MaxIdleConnsPerHost: 1}
 	defer transport.CloseIdleConnections()
-	m := &imds{client: &http.Client{Transport: transport, Timeout: 5 * time.Second}, base: w.base}
+	m := &imds{client: &http.Client{Transport: transport, Timeout: w.timeout}, base: w.base}
 
 	failures := 0
 	for {
