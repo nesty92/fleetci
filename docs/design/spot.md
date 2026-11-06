@@ -1,6 +1,6 @@
 # Spot hosts that the cloud takes back
 
-Status: plan. Step 1 is on `feat/spot-reclaim`.
+Status: steps 1 to 3 are on `feat/spot-reclaim`; the rest is plan.
 
 Issues: #6 (stop placing VMs on a host marked for reclaim), #8 (drain a
 host on a rebalance recommendation), #7 (choose zones from reclaim history
@@ -73,6 +73,15 @@ through a forward. A host whose sshd refuses, or that has no IMDS, is
 logged once and left to the plugin's own check. A lost connection is
 opened again with backoff; one EC2 Instance Connect key per connection,
 not per read.
+
+The watch gives up on a host only when the host shows it has no IMDS:
+sshd refuses the forward, sshd can't reach the address, or, before IMDS
+has ever answered, three reads in a row time out or get an answer that
+isn't IMDSv2's. A 5xx or a 429 is IMDS busy or restarting, and a
+connection that resets is trouble on the way; neither is IMDS absent, so
+the watch keeps reading, however early they come, and a host whose IMDS
+hiccups while it boots is still watched. A token IMDS no longer knows (401) is
+renewed once.
 
 That connection is the host's only one. The watch and every job on the
 host share it, and each opens its own sessions and forwards on it: the
@@ -151,14 +160,33 @@ the way it falls over to its overflow class today.
 ## Order
 
 1. Turn on taskscaler's heartbeat, so the plugin's spot check runs before
-   every placement (#6). Done on `feat/spot-reclaim`.
+   every placement (#6).
 2. IMDS through an SSH tunnel: cordon on an interruption notice (#6).
 3. Cordon on a rebalance recommendation, when the class asks for it
    (`reclaim.rebalance`, #8).
-
-Steps 2 and 3 are on `feat/spot-reclaim`, with the one shared connection
-per host, tested against a fake IMDS behind a real SSH server, not yet on
-EC2.
 4. Lifecycle hook support (#8).
 5. SQS queue as an opt-in source.
 6. Avoid-list, then zones (#7).
+
+Steps 1 to 3 are on `feat/spot-reclaim`, with the one shared connection
+per host. They are tested against a fake IMDS behind a real SSH server,
+not yet on EC2.
+
+## Testing under faults
+
+Besides the tests that pin each behaviour, fuzz tests put the shared
+connection, the reclaim watch and the jobs' commands (GitLab and GitHub)
+under faults that `internal/chaos` injects. A TCP proxy between fleetci and
+the host's sshd refuses, cuts, black-holes, slows or chops each
+connection, at once or after a while, and a fake IMDS answers 5xx, 429, a
+lost token or late. The fuzz input is the plan: each byte one decision. A
+test drives the code through it, makes the network good again, and checks
+what must hold whatever happened: one dial at a time, no call past its
+deadline, no notice made up, no truncated output reported as success, the
+host reachable again once the network is, and nothing left open after
+close.
+
+`go test` runs the written plans and four random ones each time; `go test
+-fuzz FuzzReclaimWatchUnderChaos ./internal/fleet/` searches longer. A
+failure prints the scenario, each fault with when it struck, and the
+`CHAOS_PLAN=<hex>` that replays it.

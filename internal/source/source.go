@@ -5,10 +5,11 @@
 // runs them on Capacity's VMs. Sources can be swapped without touching the
 // core.
 //
-// Everything that crosses the boundary is data or an id, so a source can
-// later run as a plugin binary of its own over hashicorp/go-plugin, as
-// fleeting's plugins do, with Capacity reaching it through go-plugin's
-// broker.
+// Everything that crosses the boundary is data or an id, except Conn: a
+// VM's one SSH connection, which stays in the core. So a source can later
+// run as a plugin binary of its own over hashicorp/go-plugin, as fleeting's
+// plugins do, with Capacity reaching it through go-plugin's broker and each
+// session or forward a source opens on Conn crossing it as a stream.
 package source
 
 import (

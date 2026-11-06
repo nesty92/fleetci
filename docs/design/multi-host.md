@@ -49,8 +49,9 @@ fleetci's provider follows that code:
 - `Acquire` reserves room for one VM of the runner's class in fleetci's
   host queue, without waiting. No room: `NoFreeExecutorError`, no job is
   requested, and the job stays pending in GitLab.
-- `Prepare` creates the VM from the reservation, and the environment dials
-  it with `connector.Dial`.
+- `Prepare` creates the VM from the reservation and gives the job a
+  `connector.Client` on the VM's one SSH connection, which the job shares
+  with the VM's other jobs and its reclaim watch (`docs/design/spot.md`).
 - `Release` gives the VM, or the unused reservation, back.
 
 There is no plugin process, no gateway and no nesting socket on this path.
@@ -153,7 +154,7 @@ type Capacity interface {
 	Acquire(ctx, Reservation) (VM, error)           // the reserved VM
 	Release(ctx, Reservation) error
 	Create(ctx, class) (VM, error)                  // wait for room
-	Connect(ctx, vmID) (proxy.Target, error)        // fleeting's ConnectInfo and the host key; fresh key each call
+	Conn(vmID) (*proxy.Conn, error)                 // the VM's one SSH connection, shared; never closed by the source
 	Delete(ctx, vmID) error
 }
 
@@ -164,9 +165,11 @@ type Source interface {
 }
 ```
 
-The connection details cross the boundary as data, as they do from a
-fleeting plugin, and the source dials the VM itself. Capacity reaches the plugin
-through go-plugin's broker, the same way back.
+Everything else crosses the boundary as data. The VM's SSH connection
+stays in the core, shared by every job on the VM and by the reclaim watch;
+a source opens sessions and forwards on it, and as a plugin those cross
+go-plugin's broker as streams. Capacity reaches the plugin through the
+broker too.
 
 Implementations, all swappable:
 
