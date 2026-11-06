@@ -304,17 +304,7 @@ func startPool(ctx context.Context, name string, c Class, groups map[string]stri
 	groups[info.ID] = name
 
 	ts, err := taskscaler.New(ctx, initialised{group, info},
-		taskscaler.WithLogger(log.Named("taskscaler")),
-		taskscaler.WithInstanceGroupSettings(settings),
-		taskscaler.WithCapacityPerInstance(c.capacity()),
-		taskscaler.WithMaxUseCount(c.useCount()),
-		taskscaler.WithMaxInstances(c.MaxInstances),
-		taskscaler.WithInstanceUpFunc(dockerReady(group, c.Connector.UseExternalAddr, log)),
-		taskscaler.WithDeleteInstancesOnShutdown(),
-		// A job is waiting while instances are expected: look every second
-		// instead of every two. One list call per second per scaling class.
-		taskscaler.WithUpdateIntervalWhenExpecting(time.Second),
-	)
+		scalerOptions(c, settings, dockerReady(group, c.Connector.UseExternalAddr, log), log)...)
 	if err != nil {
 		group.Close()
 		return nil, fmt.Errorf("starting taskscaler: %w", err)
@@ -329,6 +319,31 @@ func startPool(ctx context.Context, name string, c Class, groups map[string]stri
 	timeout := c.acquireTimeout()
 	log.Info("class ready", "group", info.ID, "plugin", c.Plugin, "max_instances", c.MaxInstances, "policies", len(c.schedules()))
 	return &pool{name: name, class: c, group: group, ts: ts, timeout: timeout}, nil
+}
+
+// scalerOptions configures a class's taskscaler; up readies a new instance.
+func scalerOptions(c Class, settings provider.Settings, up taskscaler.UpFunc, log hclog.Logger) []taskscaler.Option {
+	return []taskscaler.Option{
+		taskscaler.WithLogger(log.Named("taskscaler")),
+		taskscaler.WithInstanceGroupSettings(settings),
+		taskscaler.WithCapacityPerInstance(c.capacity()),
+		taskscaler.WithMaxUseCount(c.useCount()),
+		taskscaler.WithMaxInstances(c.MaxInstances),
+		taskscaler.WithInstanceUpFunc(up),
+		taskscaler.WithDeleteInstancesOnShutdown(),
+		// A job is waiting while instances are expected: look every second
+		// instead of every two. One list call per second per scaling class.
+		taskscaler.WithUpdateIntervalWhenExpecting(time.Second),
+		// Without a heartbeat function taskscaler never asks the plugin about
+		// an instance before placing a job on it. With one, every placement
+		// first calls the plugin's Heartbeat, and a failure skips the
+		// instance: the AWS plugin fails it for a spot instance the cloud has
+		// marked for reclaim, dockervm for a container that stopped. The
+		// instance is removed only once it holds no job, so running jobs are
+		// never cut short. The function itself has nothing to add: Prepare
+		// connects to the VM anyway.
+		taskscaler.WithHeartbeatFunc(func(context.Context, provider.ConnectInfo) error { return nil }),
+	}
 }
 
 // initialised is an instance group whose Init already ran; taskscaler's own
