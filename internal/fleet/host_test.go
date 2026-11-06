@@ -112,6 +112,15 @@ func TestHostBudget(t *testing.T) {
 	if b, on, err := HostBudget(&HostConfig{CPUs: 8, Memory: 16384}, classes); err != nil || !on || b.NominateAfter != defaultNominateAfter {
 		t.Errorf("no detection but explicit: %v %v %v", on, err, b.NominateAfter)
 	}
+	if b, _, _ := HostBudget(&HostConfig{CPUs: 8, Memory: 16384}, classes); b.Placement != Pack {
+		t.Errorf("default placement %q", b.Placement)
+	}
+	if b, _, _ := HostBudget(&HostConfig{CPUs: 8, Memory: 16384, Placement: "spread"}, classes); b.Placement != Spread {
+		t.Errorf("placement %q, want spread", b.Placement)
+	}
+	if _, _, err := HostBudget(&HostConfig{CPUs: 8, Memory: 16384, Placement: "binpack"}, classes); err == nil || !strings.Contains(err.Error(), `want "pack" or "spread"`) {
+		t.Errorf("unknown placement: %v", err)
+	}
 	minus := Duration(-time.Second)
 	if _, _, err := HostBudget(&HostConfig{CPUs: 8, Memory: 16384, NominateAfter: &minus}, classes); err == nil {
 		t.Error("negative nominate_after accepted")

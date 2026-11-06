@@ -23,19 +23,14 @@ func hostPools(t *testing.T, budget Resources, classes map[string]Class) (*Backe
 	if q != nil {
 		q.clock = clk
 	}
-	b := &Backend{log: hclog.NewNullLogger(), vms: map[string]*pool{}, pools: map[string]*pool{}}
+	b := &Backend{log: hclog.NewNullLogger(), vms: map[string]*pool{}, pools: map[string][]*pool{}}
 	for name, c := range classes {
 		p := &pool{name: name, class: c, ts: &fakeScaler{free: c.MaxInstances}, timeout: 5 * time.Second}
 		if q != nil && c.OnHost() {
 			p.queue, p.host, p.dynamic = q, q.hosts[localHost], !c.Reuses()
 			p.size, _ = c.Size()
 		}
-		b.pools[name] = p
-	}
-	for _, p := range b.pools {
-		if o := p.class.Overflow; o != "" {
-			p.overflow = b.pools[o]
-		}
+		b.pools[name] = []*pool{p}
 	}
 	return b, clk
 }
@@ -69,7 +64,7 @@ func fourSmallsRunning(t *testing.T, classes map[string]Class) (*Backend, *clock
 		smalls = append(smalls, vm)
 	}
 	big := waitingJob(t, b, "big")
-	waitFor(t, func() bool { return blocked(b.pools["big"].queue) == 1 })
+	waitFor(t, func() bool { return blocked(b.pools["big"][0].queue) == 1 })
 	return b, clk, smalls, big
 }
 
@@ -120,7 +115,7 @@ func TestTheBudgetIsNeverExceeded(t *testing.T) {
 		"small": onHostClass(1, 2048, 8),
 		"big":   onHostClass(4, 8192, 2),
 	})
-	q, h := b.pools["small"].queue, b.pools["small"].host
+	q, h := b.pools["small"][0].queue, b.pools["small"][0].host
 	ctx := context.Background()
 	var wg sync.WaitGroup
 	var peak Resources
@@ -175,14 +170,14 @@ func TestALateBigJobIsNominatedAndStarts(t *testing.T) {
 	if vm, ok := startsNow(t, b, "small"); ok {
 		t.Fatalf("a later small job took %s while the big one was nominated", vm.Class)
 	}
-	if n := b.pools["big"].host.nominated; n == nil || n.class != "big" {
+	if n := b.pools["big"][0].host.nominated; n == nil || n.class != "big" {
 		t.Fatalf("nominated %v, want the big job", n)
 	}
 	for _, vm := range smalls[1:] {
 		_ = b.Delete(ctx, vm.ID)
 	}
 	vm := got(t, big, "big")
-	if n := b.pools["big"].host.nominated; n != nil {
+	if n := b.pools["big"][0].host.nominated; n != nil {
 		t.Fatalf("still nominated after it started: %v", n.class)
 	}
 	_ = b.Delete(ctx, vm.ID)
@@ -193,7 +188,7 @@ func TestALateBigJobIsNominatedAndStarts(t *testing.T) {
 
 func TestNominateAfterZeroHoldsRoomAtOnce(t *testing.T) {
 	b, _, smalls, _ := fourSmallsRunning(t, smallAndBig())
-	b.pools["big"].queue.NominateAfter = 0
+	b.pools["big"][0].queue.NominateAfter = 0
 	_ = b.Delete(context.Background(), smalls[0].ID)
 	if _, ok := startsNow(t, b, "small"); ok {
 		t.Fatal("with nominate_after 0 a later small job went before the waiting big one")
@@ -207,7 +202,7 @@ func TestRoomGoesToTheEarliestJobItFits(t *testing.T) {
 			"big": onHostClass(4, 8192, 2),
 			"mid": onHostClass(2, 4096, 2),
 		})
-		q := b.pools["big"].queue
+		q := b.pools["big"][0].queue
 		first, _ := b.Create(context.Background(), "big")
 		big := waitingJob(t, b, "big")
 		waitFor(t, func() bool { return blocked(q) == 1 })
@@ -249,7 +244,7 @@ func TestAReleaseWakesAWaitingJob(t *testing.T) {
 	b, _ := hostPools(t, Resources{CPUs: 2, MemoryMB: 4096}, map[string]Class{"vm": onHostClass(2, 4096, 4)})
 	first, _ := b.Create(context.Background(), "vm")
 	next := waitingJob(t, b, "vm")
-	waitFor(t, func() bool { return blocked(b.pools["vm"].queue) == 1 })
+	waitFor(t, func() bool { return blocked(b.pools["vm"][0].queue) == 1 })
 	released := time.Now()
 	_ = b.Delete(context.Background(), first.ID)
 	got(t, next, "vm")
@@ -263,27 +258,27 @@ func TestNoRoomSaysWhy(t *testing.T) {
 		"vm":  onHostClass(2, 4096, 4),
 		"one": onHostClass(1, 1024, 4),
 	})
-	b.pools["vm"].timeout = 50 * time.Millisecond
-	b.pools["one"].timeout = 50 * time.Millisecond
+	b.pools["vm"][0].timeout = 50 * time.Millisecond
+	b.pools["one"][0].timeout = 50 * time.Millisecond
 	ctx := context.Background()
 	if _, err := b.Create(ctx, "one"); err != nil {
 		t.Fatal(err)
 	}
 	_, err := b.Create(ctx, "vm")
-	if err == nil || !strings.Contains(err.Error(), "or host local has no room for one more of its VMs (cpus=2 memory=4GB; cpus=1 memory=1GB in use of cpus=2 memory=4GB)") {
+	if err == nil || !strings.Contains(err.Error(), "or none of its hosts has room for one more of its VMs (cpus=2 memory=4GB; host local: cpus=1 memory=1GB in use of cpus=2 memory=4GB)") {
 		t.Fatalf("err %v", err)
 	}
-	if n := len(b.pools["vm"].queue.waiting); n != 0 {
+	if n := len(b.pools["vm"][0].queue.waiting); n != 0 {
 		t.Fatalf("%d still waiting after the timeout", n)
 	}
 
 	// A one-cpu job would fit, but the host holds its room for a vm job.
-	b.pools["vm"].timeout = time.Minute
+	b.pools["vm"][0].timeout = time.Minute
 	_ = waitingJob(t, b, "vm")
-	waitFor(t, func() bool { return blocked(b.pools["vm"].queue) == 1 })
+	waitFor(t, func() bool { return blocked(b.pools["vm"][0].queue) == 1 })
 	clk.Step(defaultNominateAfter)
 	_, err = b.Create(ctx, "one")
-	if err == nil || !strings.Contains(err.Error(), "which holds the room that frees for a vm job that has waited past nominate_after") {
+	if err == nil || !strings.Contains(err.Error(), "as room is held for a vm job that has waited past nominate_after") {
 		t.Fatalf("held: %v", err)
 	}
 }
@@ -401,6 +396,77 @@ func TestOnlyLateJobsAreNominated(t *testing.T) {
 	q.nominate()
 	if x.on != a {
 		t.Fatal("not nominated at nominate_after")
+	}
+}
+
+// spanning is a backend whose class vm (1 cpu) runs on hosts a and b, with
+// a 4 cpus in use and b idle.
+func spanning(t *testing.T, placement string) (*Backend, *host, *host) {
+	t.Helper()
+	q, a, h2, _ := twoHosts(4, 8)
+	q.Placement = placement
+	c := onHostClass(1, 2048, 8)
+	size, _ := c.Size()
+	b := &Backend{log: hclog.NewNullLogger(), vms: map[string]*pool{}, pools: map[string][]*pool{}}
+	for _, h := range []*host{a, h2} {
+		b.pools["vm"] = append(b.pools["vm"], &pool{name: "vm", class: c, ts: &fakeScaler{free: c.MaxInstances},
+			timeout: 100 * time.Millisecond, queue: q, host: h, size: size, dynamic: true})
+	}
+	return b, a, h2
+}
+
+func TestPlacement(t *testing.T) {
+	for _, tc := range []struct {
+		placement string
+		want      string
+	}{{Pack, "a"}, {Spread, "b"}} {
+		b, a, h2 := spanning(t, tc.placement)
+		vm, err := b.Create(context.Background(), "vm")
+		if err != nil {
+			t.Fatal(err)
+		}
+		on := map[bool]string{true: "a", false: "b"}[a.used.CPUs == 5]
+		if on != tc.want {
+			t.Errorf("%s: the job went to host %s (a %v, b %v), want %s", tc.placement, on, a.used, h2.used, tc.want)
+		}
+		_ = b.Delete(context.Background(), vm.ID)
+		if a.used.CPUs != 4 || h2.used.CPUs != 0 {
+			t.Errorf("%s: after the release a %v, b %v", tc.placement, a.used, h2.used)
+		}
+	}
+}
+
+func TestAJobGoesToAnotherHostOfItsClass(t *testing.T) {
+	b, a, h2 := spanning(t, Pack)
+	ctx := context.Background()
+	for range 12 { // a has room for 4, then b for 8
+		if _, err := b.Create(ctx, "vm"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if a.used.CPUs != 8 || h2.used.CPUs != 8 {
+		t.Fatalf("a %v, b %v: want both full", a.used, h2.used)
+	}
+	if _, err := b.Create(ctx, "vm"); err == nil || !strings.Contains(err.Error(), "host a: cpus=8 memory=16GB in use of cpus=8 memory=16GB; host b: cpus=8") {
+		t.Fatalf("both hosts full: %v", err)
+	}
+}
+
+func TestEarlierJobsArePlacedAsTheirsWouldBe(t *testing.T) {
+	for _, tc := range []struct {
+		placement string
+		fits      bool
+	}{{Pack, true}, {Spread, false}} {
+		q, a, b, clk := twoHosts(2, 3)
+		q.Placement = tc.placement
+		late(q, clk, "x", cpus(2), a, b) // pack puts it on a, spread on b
+		w := late(q, clk, "w", cpus(3), b)
+		q.mu.Lock()
+		got := q.fits(b, w, w.need)
+		q.mu.Unlock()
+		if got != tc.fits {
+			t.Errorf("%s: w fits b: %v, want %v", tc.placement, got, tc.fits)
+		}
 	}
 }
 
