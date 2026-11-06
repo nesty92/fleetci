@@ -14,18 +14,34 @@ import (
 	"gitlab.com/gitlab-org/gitlab-runner/common"
 	"gitlab.com/gitlab-org/gitlab-runner/common/spec"
 
-	"github.com/nesty92/fleetci/internal/fleet"
+	"github.com/nesty92/fleetci/internal/proxy"
+	"github.com/nesty92/fleetci/internal/source"
 )
 
-// noRoom is a host that never has room.
-type noRoom struct{ reserves atomic.Int32 }
-
-func (n *noRoom) Reserve(string) (*fleet.Reservation, error) {
-	n.reserves.Add(1)
-	return nil, fleet.ErrNoRoom
+// noRoom is a host of classes() that never has room.
+type noRoom struct {
+	defaultClass string
+	reserves     atomic.Int32
 }
-func (*noRoom) Create(context.Context, string) (fleet.VM, error) {
-	return fleet.VM{}, fleet.ErrNoRoom
+
+func (n *noRoom) Classes(context.Context) ([]source.Class, string, error) {
+	return classes(), n.defaultClass, nil
+}
+func (n *noRoom) Reserve(context.Context, string) (source.Reservation, error) {
+	n.reserves.Add(1)
+	return source.Reservation{}, source.ErrNoRoom
+}
+func (*noRoom) Acquire(context.Context, source.Reservation) (source.VM, error) {
+	return source.VM{}, errors.New("no reservations")
+}
+func (*noRoom) Release(context.Context, source.Reservation) error {
+	return errors.New("no reservations")
+}
+func (*noRoom) Create(context.Context, string) (source.VM, error) {
+	return source.VM{}, source.ErrNoRoom
+}
+func (*noRoom) Connect(context.Context, string) (proxy.Target, error) {
+	return proxy.Target{}, errors.New("no vms")
 }
 func (*noRoom) Delete(context.Context, string) error { return nil }
 
@@ -40,11 +56,11 @@ func (n *countingNetwork) RequestJob(context.Context, common.RunnerConfig, *comm
 	return nil, true
 }
 
-func classes() map[string]fleet.Class {
-	return map[string]fleet.Class{
-		"1vcpu-2gb":       {MaxInstances: 3},
-		"4vcpu-8gb":       {MaxInstances: 1, Overflow: "4vcpu-8gb-cloud"},
-		"4vcpu-8gb-cloud": {MaxInstances: 2},
+func classes() []source.Class {
+	return []source.Class{
+		{Name: "1vcpu-2gb", Slots: 3},
+		{Name: "4vcpu-8gb", Slots: 1, Overflow: "4vcpu-8gb-cloud"},
+		{Name: "4vcpu-8gb-cloud", Slots: 2},
 	}
 }
 
@@ -69,22 +85,22 @@ func TestValidate(t *testing.T) {
 		{"two runners on a class", Config{Runners: []Runner{ok, ok}}, "has a runner already"},
 		{"no token", Config{Runners: []Runner{{Class: "1vcpu-2gb"}}}, "token_file is required"},
 	} {
-		err := tc.c.Validate(classes())
+		err := tc.c.Validate(source.Names(classes()))
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: %v, want %q", tc.name, err, tc.want)
 		}
 	}
-	if err := (Config{Runners: []Runner{ok}}).Validate(classes()); err != nil {
+	if err := (Config{Runners: []Runner{ok}}).Validate(source.Names(classes())); err != nil {
 		t.Errorf("valid: %v", err)
 	}
 }
 
 func TestNewBuildsOneRunnerPerClass(t *testing.T) {
 	tok := tokenFile(t)
-	l, err := New(Config{Runners: []Runner{
+	l, err := New(t.Context(), Config{Runners: []Runner{
 		{Class: "1vcpu-2gb", TokenFile: tok},
 		{Class: "4vcpu-8gb", TokenFile: tok, Image: "alpine"},
-	}}, classes(), "1vcpu-2gb", &noRoom{}, hclog.NewNullLogger())
+	}}, &noRoom{defaultClass: "1vcpu-2gb"}, hclog.NewNullLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,9 +127,9 @@ func TestNewBuildsOneRunnerPerClass(t *testing.T) {
 
 // A runner whose class has no room asks GitLab for nothing.
 func TestNoRoomRequestsNoJob(t *testing.T) {
-	vms := &noRoom{}
-	l, err := New(Config{Runners: []Runner{{Class: "1vcpu-2gb", TokenFile: tokenFile(t)}}},
-		classes(), "1vcpu-2gb", vms, hclog.NewNullLogger())
+	vms := &noRoom{defaultClass: "1vcpu-2gb"}
+	l, err := New(t.Context(), Config{Runners: []Runner{{Class: "1vcpu-2gb", TokenFile: tokenFile(t)}}},
+		vms, hclog.NewNullLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,8 +176,7 @@ func TestConfigFileRunnersKeepTheirSettings(t *testing.T) {
 	if err := os.WriteFile(file, []byte(runnerConfigTOML), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	l, err := New(Config{ConfigFile: file, Runners: []Runner{{Class: "4vcpu-8gb", TokenFile: tokenFile(t)}}},
-		classes(), "1vcpu-2gb", &noRoom{}, hclog.NewNullLogger())
+	l, err := New(t.Context(), Config{ConfigFile: file, Runners: []Runner{{Class: "4vcpu-8gb", TokenFile: tokenFile(t)}}}, &noRoom{defaultClass: "1vcpu-2gb"}, hclog.NewNullLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +198,7 @@ func TestConfigFileRunnersKeepTheirSettings(t *testing.T) {
 }
 
 func TestJobClass(t *testing.T) {
-	p := newProvider(nil, &noRoom{}, nil, []string{"1vcpu-2gb", "4vcpu-8gb"}, "1vcpu-2gb")
+	p := newProvider(nil, capacityVMs{&noRoom{}}, nil, []string{"1vcpu-2gb", "4vcpu-8gb"}, "1vcpu-2gb")
 	build := func(class string) *common.Build {
 		b := &common.Build{Runner: &common.RunnerConfig{}}
 		if class != "" {
@@ -202,5 +217,28 @@ func TestJobClass(t *testing.T) {
 	if !errors.As(err, &be) || be.FailureReason != common.ConfigurationError ||
 		!strings.Contains(err.Error(), "1vcpu-2gb (default), 4vcpu-8gb") {
 		t.Errorf("unknown class: %v", err)
+	}
+}
+
+// A config.toml runner asks GitLab for nothing while no class has room.
+func TestAFullHostRequestsNoJob(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(file, []byte(runnerConfigTOML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	vms := &noRoom{defaultClass: "1vcpu-2gb"}
+	l, err := New(t.Context(), Config{ConfigFile: file}, vms, hclog.NewNullLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	net := &countingNetwork{}
+	l.mr.network = net
+	err = l.mr.processRunner(1, l.mr.config.Runners[0], make(chan *common.RunnerConfig, 1))
+	var noFree *common.NoFreeExecutorError
+	if !errors.As(err, &noFree) {
+		t.Fatalf("processRunner: %v, want NoFreeExecutorError", err)
+	}
+	if n := vms.reserves.Load(); n != int32(len(classes())) || net.requests.Load() != 0 {
+		t.Fatalf("%d reservations tried, %d job requests; want every class, 0", n, net.requests.Load())
 	}
 }

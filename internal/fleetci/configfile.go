@@ -131,7 +131,7 @@ func (c Config) Validate() error {
 		}
 	}
 	if c.GitLab != nil {
-		errs = append(errs, c.GitLab.Validate(c.Classes))
+		errs = append(errs, c.GitLab.Validate(slices.Collect(maps.Keys(c.Classes))))
 	}
 	if _, _, _, err := fleet.CheckHost(c.Host, c.Classes); err != nil {
 		errs = append(errs, err)

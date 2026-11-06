@@ -16,6 +16,7 @@ import (
 	"github.com/nesty92/fleetci/internal/fleetci"
 	"github.com/nesty92/fleetci/internal/github"
 	"github.com/nesty92/fleetci/internal/gitlab"
+	"github.com/nesty92/fleetci/internal/source"
 )
 
 // serve runs GitHub Actions jobs, and with [gitlab] GitLab CI jobs, on
@@ -59,23 +60,35 @@ func serve(args []string) error {
 		_ = backend.Shutdown(sctx)
 	}()
 
-	var wg sync.WaitGroup
-	if c.GitHub != nil {
-		gh, err := github.New(*c.GitHub, c.DefaultClass, backend, nil, log.Named("github"))
-		if err != nil {
-			return err
-		}
-		wg.Go(func() { gh.Run(ctx) })
+	// The job sources, each over the same capacity.
+	capacity := source.NewCapacity(backend, c.Classes, c.DefaultClass)
+	type named struct {
+		name  string
+		src   source.Source
+		table any
 	}
-	var glErr error
+	var sources []named
+	if c.GitHub != nil {
+		sources = append(sources, named{"github", &github.Source{}, c.GitHub})
+	}
 	if c.GitLab != nil {
-		gl, err := gitlab.New(*c.GitLab, c.Classes, c.DefaultClass, backend, log.Named("gitlab"))
+		sources = append(sources, named{"gitlab", &gitlab.Source{}, c.GitLab})
+	}
+	for _, s := range sources {
+		config, err := source.Configure(s.table)
 		if err != nil {
 			return err
 		}
-		wg.Go(func() { glErr = gl.Run(ctx) })
+		if err := s.src.Init(ctx, config, capacity, log.Named(s.name)); err != nil {
+			return err
+		}
 	}
 	log.Info("fleetci serving", "classes", len(c.Classes), "default_class", c.DefaultClass, "github", c.GitHub != nil, "gitlab", c.GitLab != nil)
+	errs := make([]error, len(sources))
+	var wg sync.WaitGroup
+	for i, s := range sources {
+		wg.Go(func() { errs[i] = s.src.Run(ctx) })
+	}
 	wg.Wait()
-	return glErr
+	return errors.Join(errs...)
 }

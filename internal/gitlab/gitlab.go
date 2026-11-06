@@ -1,14 +1,14 @@
 // Package gitlab runs GitLab CI jobs on fleetci's classes in fleetci's own
 // process, with gitlab-runner's job loop and Docker executor as a library.
 //
-// Each class has a runner of its own, registered with the class's name as
-// its tag. fleetci asks GitLab for a class's job only when it has room for
-// one more of the class's VMs, so jobs it can't run yet stay pending in
-// GitLab, where another runner may take them.
+// The runners of a gitlab-runner config.toml run here with all their
+// settings, and each job's FLEETCI_CLASS picks its class, as with fleetci's
+// plugin; the runner's autoscaler table is ignored. This is the default.
 //
-// The runners of a gitlab-runner config.toml run here too, with all their
-// settings: each job's FLEETCI_CLASS picks its class, as with fleetci's
-// plugin, and the runner's autoscaler table is ignored.
+// A class can also have a runner of its own, registered with the class's
+// name as its tag. fleetci asks GitLab for that runner's job only when the
+// class has room for one more VM, so jobs it can't run yet stay pending in
+// GitLab, where another runner may take them.
 package gitlab
 
 import (
@@ -16,9 +16,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"os"
 	"slices"
 	"strings"
@@ -33,6 +33,7 @@ import (
 	"gitlab.com/gitlab-org/gitlab-runner/router"
 
 	"github.com/nesty92/fleetci/internal/fleet"
+	"github.com/nesty92/fleetci/internal/source"
 )
 
 // RunnerVersion is the gitlab-runner release fleetci's copy of the job loop
@@ -71,15 +72,15 @@ type Runner struct {
 	Image string `json:"image" toml:"image"`
 }
 
-// Validate checks c against the classes.
-func (c Config) Validate(classes map[string]fleet.Class) error {
+// Validate checks c against the classes' names.
+func (c Config) Validate(classes []string) error {
 	if len(c.Runners) == 0 && c.ConfigFile == "" {
 		return errors.New("gitlab: no runners and no config_file")
 	}
 	seen := map[string]bool{}
 	for i, r := range c.Runners {
 		where := fmt.Sprintf("gitlab: runner %d", i+1)
-		if _, ok := classes[r.Class]; !ok {
+		if !slices.Contains(classes, r.Class) {
 			return fmt.Errorf("%s: no class %q", where, r.Class)
 		}
 		if seen[r.Class] {
@@ -99,10 +100,41 @@ type Loop struct {
 	log hclog.Logger
 }
 
+// Source is the GitLab job source: Init builds the loop, Run runs it.
+type Source struct{ loop *Loop }
+
+var _ source.Source = (*Source)(nil)
+
+// Init reads the [gitlab] table, as JSON, and builds the loop over capacity.
+func (s *Source) Init(ctx context.Context, config []byte, capacity source.Capacity, log hclog.Logger) error {
+	var c Config
+	if err := json.Unmarshal(config, &c); err != nil {
+		return fmt.Errorf("gitlab: config: %w", err)
+	}
+	loop, err := New(ctx, c, capacity, log)
+	if err != nil {
+		return err
+	}
+	s.loop = loop
+	return nil
+}
+
+// Run takes and runs jobs until ctx ends.
+func (s *Source) Run(ctx context.Context) error { return s.loop.Run(ctx) }
+
 // New builds the loop: the runners' configs, the GitLab client and the
-// executor provider over vms.
-func New(c Config, classes map[string]fleet.Class, defaultClass string, vms VMs, log hclog.Logger) (*Loop, error) {
-	if err := c.Validate(classes); err != nil {
+// executor provider over capacity.
+func New(ctx context.Context, c Config, capacity source.Capacity, log hclog.Logger) (*Loop, error) {
+	classes, defaultClass, err := capacity.Classes(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("gitlab: classes: %w", err)
+	}
+	names := source.Names(classes)
+	byName := map[string]source.Class{}
+	for _, class := range classes {
+		byName[class.Name] = class
+	}
+	if err := c.Validate(names); err != nil {
 		return nil, err
 	}
 	// gitlab-runner fills its version from the binary's build info, which
@@ -166,10 +198,10 @@ func New(c Config, classes map[string]fleet.Class, defaultClass string, vms VMs,
 		classOf[rc] = r.Class
 
 		if !fromFile {
-			class := classes[r.Class]
-			concurrent += class.Slots()
-			if o, ok := classes[class.Overflow]; ok {
-				concurrent += o.Slots()
+			class := byName[r.Class]
+			concurrent += class.Slots
+			if o, ok := byName[class.Overflow]; ok {
+				concurrent += o.Slots
 			}
 		}
 	}
@@ -177,15 +209,14 @@ func New(c Config, classes map[string]fleet.Class, defaultClass string, vms VMs,
 		// A config.toml runner's jobs may take any class.
 		concurrent = 0
 		for _, class := range classes {
-			concurrent += class.Slots()
+			concurrent += class.Slots
 		}
 	}
 	if config.Concurrent == 0 {
 		config.Concurrent = concurrent
 	}
 
-	names := slices.Sorted(maps.Keys(classes))
-	p := newProvider(docker.NewProvider(), vms, func(rc *common.RunnerConfig) string { return classOf[rc] }, names, defaultClass)
+	p := newProvider(docker.NewProvider(), capacityVMs{capacity}, func(rc *common.RunnerConfig) string { return classOf[rc] }, names, defaultClass)
 	providers := executors.NewProviderRegistry(map[string]common.ExecutorProvider{executorName: p})
 
 	// As gitlab-runner's main.go newClient, without a certificate

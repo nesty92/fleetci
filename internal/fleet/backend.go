@@ -467,6 +467,9 @@ func (r *Reservation) Acquire(ctx context.Context) (VM, error) {
 	return r.b.acquire(actx, r.p, r.class, r.start)
 }
 
+// Class is the class Reserve was asked for.
+func (r *Reservation) Class() string { return r.class }
+
 // Release gives the room back if Acquire was never called.
 func (r *Reservation) Release() {
 	if r.used.CompareAndSwap(false, true) {

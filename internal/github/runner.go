@@ -10,7 +10,6 @@ import (
 
 	"github.com/hashicorp/go-hclog"
 
-	"github.com/nesty92/fleetci/internal/fleet"
 	"github.com/nesty92/fleetci/internal/proxy"
 )
 
@@ -48,7 +47,7 @@ exec ./run.sh --jitconfig "$jit"
 // SSHStart runs the runner on the VM over SSH and logs its output.
 // With cacheURL set, jobs use that cache server instead of GitHub's.
 func SSHStart(version, cacheURL string, log hclog.Logger) StartFunc {
-	return func(ctx context.Context, vm fleet.VM, jit string, took func(job string)) error {
+	return func(ctx context.Context, vm VM, jit string, took func(job string)) error {
 		target, err := vm.Connect(ctx)
 		if err != nil {
 			return err
