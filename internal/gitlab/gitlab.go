@@ -5,6 +5,10 @@
 // its tag. fleetci asks GitLab for a class's job only when it has room for
 // one more of the class's VMs, so jobs it can't run yet stay pending in
 // GitLab, where another runner may take them.
+//
+// The runners of a gitlab-runner config.toml run here too, with all their
+// settings: each job's FLEETCI_CLASS picks its class, as with fleetci's
+// plugin, and the runner's autoscaler table is ignored.
 package gitlab
 
 import (
@@ -14,7 +18,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/hashicorp/go-hclog"
@@ -48,6 +54,11 @@ type Config struct {
 	CheckInterval fleet.Duration `json:"check_interval" toml:"check_interval"`
 	// Runners are the classes' runners, one per class.
 	Runners []Runner `json:"runners" toml:"runners"`
+	// ConfigFile is a gitlab-runner config.toml whose runners run here, each
+	// job on the class its FLEETCI_CLASS names. Its global settings
+	// (concurrent, check_interval, shutdown_timeout...) apply unless set
+	// above.
+	ConfigFile string `json:"config_file" toml:"config_file"`
 }
 
 // Runner is one class's GitLab runner.
@@ -62,8 +73,8 @@ type Runner struct {
 
 // Validate checks c against the classes.
 func (c Config) Validate(classes map[string]fleet.Class) error {
-	if len(c.Runners) == 0 {
-		return errors.New("gitlab: no runners")
+	if len(c.Runners) == 0 && c.ConfigFile == "" {
+		return errors.New("gitlab: no runners and no config_file")
 	}
 	seen := map[string]bool{}
 	for i, r := range c.Runners {
@@ -90,7 +101,7 @@ type Loop struct {
 
 // New builds the loop: the runners' configs, the GitLab client and the
 // executor provider over vms.
-func New(c Config, classes map[string]fleet.Class, vms VMs, log hclog.Logger) (*Loop, error) {
+func New(c Config, classes map[string]fleet.Class, defaultClass string, vms VMs, log hclog.Logger) (*Loop, error) {
 	if err := c.Validate(classes); err != nil {
 		return nil, err
 	}
@@ -105,13 +116,34 @@ func New(c Config, classes map[string]fleet.Class, vms VMs, log hclog.Logger) (*
 	}
 
 	classOf := map[*common.RunnerConfig]string{}
-	config := &common.Config{
-		Concurrent:    c.Concurrent,
-		CheckInterval: int(max(1, int64(c.CheckInterval)/1e9)),
+	config := &common.Config{}
+	if c.ConfigFile != "" {
+		// As gitlab-runner reads it: concurrent is 1 when the file lacks it.
+		config = common.NewConfig()
+		if err := config.LoadConfig(c.ConfigFile); err != nil {
+			return nil, fmt.Errorf("gitlab: %s: %w", c.ConfigFile, err)
+		}
+		if !config.Loaded {
+			return nil, fmt.Errorf("gitlab: %s: no such file", c.ConfigFile)
+		}
+		for _, rc := range config.Runners {
+			rc.Executor = executorName
+			if rc.Docker == nil {
+				rc.Docker = &common.DockerConfig{Image: "ubuntu:24.04"}
+			}
+			rc.SystemID = cmp.Or(rc.SystemID, systemID)
+		}
 	}
-	if c.CheckInterval == 0 {
+	if c.Concurrent != 0 {
+		config.Concurrent = c.Concurrent
+	}
+	if c.CheckInterval != 0 {
+		config.CheckInterval = int(max(1, int64(c.CheckInterval)/1e9))
+	}
+	if config.CheckInterval == 0 {
 		config.CheckInterval = 3
 	}
+	fromFile := len(config.Runners) > 0
 	concurrent := 0
 	for _, r := range c.Runners {
 		token, err := os.ReadFile(r.TokenFile)
@@ -133,17 +165,27 @@ func New(c Config, classes map[string]fleet.Class, vms VMs, log hclog.Logger) (*
 		config.Runners = append(config.Runners, rc)
 		classOf[rc] = r.Class
 
-		class := classes[r.Class]
-		concurrent += class.Slots()
-		if o, ok := classes[class.Overflow]; ok {
-			concurrent += o.Slots()
+		if !fromFile {
+			class := classes[r.Class]
+			concurrent += class.Slots()
+			if o, ok := classes[class.Overflow]; ok {
+				concurrent += o.Slots()
+			}
+		}
+	}
+	if fromFile {
+		// A config.toml runner's jobs may take any class.
+		concurrent = 0
+		for _, class := range classes {
+			concurrent += class.Slots()
 		}
 	}
 	if config.Concurrent == 0 {
 		config.Concurrent = concurrent
 	}
 
-	p := newProvider(docker.NewProvider(), vms, func(rc *common.RunnerConfig) string { return classOf[rc] })
+	names := slices.Sorted(maps.Keys(classes))
+	p := newProvider(docker.NewProvider(), vms, func(rc *common.RunnerConfig) string { return classOf[rc] }, names, defaultClass)
 	providers := executors.NewProviderRegistry(map[string]common.ExecutorProvider{executorName: p})
 
 	// As gitlab-runner's main.go newClient, without a certificate

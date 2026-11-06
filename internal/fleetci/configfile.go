@@ -75,6 +75,9 @@ func (c *Config) loadFile() error {
 		for i := range f.GitLab.Runners {
 			f.GitLab.Runners[i].TokenFile = relativeTo(dir, f.GitLab.Runners[i].TokenFile)
 		}
+		if f.GitLab.ConfigFile != "" {
+			f.GitLab.ConfigFile = relativeTo(dir, f.GitLab.ConfigFile)
+		}
 	}
 
 	c.DefaultClass, c.Classes, c.GitHub, c.GitLab, c.Host = f.DefaultClass, f.Classes, f.GitHub, f.GitLab, f.Host
