@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/hashicorp/go-hclog"
+
+	"github.com/nesty92/fleetci/internal/chaos"
 	"golang.org/x/crypto/ssh"
 
 	"gitlab.com/gitlab-org/fleeting/fleeting/provider"
@@ -245,5 +247,82 @@ func TestCloseDuringADialDropsWhatTheDialBrings(t *testing.T) {
 			t.Fatalf("%d connections, %d ended: want the late one dropped", s.accepted.Load(), s.ended.Load())
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// silent takes connections and never says a word, as a VM whose sshd is
+// stuck does.
+func silent(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var conns []net.Conn
+	t.Cleanup(func() {
+		ln.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range conns {
+			c.Close()
+		}
+	})
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, c)
+			mu.Unlock()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+func TestADialToAVMThatNeverAnswersEnds(t *testing.T) {
+	var calls atomic.Int32
+	connect := connectTo(t, &vmServer{addr: silent(t)}, &calls)
+	for _, tc := range []struct {
+		name    string
+		ctx     time.Duration // the caller's deadline
+		timeout time.Duration // the target's
+	}{{"the caller gives up", 200 * time.Millisecond, time.Minute}, {"the target's timeout", time.Minute, 300 * time.Millisecond}} {
+		target, _ := connect(context.Background())
+		target.Info.Timeout = tc.timeout
+		ctx, cancel := context.WithTimeout(context.Background(), tc.ctx)
+		done := make(chan error, 1)
+		go func() { _, err := Dial(ctx, target); done <- err }()
+		select {
+		case err := <-done:
+			if err == nil {
+				t.Fatalf("%s: dialed a vm that never answered", tc.name)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("%s: the handshake with a silent vm never ended", tc.name)
+		}
+		cancel()
+	}
+}
+
+func TestAConnLosesASilentVMWithinItsKeepAlive(t *testing.T) {
+	s := newVMServer(t)
+	// The link goes silent 100ms in, and stays open.
+	x := chaos.NewProxy(t, chaos.NewPlan([]byte{byte(chaos.HoleLater), 25}), s.addr)
+	var calls atomic.Int32
+	c := NewConn(connectTo(t, &vmServer{addr: x.Addr}, &calls), hclog.NewNullLogger())
+	c.SetKeepAlive(30*time.Millisecond, 60*time.Millisecond)
+	defer c.Close()
+
+	_, lost, err := c.Client(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-lost:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a silent vm was not lost within its keepalive")
 	}
 }

@@ -206,10 +206,20 @@ func dialOnce(ctx context.Context, addr string, cfg *ssh.ClientConfig) (*ssh.Cli
 	if err != nil {
 		return nil, err
 	}
+	// The handshake has the same bounds as the dial: a VM that takes the
+	// connection and then says nothing (gone, or sshd stuck) would
+	// otherwise hold it, and everyone waiting for the connection, forever.
+	_ = conn.SetDeadline(time.Now().Add(cfg.Timeout))
+	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Unix(1, 0)) })
 	c, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg)
+	if !stop() && err == nil {
+		err = ctx.Err() // the deadline is in the past now; the connection is spoilt
+		_ = c.Close()
+	}
 	if err != nil {
 		_ = conn.Close()
 		return nil, err
 	}
+	_ = conn.SetDeadline(time.Time{})
 	return ssh.NewClient(c, chans, reqs), nil
 }
