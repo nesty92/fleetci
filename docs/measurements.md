@@ -109,3 +109,26 @@ on its runner, about 4 minutes later; GitHub never queues it again.
 
 The scripts behind the restore-mode and Firecracker runs were removed once
 done. They're in git history under `hack/m1/snap` (commit `3514838`).
+
+## Embedded GitLab runner against the plugin
+
+The same compatibility pipeline and GitHub workflow, started together, once
+on gitlab-runner with fleetci's plugin and once on `fleetci serve` running
+the same `config.toml` (`[gitlab] config_file`) with gitlab-runner v19.5.2
+inside it. Classes: 1vcpu-2gb (3) and 4vcpu-8gb (2) on microVMs; the S3
+cache on RustFS.
+
+| Job | Plugin | Embedded |
+| --- | --- | --- |
+| default class, 4vcpu-8gb class, a service | passed | passed |
+| artifacts, dotenv report, S3 cache between jobs | passed | passed |
+| image entrypoint, `GIT_STRATEGY: none`, `parallel: 2`, `after_script` | passed | passed |
+| `retry: 1` on exit 3 | failed twice, `script_failure` | the same |
+| cancelled while running | `canceled`, VM removed | the same |
+| a class the runner lacks | `runner_system_failure` after 10 s | `runner_configuration_error` after 1 s, no VM |
+| GitHub's 4 jobs at the same time | passed | passed |
+
+The embedded loop acquired and released 26 VMs and left none. gitlab-runner
+registers its cache adapters and secret resolvers in its own main package;
+until fleetci imported them, `[runners.cache]` was ignored ("No URL
+provided").

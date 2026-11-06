@@ -69,7 +69,7 @@ func serve(args []string) error {
 	}
 	var glErr error
 	if c.GitLab != nil {
-		gl, err := gitlab.New(*c.GitLab, c.Classes, backend, log.Named("gitlab"))
+		gl, err := gitlab.New(*c.GitLab, c.Classes, c.DefaultClass, backend, log.Named("gitlab"))
 		if err != nil {
 			return err
 		}

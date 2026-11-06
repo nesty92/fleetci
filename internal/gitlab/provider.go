@@ -5,7 +5,10 @@
 //
 //   - provider.Acquire reserves room for one VM of the runner's class before
 //     the job is requested, or fails with NoFreeExecutorError;
-//   - executor.Prepare, once a job has arrived, takes the VM;
+//   - executor.Prepare, once a job has arrived, takes the VM; for a runner
+//     of gitlab-runner's config.toml, which has no class of its own, it
+//     takes one of the class the job's FLEETCI_CLASS names, as fleetci's
+//     plugin does;
 //   - acquisitionRef.Prepare is the executors.Environment the Docker
 //     executor runs the job on: it dials the VM with fleeting's connector.
 
@@ -17,6 +20,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
+	"strings"
 
 	"github.com/sirupsen/logrus"
 
@@ -34,25 +39,62 @@ import (
 // executorName is the executor fleetci's runners name.
 const executorName = "fleetci"
 
+// classVariable is the job variable that names a job's class on runners
+// without a class of their own.
+const classVariable = "FLEETCI_CLASS"
+
 // VMs is what the provider needs of fleet.Backend.
 type VMs interface {
 	Reserve(class string) (*fleet.Reservation, error)
+	Create(ctx context.Context, class string) (fleet.VM, error)
 	Delete(ctx context.Context, id string) error
 }
 
 type provider struct {
 	common.ExecutorProvider
 	vms VMs
-	// classOf is the class of a runner's jobs.
+	// classOf is the class of a runner's jobs, or "" when the job's
+	// FLEETCI_CLASS names it.
 	classOf func(*common.RunnerConfig) string
+	// classes and defaultClass resolve FLEETCI_CLASS.
+	classes      []string
+	defaultClass string
 }
 
-func newProvider(docker common.ExecutorProvider, vms VMs, classOf func(*common.RunnerConfig) string) *provider {
-	return &provider{ExecutorProvider: docker, vms: vms, classOf: classOf}
+func newProvider(docker common.ExecutorProvider, vms VMs, classOf func(*common.RunnerConfig) string, classes []string, defaultClass string) *provider {
+	return &provider{ExecutorProvider: docker, vms: vms, classOf: classOf, classes: classes, defaultClass: defaultClass}
+}
+
+// jobClass is the class a job's FLEETCI_CLASS names, the default when it
+// is unset.
+func (p *provider) jobClass(build *common.Build) (string, error) {
+	class := build.GetAllVariables().Value(classVariable)
+	if class == "" {
+		class = p.defaultClass
+	}
+	if slices.Contains(p.classes, class) {
+		return class, nil
+	}
+	list := make([]string, len(p.classes))
+	for i, c := range p.classes {
+		list[i] = c
+		if c == p.defaultClass {
+			list[i] += " (default)"
+		}
+	}
+	return "", &common.BuildError{
+		Inner:         fmt.Errorf("unknown class %q; this runner has %s", class, strings.Join(list, ", ")),
+		FailureReason: common.ConfigurationError,
+	}
 }
 
 func (p *provider) Acquire(config *common.RunnerConfig) (common.ExecutorData, error) {
 	class := p.classOf(config)
+	if class == "" {
+		// fleetci: the class is known once the job is; Prepare waits for
+		// room, as fleetci's plugin does.
+		return &acquisitionRef{dial: connector.Dial}, nil
+	}
 	res, err := p.vms.Reserve(class)
 	if err != nil {
 		if errors.Is(err, fleet.ErrNoRoom) {
@@ -81,6 +123,9 @@ func (p *provider) Release(_ *common.RunnerConfig, data common.ExecutorData) {
 		return
 	}
 
+	if acqRef.res == nil {
+		return
+	}
 	acqRef.res.Release()
 	logrus.Trace("Unreserved capacity...")
 }
@@ -91,7 +136,7 @@ func (p *provider) Create() common.Executor {
 		return nil
 	}
 
-	return &executor{Executor: e}
+	return &executor{Executor: e, p: p}
 }
 
 var (
@@ -101,6 +146,7 @@ var (
 
 type executor struct {
 	common.Executor
+	p *provider
 }
 
 func (e *executor) Prepare(options common.ExecutorPrepareOptions) (err error) {
@@ -116,9 +162,18 @@ func (e *executor) Prepare(options common.ExecutorPrepareOptions) (err error) {
 		return e.Executor.Prepare(options)
 	}
 
-	// fleetci: the class's acquire_timeout bounds the wait, inside the
-	// reservation.
-	vm, err := acqRef.res.Acquire(options.Context)
+	// fleetci: the class's acquire_timeout bounds the wait.
+	var vm fleet.VM
+	if acqRef.res != nil {
+		vm, err = acqRef.res.Acquire(options.Context)
+	} else {
+		var class string
+		if class, err = e.p.jobClass(options.Build); err != nil {
+			return err
+		}
+		options.Build.Log().Infoln("Waiting for a " + class + " VM...")
+		vm, err = e.p.vms.Create(options.Context, class)
+	}
 	if err != nil {
 		return fmt.Errorf("unable to acquire instance: %w", err)
 	}

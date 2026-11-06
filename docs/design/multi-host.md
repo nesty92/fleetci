@@ -55,6 +55,42 @@ fleetci's provider follows that code:
 
 There is no plugin process, no gateway and no nesting socket on this path.
 
+### Compatibility
+
+`[gitlab] config_file` takes gitlab-runner's own `config.toml`, so a runner
+that works with fleetci's plugin today runs embedded without changes: all
+of `[[runners]]` applies (`[runners.docker]`, `[runners.cache]`,
+`environment`, feature flags, `request_concurrency`...), its `autoscaler`
+table is ignored, and each job's `FLEETCI_CLASS` picks its class, as with
+the plugin. Pipelines don't change. The probe in
+[measurements](../measurements.md#embedded-gitlab-runner-against-the-plugin)
+ran the same pipeline on both with the same results.
+
+What the embedded loop doesn't have yet:
+
+- the session server, so no interactive web terminal (stock runners have
+  none either unless `[session_server]` is set);
+- the metrics and debug server;
+- config reload on change: a restart reads it;
+- graceful stop on `SIGQUIT`: stopping aborts running jobs;
+- the CLI around the loop (`register`, `verify`, `unregister`).
+
+What it removes, against the plugin:
+
+- the loopback SSH gateway that poses as gitlab-runner's one instance, and
+  the `max_instances = 1`, `capacity_per_instance` and `max_use_count`
+  settings it needs;
+- the nesting API and `vm_isolation`, with its `class-${FLEETCI_CLASS}`
+  image name;
+- the proxy that ends vm_isolation's fixed-password login inside fleetci;
+- `fleetci watchdog`, since gitlab-runner never restarts a dead plugin;
+- `fleetci runner-config` and the `config.toml` checks, which keep those
+  settings right;
+- two processes on one host budget: GitHub and GitLab share it.
+
+The plugin stays. It is the way to use fleetci with an existing
+gitlab-runner install, and none of its code changes.
+
 ### One runner per class
 
 A job request can't filter by tag, so a runner can only be kept from a
@@ -79,7 +115,8 @@ What it costs:
   (`v1.11.1-0.20261028153507-66ad5002d924` is v19.5.2) and promises no Go
   API. fleetci follows its releases by hand.
 - About 250 more modules (Docker, Kubernetes client, cloud SDKs) and a
-  bigger binary.
+  binary of 101 MB against 23 MB, most of it the cloud SDKs of the cache
+  adapters and secret resolvers; build tags could leave out the unused ones.
 - One runner registration per class, made by the user or through the API.
 
 Open: GitLab tells a runner nothing about pending jobs before it takes one,

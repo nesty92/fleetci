@@ -24,6 +24,9 @@ func (n *noRoom) Reserve(string) (*fleet.Reservation, error) {
 	n.reserves.Add(1)
 	return nil, fleet.ErrNoRoom
 }
+func (*noRoom) Create(context.Context, string) (fleet.VM, error) {
+	return fleet.VM{}, fleet.ErrNoRoom
+}
 func (*noRoom) Delete(context.Context, string) error { return nil }
 
 // countingNetwork counts job requests and hands out none.
@@ -61,7 +64,7 @@ func TestValidate(t *testing.T) {
 		c    Config
 		want string
 	}{
-		{"no runners", Config{}, "no runners"},
+		{"no runners", Config{}, "no runners and no config_file"},
 		{"unknown class", Config{Runners: []Runner{{Class: "nope", TokenFile: "t"}}}, `no class "nope"`},
 		{"two runners on a class", Config{Runners: []Runner{ok, ok}}, "has a runner already"},
 		{"no token", Config{Runners: []Runner{{Class: "1vcpu-2gb"}}}, "token_file is required"},
@@ -81,7 +84,7 @@ func TestNewBuildsOneRunnerPerClass(t *testing.T) {
 	l, err := New(Config{Runners: []Runner{
 		{Class: "1vcpu-2gb", TokenFile: tok},
 		{Class: "4vcpu-8gb", TokenFile: tok, Image: "alpine"},
-	}}, classes(), &noRoom{}, hclog.NewNullLogger())
+	}}, classes(), "1vcpu-2gb", &noRoom{}, hclog.NewNullLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +113,7 @@ func TestNewBuildsOneRunnerPerClass(t *testing.T) {
 func TestNoRoomRequestsNoJob(t *testing.T) {
 	vms := &noRoom{}
 	l, err := New(Config{Runners: []Runner{{Class: "1vcpu-2gb", TokenFile: tokenFile(t)}}},
-		classes(), vms, hclog.NewNullLogger())
+		classes(), "1vcpu-2gb", vms, hclog.NewNullLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,5 +128,79 @@ func TestNoRoomRequestsNoJob(t *testing.T) {
 	}
 	if vms.reserves.Load() != 1 || net.requests.Load() != 0 {
 		t.Fatalf("%d reservations, %d job requests; want 1, 0", vms.reserves.Load(), net.requests.Load())
+	}
+}
+
+// gitlab-runner's own config.toml, as "fleetci runner-config" writes it.
+const runnerConfigTOML = `concurrent = 4
+check_interval = 5
+
+[[runners]]
+  name = "fleetci"
+  url = "https://gitlab.example.com"
+  token = "glrt-file"
+  executor = "docker-autoscaler"
+  environment = ["A=b"]
+  [runners.docker]
+    image = "alpine"
+    privileged = true
+  [runners.cache]
+    Type = "s3"
+    Shared = true
+    [runners.cache.s3]
+      ServerAddress = "cache.example.com"
+      BucketName = "runner"
+  [runners.autoscaler]
+    plugin = "fleeting-plugin-fleetci"
+    max_instances = 1
+`
+
+func TestConfigFileRunnersKeepTheirSettings(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(file, []byte(runnerConfigTOML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l, err := New(Config{ConfigFile: file, Runners: []Runner{{Class: "4vcpu-8gb", TokenFile: tokenFile(t)}}},
+		classes(), "1vcpu-2gb", &noRoom{}, hclog.NewNullLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := l.mr.config
+	if c.Concurrent != 4 || c.CheckInterval != 5 || len(c.Runners) != 2 {
+		t.Fatalf("concurrent %d, check_interval %d, %d runners; want the file's 4, 5 and 2 runners",
+			c.Concurrent, c.CheckInterval, len(c.Runners))
+	}
+	r := c.Runners[0]
+	if r.Executor != executorName || r.Token != "glrt-file" || r.URL != "https://gitlab.example.com" ||
+		r.Docker.Image != "alpine" || !r.Docker.Privileged || r.Cache == nil || r.Cache.S3 == nil ||
+		r.Cache.S3.BucketName != "runner" || len(r.Environment) != 1 || r.SystemID == "" {
+		t.Errorf("config.toml runner lost settings: %+v", r)
+	}
+	p := l.mr.executorProviders.GetByName(executorName).(*provider)
+	if p.classOf(r) != "" || p.classOf(c.Runners[1]) != "4vcpu-8gb" {
+		t.Errorf("classes %q %q; want the job's, then 4vcpu-8gb", p.classOf(r), p.classOf(c.Runners[1]))
+	}
+}
+
+func TestJobClass(t *testing.T) {
+	p := newProvider(nil, &noRoom{}, nil, []string{"1vcpu-2gb", "4vcpu-8gb"}, "1vcpu-2gb")
+	build := func(class string) *common.Build {
+		b := &common.Build{Runner: &common.RunnerConfig{}}
+		if class != "" {
+			b.Variables = spec.Variables{{Key: classVariable, Value: class}}
+		}
+		return b
+	}
+	if got, err := p.jobClass(build("")); got != "1vcpu-2gb" || err != nil {
+		t.Errorf("unset: %q %v, want the default", got, err)
+	}
+	if got, err := p.jobClass(build("4vcpu-8gb")); got != "4vcpu-8gb" || err != nil {
+		t.Errorf("4vcpu-8gb: %q %v", got, err)
+	}
+	_, err := p.jobClass(build("nope"))
+	var be *common.BuildError
+	if !errors.As(err, &be) || be.FailureReason != common.ConfigurationError ||
+		!strings.Contains(err.Error(), "1vcpu-2gb (default), 4vcpu-8gb") {
+		t.Errorf("unknown class: %v", err)
 	}
 }
