@@ -27,8 +27,8 @@ func (c *Config) loadFile() error {
 	if c.ConfigFile == "" {
 		return nil
 	}
-	if c.DefaultClass != "" || len(c.Classes) > 0 || c.GitHub != nil || c.Host != nil {
-		return errors.New("with config_file, put default_class, classes, github and host in that file, not in plugin_config")
+	if c.DefaultClass != "" || len(c.Classes) > 0 || c.GitHub != nil || c.GitLab != nil || c.Host != nil {
+		return errors.New("with config_file, put default_class, classes, github, gitlab and host in that file, not in plugin_config")
 	}
 
 	var f Config
@@ -71,7 +71,13 @@ func (c *Config) loadFile() error {
 		f.GitHub.TokenFile = relativeTo(dir, f.GitHub.TokenFile)
 	}
 
-	c.DefaultClass, c.Classes, c.GitHub, c.Host = f.DefaultClass, f.Classes, f.GitHub, f.Host
+	if f.GitLab != nil {
+		for i := range f.GitLab.Runners {
+			f.GitLab.Runners[i].TokenFile = relativeTo(dir, f.GitLab.Runners[i].TokenFile)
+		}
+	}
+
+	c.DefaultClass, c.Classes, c.GitHub, c.GitLab, c.Host = f.DefaultClass, f.Classes, f.GitHub, f.GitLab, f.Host
 	if c.Listen == "" {
 		c.Listen = f.Listen
 	}
@@ -120,6 +126,9 @@ func (c Config) Validate() error {
 				"Set both to 1 here, or keep reuse for GitLab and serve GitHub from a separate config with single-use classes and groups of their own",
 				name, max(class.CapacityPerInstance, 1), max(class.MaxUseCount, 1)))
 		}
+	}
+	if c.GitLab != nil {
+		errs = append(errs, c.GitLab.Validate(c.Classes))
 	}
 	if _, _, _, err := fleet.CheckHost(c.Host, c.Classes); err != nil {
 		errs = append(errs, err)

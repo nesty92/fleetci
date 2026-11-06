@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/go-hclog"
@@ -419,7 +420,63 @@ func (b *Backend) Create(ctx context.Context, class string) (VM, error) {
 			first.queue.dequeue(w)
 		}
 	}
+	return b.acquire(actx, p, class, start)
+}
 
+// ErrNoRoom is Reserve's error when a class, its overflow and its hosts
+// have no room for one more of its VMs.
+var ErrNoRoom = errors.New("no room")
+
+// Reservation is room for one VM of a class, taken by Reserve. Acquire
+// turns it into the VM; Release gives it back unused.
+type Reservation struct {
+	b     *Backend
+	p     *pool
+	class string
+	start time.Time
+	used  atomic.Bool
+}
+
+// Reserve takes room for one VM of the class without waiting, behind the
+// jobs already waiting in Create: gitlab-runner's loop asks for capacity
+// this way before it asks GitLab for a job, so a job only leaves GitLab's
+// queue once fleetci has room for it.
+func (b *Backend) Reserve(class string) (*Reservation, error) {
+	pools := b.pools[class]
+	if len(pools) == 0 {
+		return nil, fmt.Errorf("unknown class %q", class)
+	}
+	p := take(nil, pools)
+	if p == nil {
+		p = take(nil, b.pools[pools[0].class.Overflow])
+	}
+	if p == nil {
+		return nil, ErrNoRoom
+	}
+	return &Reservation{b: b, p: p, class: class, start: time.Now()}, nil
+}
+
+// Acquire takes the reserved VM. Once called, the VM is Deleted, not
+// Released, whether or not Acquire succeeds.
+func (r *Reservation) Acquire(ctx context.Context) (VM, error) {
+	if !r.used.CompareAndSwap(false, true) {
+		return VM{}, errors.New("reservation already used")
+	}
+	actx, cancel := context.WithTimeout(ctx, r.p.timeout)
+	defer cancel()
+	return r.b.acquire(actx, r.p, r.class, r.start)
+}
+
+// Release gives the room back if Acquire was never called.
+func (r *Reservation) Release() {
+	if r.used.CompareAndSwap(false, true) {
+		r.p.done()
+		r.b.notify()
+	}
+}
+
+// acquire takes a VM from p, where room for it is already counted.
+func (b *Backend) acquire(actx context.Context, p *pool, class string, start time.Time) (VM, error) {
 	id := "fleetci-" + p.name + "-" + randomHex(4)
 	acq, err := p.ts.Acquire(actx, id)
 	if err != nil {
