@@ -91,25 +91,109 @@ What it removes, against the plugin:
 The plugin stays. It is the way to use fleetci with an existing
 gitlab-runner install, and none of its code changes.
 
-### One runner per class
+### Runners
 
-A job request can't filter by tag, so a runner can only be kept from a
-class's jobs by not asking for them. fleetci registers one runner per
-class, tagged with the class's name, and asks for a class's job only when
-the class has room. Jobs it can't run yet stay pending in GitLab, where
-another host may take them. The template moves from the `fleetci` tag plus
-`FLEETCI_CLASS` to the class's tag; the current runner stays as a catch-all
-so existing pipelines keep working.
+One runner, as today, is the default: the `fleetci` tag, the class in the
+job's `FLEETCI_CLASS`, pipelines unchanged. One runner per class, tagged
+with the class's name, is an option (`[[gitlab.runners]]`), next to it or
+instead of it.
 
-What this gives:
+Every way a runner asks for a job (`POST /jobs/request`, the job router's
+`GetJob`) also takes it; there is no looking first and no giving back. So a
+single runner takes a job before it knows its class, which leaves three
+problems:
 
-1. No job waits inside fleetci, so no `acquire_timeout` failures on local
-   classes.
-2. Several hosts poll the same class runners and GitLab hands each job to
-   one of them: load balancing between hosts with no coordination.
-3. One process serves GitLab and GitHub from one host budget.
+1. A job of a full class waits inside fleetci, and fails at
+   `acquire_timeout` if the class stays full.
+2. Jobs waiting count against `concurrent`, so a few large ones can keep
+   fleetci from asking for small jobs it has room for.
+3. With several hosts, a full host can take a job another host has room
+   for.
 
-What it costs:
+What answers them:
+
+- Ask for a job only while some class has room (1, 2; done). The runner
+  reserves room in the first class that has some, the default class first,
+  before it asks; a job of that class takes it, a job of another gives it
+  back and waits for its own. A full host takes no jobs, and a nominated
+  job's held room stops new ones.
+- Run the job on any host's VM (3, in step 2). The Docker executor only
+  dials the VM over SSH, so the host that took the job can run it on a VM
+  another host created, over Tailscale, that host carrying the SSH as
+  fleetci's proxy does today. The cluster chooses where the VM goes; GitLab
+  never needs to know. Nominations keep working, because a taken job's
+  class is known. The cost: the Docker API's traffic goes through the host
+  that took the job, and the job is lost if that host fails. Image pulls,
+  cache and artifacts go from the VM itself.
+- List pending jobs with GitLab's API (`GET /projects/:id/jobs?scope=pending`,
+  or instance-wide for an admin), to warm VMs and see a large job waiting
+  before it is taken. The API shows tags, not variables, so this needs the
+  class as a tag too; the template can carry both.
+
+One runner per class answers 1 and 3 without any of that: fleetci asks for
+a class's job only when the class has room, so jobs it can't run stay
+pending in GitLab, where another host may take them. It costs a
+registration per class, the class as the job's tag, and nominations for
+jobs still in GitLab, which fleetci can't see or reorder.
+
+### Job sources are plugins, as fleeting's providers are
+
+fleeting keeps the cloud behind a small interface (`InstanceGroup`) and
+each cloud in a plugin binary of its own, run over hashicorp/go-plugin, so
+the implementation can be swapped without touching what uses it. fleetci
+does the same one level up: the core owns the classes, the host budget, the
+queue, the VMs and, later, the cluster; where jobs come from is a job
+source behind an interface, in a binary of its own.
+
+```go
+// Capacity is what the core gives a job source.
+type Capacity interface {
+	Classes(ctx) ([]Class, string /* default */, error)
+	Reserve(ctx, class) (Reservation, error)        // room now, or ErrNoRoom
+	Acquire(ctx, Reservation) (VM, error)           // the reserved VM
+	Release(ctx, Reservation) error
+	Create(ctx, class) (VM, error)                  // wait for room
+	Connect(ctx, vmID) (proxy.Target, error)        // fleeting's ConnectInfo and the host key; fresh key each call
+	Delete(ctx, vmID) error
+}
+
+// Source takes jobs from a forge and runs them on VMs from Capacity.
+type Source interface {
+	Init(ctx, config []byte, capacity Capacity, log) error  // its fleetci.toml table, as JSON
+	Run(ctx) error  // until ctx ends; then stops its jobs
+}
+```
+
+The connection details cross the boundary as data, as they do from a
+fleeting plugin, and the source dials the VM itself. Capacity reaches the plugin
+through go-plugin's broker, the same way back.
+
+Implementations, all swappable:
+
+- `fleetci-source-gitlab`: the embedded gitlab-runner loop of this step.
+  gitlab-runner's 250 modules and 80 MB live in it, not in the core, and it
+  follows gitlab-runner releases on its own. Another GitLab implementation,
+  a native one or a later gitlab-runner, replaces it without a core change.
+- `fleetci-source-github`: today's dispatcher, moved behind the interface.
+- Others later (Forgejo, Buildkite...), without touching the core.
+- Tests: an in-process fake source, as `fleeting-plugin-dummy` is for
+  fleeting.
+
+What the boundary also gives:
+
+- The core restarts a source that dies; gitlab-runner never restarts a
+  dead plugin, which is why `fleetci watchdog` exists.
+- In the cluster, Capacity is the cluster's: a source on any host reserves
+  room anywhere, and the core places the VM (step 2). The source doesn't
+  change.
+- The plugin direction stays: gitlab-runner loading `fleeting-plugin-fleetci`
+  is unchanged and needs no source.
+
+Order: the interface in-process first (`internal/source`, GitHub and GitLab
+behind it in one binary; done), then go-plugin and separate binaries once
+it holds. Plugin mode's GitHub dispatcher uses the same Capacity.
+
+### Costs of the embedded runner
 
 - gitlab-runner's module path has no `/v19`, so it is pinned by commit
   (`v1.11.1-0.20261028153507-66ad5002d924` is v19.5.2) and promises no Go
@@ -117,12 +201,6 @@ What it costs:
 - About 250 more modules (Docker, Kubernetes client, cloud SDKs) and a
   binary of 101 MB against 23 MB, most of it the cloud SDKs of the cache
   adapters and secret resolvers; build tags could leave out the unused ones.
-- One runner registration per class, made by the user or through the API.
-
-Open: GitLab tells a runner nothing about pending jobs before it takes one,
-so fleetci can't see that a large job has waited long. Fairness between
-classes becomes which class's runner fleetci asks first; how a nomination
-works when the job is still in GitLab is decided with the cluster.
 
 ## Step 2: the cluster
 
@@ -139,6 +217,7 @@ the shared things below pause.
 |---|---|---|
 | Owner of each cloud class | Two processes driving one fleeting group remove each other's VMs | A lease with a fencing token, after Kubernetes client-go `leaderelection` |
 | GitHub dispatch | One host creates the just-in-time runner for a job | A claim per job id in the Raft log |
+| Where a taken job's VM goes | A host that took a job it has no room for runs it on another host's VM | Placement by the leader, kept in Raft |
 | Nominations between hosts | A long-waiting large job isn't starved by small ones elsewhere | Run by the leader, kept in Raft |
 | Hosts, their budgets and free room | Placement and nominations | Gossip (memberlist), heartbeats in Raft |
 
