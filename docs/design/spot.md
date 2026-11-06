@@ -59,12 +59,24 @@ their code is ported it carries their notice.
 
 ### Signals: the host itself by default, a queue as an option
 
-By default fleetci reads IMDS on the host over the SSH connection it
-already has: an IMDSv2 token, then the `spot/instance-action`,
-`events/recommendations/rebalance` and `autoscaling/target-lifecycle-state`
-paths. Nothing is installed on the host and no IAM is added. One small
-command per host every few seconds; a host that has not answered is
-treated as unknown, not as marked.
+By default fleetci reads each host's IMDS every 2 seconds, as NTH's IMDS
+mode does, but from outside the host: fleetci holds one SSH connection to
+the host and opens a TCP forward (`direct-tcpip`) through it to
+`169.254.169.254:80`. The host's sshd makes the connection, so IMDS
+answers as it would to the host itself, and fleetci speaks IMDSv2 over it:
+a session token, then `spot/instance-action` and
+`events/recommendations/rebalance` (later
+`autoscaling/target-lifecycle-state`). Nothing runs on the host, so the
+image needs no curl or shell, and no IAM is added. The one requirement is
+that sshd allows TCP forwarding, its default; jobs already reach Docker
+through a forward. A host whose sshd refuses, or that has no IMDS, is
+logged once and left to the plugin's own check. A lost connection is
+opened again with backoff; one EC2 Instance Connect key per connection,
+not per read.
+
+The watch starts once a host is admitted (Docker answers) and ends when
+the host is removed. It is on by default for the AWS plugin
+(`[classes.<name>.reclaim] watch`).
 
 A class may instead name an SQS queue that EventBridge feeds, as Karpenter
 and NTH's queue mode do. It needs the queue, the rules and
@@ -132,8 +144,12 @@ the way it falls over to its overflow class today.
 
 1. Turn on taskscaler's heartbeat, so the plugin's spot check runs before
    every placement (#6). Done on `feat/spot-reclaim`.
-2. IMDS over SSH: cordon on an interruption notice (#6).
-3. Cordon on a rebalance recommendation, when the class asks for it (#8).
+2. IMDS through an SSH tunnel: cordon on an interruption notice (#6).
+3. Cordon on a rebalance recommendation, when the class asks for it
+   (`reclaim.rebalance`, #8).
+
+Steps 2 and 3 are on `feat/spot-reclaim`, tested against a fake IMDS
+behind a real SSH server, not yet on EC2.
 4. Lifecycle hook support (#8).
 5. SQS queue as an opt-in source.
 6. Avoid-list, then zones (#7).
