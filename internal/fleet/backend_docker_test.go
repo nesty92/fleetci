@@ -15,8 +15,6 @@ import (
 	"time"
 
 	"github.com/hashicorp/go-hclog"
-
-	"github.com/nesty92/fleetci/internal/proxy"
 )
 
 func TestClassWithDockerPlugin(t *testing.T) {
@@ -46,7 +44,7 @@ func TestClassWithDockerPlugin(t *testing.T) {
 			MaxInstances: 2,
 			IdleCount:    1,
 		},
-	}, log)
+	}, nil, log)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,14 +59,14 @@ func TestClassWithDockerPlugin(t *testing.T) {
 	for i := range 2 {
 		c, _, err := vm.Conn.Client(ctx)
 		if err != nil {
-			t.Fatalf("connection %d: %v", i, err)
+			t.Fatalf("session %d: %v", i, err)
 		}
 		s, _ := c.NewSession()
 		out, err := s.Output("docker info --format '{{.NCPU}}' && cat /sys/fs/cgroup/cpu.max")
 		if err != nil {
-			t.Fatalf("connection %d: %v: %s", i, err, out)
+			t.Fatalf("session %d: %v: %s", i, err, out)
 		}
-		t.Logf("connection %d: %s", i, strings.Join(strings.Fields(string(out)), " "))
+		t.Logf("session %d: %s", i, strings.Join(strings.Fields(string(out)), " "))
 	}
 
 	// Hold the VM like a running job, until the replacement idle VM is up.
@@ -144,12 +142,12 @@ func TestClassesNeedTheirOwnGroup(t *testing.T) {
 	group := "test-" + randomHex(3)
 	log := hclog.NewNullLogger()
 
-	_, err := New(ctx, map[string]Class{"a": class(group), "b": class(group)}, log)
+	_, err := New(ctx, map[string]Class{"a": class(group), "b": class(group)}, nil, log)
 	if err == nil || !strings.Contains(err.Error(), `as class "a" does`) {
 		t.Fatalf("shared group accepted: %v", err)
 	}
 
-	b, err := New(ctx, map[string]Class{"a": class(group), "b": class(group + "-b")}, log)
+	b, err := New(ctx, map[string]Class{"a": class(group), "b": class(group + "-b")}, nil, log)
 	if err != nil {
 		t.Fatalf("separate groups refused: %v", err)
 	}
