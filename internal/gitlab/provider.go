@@ -5,12 +5,16 @@
 //
 //   - provider.Acquire reserves room for one VM of the runner's class before
 //     the job is requested, or fails with NoFreeExecutorError;
-//   - executor.Prepare, once a job has arrived, takes the VM; for a runner
-//     of gitlab-runner's config.toml, which has no class of its own, it
-//     takes one of the class the job's FLEETCI_CLASS names, as fleetci's
-//     plugin does;
+//   - executor.Prepare, once a job has arrived, takes the VM;
 //   - acquisitionRef.Prepare is the executors.Environment the Docker
 //     executor runs the job on: it dials the VM with fleeting's connector.
+//
+// A runner of gitlab-runner's config.toml has no class of its own: the
+// job's FLEETCI_CLASS names it, as with fleetci's plugin. Its Acquire
+// reserves room for a VM of the first class that has some, the default
+// class first, so it asks for no job while the host is full; Prepare uses
+// the reservation when the job's class is the reserved one, and otherwise
+// gives it back and waits for room in the job's class.
 
 package gitlab
 
@@ -22,6 +26,7 @@ import (
 	"net"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/sirupsen/logrus"
 
@@ -33,7 +38,8 @@ import (
 	"gitlab.com/gitlab-org/gitlab-runner/session/terminal"
 	"gitlab.com/gitlab-org/gitlab-runner/steps"
 
-	"github.com/nesty92/fleetci/internal/fleet"
+	"github.com/nesty92/fleetci/internal/proxy"
+	"github.com/nesty92/fleetci/internal/source"
 )
 
 // executorName is the executor fleetci's runners name.
@@ -43,16 +49,56 @@ const executorName = "fleetci"
 // without a class of their own.
 const classVariable = "FLEETCI_CLASS"
 
-// VMs is what the provider needs of fleet.Backend.
-type VMs interface {
-	Reserve(class string) (*fleet.Reservation, error)
-	Create(ctx context.Context, class string) (fleet.VM, error)
-	Delete(ctx context.Context, id string) error
+// reservation is room for one VM, held until Acquire or Release.
+type reservation interface {
+	Class() string
+	Acquire(ctx context.Context) (source.VM, error)
+	Release()
+}
+
+// vms is what the provider needs of fleetci's core: source.Capacity, with
+// reservations that tests can fake.
+type vms interface {
+	Reserve(class string) (reservation, error)
+	Create(ctx context.Context, class string) (source.VM, error)
+	Connect(ctx context.Context, vm string) (proxy.Target, error)
+	Delete(ctx context.Context, vm string) error
+}
+
+// capacityVMs is vms over source.Capacity.
+type capacityVMs struct{ source.Capacity }
+
+func (c capacityVMs) Reserve(class string) (reservation, error) {
+	r, err := c.Capacity.Reserve(context.Background(), class)
+	if err != nil {
+		return nil, err
+	}
+	return &capacityReservation{c: c.Capacity, r: r}, nil
+}
+
+// capacityReservation is a source.Reservation, used once by Acquire or
+// Release.
+type capacityReservation struct {
+	c    source.Capacity
+	r    source.Reservation
+	once sync.Once
+}
+
+func (r *capacityReservation) Class() string { return r.r.Class }
+
+func (r *capacityReservation) Acquire(ctx context.Context) (source.VM, error) {
+	vm, err := source.VM{}, errors.New("reservation already used")
+	r.once.Do(func() { vm, err = r.c.Acquire(ctx, r.r) })
+	return vm, err
+}
+
+func (r *capacityReservation) Release() {
+	r.once.Do(func() { _ = r.c.Release(context.Background(), r.r) })
 }
 
 type provider struct {
 	common.ExecutorProvider
-	vms VMs
+	vms vms
 	// classOf is the class of a runner's jobs, or "" when the job's
 	// FLEETCI_CLASS names it.
 	classOf func(*common.RunnerConfig) string
@@ -61,8 +107,24 @@ type provider struct {
 	defaultClass string
 }
 
-func newProvider(docker common.ExecutorProvider, vms VMs, classOf func(*common.RunnerConfig) string, classes []string, defaultClass string) *provider {
+func newProvider(docker common.ExecutorProvider, vms vms, classOf func(*common.RunnerConfig) string, classes []string, defaultClass string) *provider {
 	return &provider{ExecutorProvider: docker, vms: vms, classOf: classOf, classes: classes, defaultClass: defaultClass}
+}
+
+// anyRoom reserves room for a VM of the first class that has some: the
+// default class, then the others in order.
+func (p *provider) anyRoom() (reservation, error) {
+	order := append([]string{p.defaultClass}, slices.DeleteFunc(slices.Clone(p.classes), func(c string) bool { return c == p.defaultClass })...)
+	for _, class := range order {
+		res, err := p.vms.Reserve(class)
+		if err == nil {
+			return res, nil
+		}
+		if !errors.Is(err, source.ErrNoRoom) {
+			return nil, err
+		}
+	}
+	return nil, &common.NoFreeExecutorError{Message: "no class has room for a vm"}
 }
 
 // jobClass is the class a job's FLEETCI_CLASS names, the default when it
@@ -91,13 +153,17 @@ func (p *provider) jobClass(build *common.Build) (string, error) {
 func (p *provider) Acquire(config *common.RunnerConfig) (common.ExecutorData, error) {
 	class := p.classOf(config)
 	if class == "" {
-		// fleetci: the class is known once the job is; Prepare waits for
-		// room, as fleetci's plugin does.
-		return &acquisitionRef{dial: connector.Dial}, nil
+		// fleetci: the class is known once the job is. Room in some class
+		// is held until then, so no job is taken while the host is full.
+		res, err := p.anyRoom()
+		if err != nil {
+			return nil, err
+		}
+		return &acquisitionRef{res: res, byJob: true, connect: p.vms.Connect, dial: connector.Dial}, nil
 	}
 	res, err := p.vms.Reserve(class)
 	if err != nil {
-		if errors.Is(err, fleet.ErrNoRoom) {
+		if errors.Is(err, source.ErrNoRoom) {
 			err = &common.NoFreeExecutorError{Message: fmt.Sprintf("reserving a %s vm: %v", class, err)}
 		}
 
@@ -106,7 +172,7 @@ func (p *provider) Acquire(config *common.RunnerConfig) (common.ExecutorData, er
 
 	logrus.WithField("class", class).Trace("Reserved capacity...")
 
-	return &acquisitionRef{res: res, dial: connector.Dial}, nil
+	return &acquisitionRef{res: res, connect: p.vms.Connect, dial: connector.Dial}, nil
 }
 
 func (p *provider) Release(_ *common.RunnerConfig, data common.ExecutorData) {
@@ -123,9 +189,6 @@ func (p *provider) Release(_ *common.RunnerConfig, data common.ExecutorData) {
 		return
 	}
 
-	if acqRef.res == nil {
-		return
-	}
 	acqRef.res.Release()
 	logrus.Trace("Unreserved capacity...")
 }
@@ -163,16 +226,18 @@ func (e *executor) Prepare(options common.ExecutorPrepareOptions) (err error) {
 	}
 
 	// fleetci: the class's acquire_timeout bounds the wait.
-	var vm fleet.VM
-	if acqRef.res != nil {
+	// gitlab-runner tries Prepare again after an error that isn't a
+	// BuildError, with the same reservation, which is spent by then.
+	var vm source.VM
+	switch tried := acqRef.tried; {
+	case tried:
+		vm, err = e.retry(options, acqRef)
+	case acqRef.byJob:
+		acqRef.tried = true
+		vm, err = e.prepareByJob(options, acqRef.res)
+	default:
+		acqRef.tried = true
 		vm, err = acqRef.res.Acquire(options.Context)
-	} else {
-		var class string
-		if class, err = e.p.jobClass(options.Build); err != nil {
-			return err
-		}
-		options.Build.Log().Infoln("Waiting for a " + class + " VM...")
-		vm, err = e.p.vms.Create(options.Context, class)
 	}
 	if err != nil {
 		return fmt.Errorf("unable to acquire instance: %w", err)
@@ -183,6 +248,40 @@ func (e *executor) Prepare(options common.ExecutorPrepareOptions) (err error) {
 	acqRef.vm = &vm
 
 	return e.Executor.Prepare(options)
+}
+
+// prepareByJob takes a VM of the class the job's FLEETCI_CLASS names: in
+// the reserved room when it is that class's, else after the room is given
+// back, waiting for the job's class.
+func (e *executor) prepareByJob(options common.ExecutorPrepareOptions, res reservation) (source.VM, error) {
+	class, err := e.p.jobClass(options.Build)
+	if err != nil {
+		res.Release()
+		return source.VM{}, err
+	}
+	if class == res.Class() {
+		return res.Acquire(options.Context)
+	}
+	res.Release()
+	// fleetci: in the job's log, where the wait shows.
+	options.BuildLogger.Println("Waiting for a " + class + " VM...")
+	return e.p.vms.Create(options.Context, class)
+}
+
+// retry waits for room in the job's class, its reservation spent.
+func (e *executor) retry(options common.ExecutorPrepareOptions, acqRef *acquisitionRef) (source.VM, error) {
+	// The build's runner config is a copy, unknown to classOf; the
+	// reservation knows the runner's class.
+	class := acqRef.res.Class()
+	if acqRef.byJob {
+		var err error
+		if class, err = e.p.jobClass(options.Build); err != nil {
+			return source.VM{}, err
+		}
+	}
+	// fleetci: in the job's log, where the wait shows.
+	options.BuildLogger.Println("Waiting for a " + class + " VM...")
+	return e.p.vms.Create(options.Context, class)
 }
 
 func (e *executor) Connect(ctx context.Context) (func() (io.ReadWriteCloser, error), error) {
@@ -206,9 +305,16 @@ var _ executors.Environment = (*acquisitionRef)(nil)
 var errRefAcqNotSet = errors.New("ref.vm is not set")
 
 type acquisitionRef struct {
-	res *fleet.Reservation
-	vm  *fleet.VM
+	res reservation
+	// byJob: the job's FLEETCI_CLASS names its class, and res is room in
+	// whichever class had some.
+	byJob bool
+	// tried: Prepare has used res, or given it back.
+	tried bool
+	vm    *source.VM
 
+	// connect returns a VM's connection details.
+	connect func(ctx context.Context, vm string) (proxy.Target, error)
 	// test hook
 	dial connector.DialFn
 }
@@ -235,7 +341,7 @@ func (ref *acquisitionRef) Prepare(
 
 	// fleetci: the VM's connect details, with the external address
 	// already chosen when the class's connector_config asks for it.
-	target, err := ref.vm.Connect(dialCtx)
+	target, err := ref.connect(dialCtx, ref.vm.ID)
 	if cause := context.Cause(dialCtx); cause != nil {
 		return nil, buildErrorFromContextCause(cause)
 	}

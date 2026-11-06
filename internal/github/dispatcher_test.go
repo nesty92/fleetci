@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -18,23 +19,44 @@ import (
 	"github.com/hashicorp/go-hclog"
 
 	"github.com/nesty92/fleetci/internal/fleet"
+	"github.com/nesty92/fleetci/internal/proxy"
+	"github.com/nesty92/fleetci/internal/source"
 )
 
+// fakeBackend is a source.Capacity of two classes that creates VMs at once.
 type fakeBackend struct {
+	defaultClass string
+
 	mu      sync.Mutex
 	created []string // classes
 	deleted []string // vm ids
 }
 
-func (b *fakeBackend) Has(class string) bool { return class == "2vcpu-1gb" || class == "2vcpu-2gb" }
+func (b *fakeBackend) Classes(context.Context) ([]source.Class, string, error) {
+	return []source.Class{{Name: "2vcpu-1gb", Slots: 1}, {Name: "2vcpu-2gb", Slots: 1}}, b.defaultClass, nil
+}
 
-func (b *fakeBackend) Classes() []string { return []string{"2vcpu-1gb", "2vcpu-2gb"} }
+func (b *fakeBackend) Reserve(context.Context, string) (source.Reservation, error) {
+	return source.Reservation{}, source.ErrNoRoom
+}
 
-func (b *fakeBackend) Create(_ context.Context, class string) (fleet.VM, error) {
+func (b *fakeBackend) Acquire(context.Context, source.Reservation) (source.VM, error) {
+	return source.VM{}, errors.New("no reservations")
+}
+
+func (b *fakeBackend) Release(context.Context, source.Reservation) error {
+	return errors.New("no reservations")
+}
+
+func (b *fakeBackend) Connect(context.Context, string) (proxy.Target, error) {
+	return proxy.Target{}, errors.New("fake vm")
+}
+
+func (b *fakeBackend) Create(_ context.Context, class string) (source.VM, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.created = append(b.created, class)
-	return fleet.VM{ID: fmt.Sprintf("fleetci-%s-%d", class, len(b.created)), Class: class}, nil
+	return source.VM{ID: fmt.Sprintf("fleetci-%s-%d", class, len(b.created)), Class: class}, nil
 }
 
 func (b *fakeBackend) Delete(_ context.Context, id string) error {
@@ -117,11 +139,11 @@ func TestDispatcher(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	backend := &fakeBackend{}
+	backend := &fakeBackend{defaultClass: "2vcpu-1gb"}
 	release := make(chan struct{})
 	var mu sync.Mutex
 	started := map[string]string{} // vm id → jit config
-	start := func(ctx context.Context, vm fleet.VM, jit string, took func(string)) error {
+	start := func(ctx context.Context, vm VM, jit string, took func(string)) error {
 		mu.Lock()
 		started[vm.ID] = jit
 		mu.Unlock()
@@ -132,12 +154,12 @@ func TestDispatcher(t *testing.T) {
 		return nil
 	}
 
-	d, err := New(Config{
+	d, err := New(t.Context(), Config{
 		Repos:        []string{"o/r"},
 		TokenFile:    tokenFile,
 		PollInterval: fleet.Duration(20 * time.Millisecond),
 		APIURL:       srv.URL,
-	}, "2vcpu-1gb", backend, start, hclog.NewNullLogger())
+	}, backend, start, hclog.NewNullLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +218,7 @@ func TestNewChecksConfig(t *testing.T) {
 		"cache quote":  {Repos: []string{"o/r"}, TokenFile: tokenFile, CacheURL: "http://cache/'$(id)"},
 		"cache host":   {Repos: []string{"o/r"}, TokenFile: tokenFile, CacheURL: "http:///x"},
 	} {
-		if _, err := New(c, "x", &fakeBackend{}, nil, hclog.NewNullLogger()); err == nil {
+		if _, err := New(t.Context(), c, &fakeBackend{defaultClass: "x"}, nil, hclog.NewNullLogger()); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
@@ -227,13 +249,13 @@ func TestDispatcherRetriesFailedRunner(t *testing.T) {
 	_ = os.WriteFile(tokenFile, []byte("test-token"), 0o600)
 
 	var starts atomic.Int32
-	start := func(context.Context, fleet.VM, string, func(string)) error {
+	start := func(context.Context, VM, string, func(string)) error {
 		starts.Add(1)
 		return fmt.Errorf("download failed")
 	}
-	backend := &fakeBackend{}
-	d, err := New(Config{Repos: []string{"o/r"}, TokenFile: tokenFile, PollInterval: fleet.Duration(5 * time.Millisecond), APIURL: srv.URL},
-		"2vcpu-1gb", backend, start, hclog.NewNullLogger())
+	backend := &fakeBackend{defaultClass: "2vcpu-1gb"}
+	d, err := New(t.Context(), Config{Repos: []string{"o/r"}, TokenFile: tokenFile, PollInterval: fleet.Duration(5 * time.Millisecond), APIURL: srv.URL},
+		backend, start, hclog.NewNullLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +280,7 @@ func TestDispatcherRetriesFailedRunner(t *testing.T) {
 func TestNewCacheURLGetsTrailingSlash(t *testing.T) {
 	tokenFile := filepath.Join(t.TempDir(), "token")
 	_ = os.WriteFile(tokenFile, []byte("x"), 0o600)
-	d, err := New(Config{Repos: []string{"o/r"}, TokenFile: tokenFile, CacheURL: "http://10.0.0.5:3000"}, "x", &fakeBackend{}, nil, hclog.NewNullLogger())
+	d, err := New(t.Context(), Config{Repos: []string{"o/r"}, TokenFile: tokenFile, CacheURL: "http://10.0.0.5:3000"}, &fakeBackend{defaultClass: "x"}, nil, hclog.NewNullLogger())
 	if err != nil {
 		t.Fatal(err)
 	}

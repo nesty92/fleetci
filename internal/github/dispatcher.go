@@ -13,6 +13,7 @@ package github
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -28,6 +29,8 @@ import (
 	"github.com/hashicorp/go-hclog"
 
 	"github.com/nesty92/fleetci/internal/fleet"
+	"github.com/nesty92/fleetci/internal/proxy"
+	"github.com/nesty92/fleetci/internal/source"
 )
 
 // Config is plugin_config's [github] table.
@@ -70,23 +73,49 @@ const DefaultRunnerVersion = "2.338.2"
 // has them.
 var genericLabels = []string{"self-hosted", "linux"}
 
-// Backend hands out one VM per job.
-type Backend interface {
-	Has(class string) bool
-	Classes() []string
-	Create(ctx context.Context, class string) (fleet.VM, error)
-	Delete(ctx context.Context, id string) error
+// VM is a job's VM and how to reach it.
+type VM struct {
+	source.VM
+	// Connect returns the VM's connection details.
+	Connect func(ctx context.Context) (proxy.Target, error)
 }
 
 // StartFunc runs a just-in-time runner on the VM and returns when it exits.
 // It calls took with the name of the job GitHub gives the runner: any
 // queued job with matching labels, not always the one it was started for.
-type StartFunc func(ctx context.Context, vm fleet.VM, jitConfig string, took func(job string)) error
+type StartFunc func(ctx context.Context, vm VM, jitConfig string, took func(job string)) error
+
+// Source is the GitHub job source: Init builds the dispatcher, Run runs it.
+type Source struct{ d *Dispatcher }
+
+var _ source.Source = (*Source)(nil)
+
+// Init reads the [github] table, as JSON, and builds the dispatcher over
+// capacity.
+func (s *Source) Init(ctx context.Context, config []byte, capacity source.Capacity, log hclog.Logger) error {
+	var c Config
+	if err := json.Unmarshal(config, &c); err != nil {
+		return fmt.Errorf("github: config: %w", err)
+	}
+	d, err := New(ctx, c, capacity, nil, log)
+	if err != nil {
+		return err
+	}
+	s.d = d
+	return nil
+}
+
+// Run serves jobs until ctx ends.
+func (s *Source) Run(ctx context.Context) error {
+	s.d.Run(ctx)
+	return nil
+}
 
 type Dispatcher struct {
 	cfg          Config
 	defaultClass string
-	backend      Backend
+	classes      []string
+	capacity     source.Capacity
 	start        StartFunc
 	gh           *client
 	log          hclog.Logger
@@ -99,7 +128,11 @@ type Dispatcher struct {
 
 // New checks the config and reads the token. Runners are started with
 // SSHStart unless start is set.
-func New(cfg Config, defaultClass string, backend Backend, start StartFunc, log hclog.Logger) (*Dispatcher, error) {
+func New(ctx context.Context, cfg Config, capacity source.Capacity, start StartFunc, log hclog.Logger) (*Dispatcher, error) {
+	classes, defaultClass, err := capacity.Classes(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("github: classes: %w", err)
+	}
 	token, err := cfg.token()
 	if err != nil {
 		return nil, err
@@ -138,7 +171,8 @@ func New(cfg Config, defaultClass string, backend Backend, start StartFunc, log 
 	return &Dispatcher{
 		cfg:          cfg,
 		defaultClass: defaultClass,
-		backend:      backend,
+		classes:      source.Names(classes),
+		capacity:     capacity,
 		start:        start,
 		gh:           newClient(cfg.APIURL, token),
 		log:          log,
@@ -257,8 +291,8 @@ func (d *Dispatcher) classFor(repo string, j job) (string, bool) {
 	}
 
 	var problem string
-	if !d.backend.Has(class) {
-		problem = fmt.Sprintf("no class %q; classes are %s", class, strings.Join(d.backend.Classes(), ", "))
+	if !slices.Contains(d.classes, class) {
+		problem = fmt.Sprintf("no class %q; classes are %s", class, strings.Join(d.classes, ", "))
 	}
 	for _, l := range j.Labels {
 		l = strings.ToLower(l)
@@ -363,7 +397,7 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 	log := d.log.With("repo", repo, "queued_job", j.Name, "queued_job_id", strconv.FormatInt(j.ID, 10), "class", class)
 	start := time.Now()
 
-	vm, err := d.backend.Create(ctx, class)
+	created, err := d.capacity.Create(ctx, class)
 	if err != nil {
 		if ctx.Err() == nil {
 			log.Error("no vm for job; retrying on the next poll", "err", err)
@@ -372,8 +406,9 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 		return
 	}
 	defer func() {
-		_ = d.backend.Delete(context.WithoutCancel(ctx), vm.ID)
+		_ = d.capacity.Delete(context.WithoutCancel(ctx), created.ID)
 	}()
+	vm := VM{VM: created, Connect: func(ctx context.Context) (proxy.Target, error) { return d.capacity.Connect(ctx, created.ID) }}
 	log = log.With("vm", vm.ID, "instance", vm.Instance)
 
 	labels := runnerLabels(j.Labels)

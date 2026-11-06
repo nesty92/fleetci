@@ -24,6 +24,7 @@ import (
 	"github.com/nesty92/fleetci/internal/gateway"
 	"github.com/nesty92/fleetci/internal/github"
 	"github.com/nesty92/fleetci/internal/gitlab"
+	"github.com/nesty92/fleetci/internal/source"
 )
 
 const (
@@ -117,7 +118,7 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 
 	var gh *github.Dispatcher
 	if g.GitHub != nil {
-		gh, err = github.New(*g.GitHub, g.DefaultClass, backend, nil, log.Named("github"))
+		gh, err = github.New(ctx, *g.GitHub, source.NewCapacity(backend, g.Classes, g.DefaultClass), nil, log.Named("github"))
 		if err != nil {
 			return provider.ProviderInfo{}, err
 		}
