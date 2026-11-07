@@ -7,7 +7,7 @@ this repo.
 ## small
 
 For [fleetingd](https://github.com/nesty92/fleeting-plugin-fleetingd), amd64
-and arm64: Ubuntu's daily cloud image (the one fleetingd builds on) with
+(arm64 once a GitHub runner for it has `/dev/kvm`): Ubuntu's daily cloud image (the one fleetingd builds on) with
 what fleetci needs and little else.
 
 - Docker with buildx, the `ubuntu` user in the `docker` group;

@@ -1,7 +1,7 @@
 name: VM images
 
 # Builds the small VM image of images/ for fleetingd on GitHub's runners,
-# for amd64 and arm64: Ubuntu's daily cloud image, Docker, git, zstd and
+# for amd64: Ubuntu's daily cloud image, Docker, git, zstd and
 # actions/runner unpacked in ~/actions-runner-<version>. Each build is a
 # release of its own (vm-image-small-<date>); the release vm-image-small
 # holds one SHA256SUMS per architecture naming the newest, which is what
@@ -64,9 +64,8 @@ jobs:
           - arch: amd64
             os: ubuntu-24.04
             ch: cloud-hypervisor-static
-          - arch: arm64
-            os: ubuntu-24.04-arm
-            ch: cloud-hypervisor-static-aarch64
+          # arm64 waits for a runner with /dev/kvm: GitHub's arm64 ones
+          # have none, and Cloud Hypervisor needs it.
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
@@ -88,6 +87,9 @@ jobs:
           sudo curl -fsSL -o /usr/local/bin/cloud-hypervisor \
             "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v$CH_VERSION/${{ matrix.ch }}"
           sudo chmod 755 /usr/local/bin/cloud-hypervisor
+          # The release workflow bundles these; build-image doesn't need them.
+          cp fleetingd/LICENSE fleetingd/cmd/fleeting-plugin-fleetingd/
+          echo "fleeting-plugin-fleetingd $FLEETINGD_REF" > fleetingd/cmd/fleeting-plugin-fleetingd/NOTICE
           (cd fleetingd && CGO_ENABLED=0 go build -o "$RUNNER_TEMP/fleeting-plugin-fleetingd" ./cmd/fleeting-plugin-fleetingd)
       - name: Build
         env:
