@@ -37,7 +37,14 @@ idle_time = "20m"
 
 [github]
 repos = ["owner/name"]
+orgs = ["acme"]
 token_file = "github.token"
+
+[github.webhook]
+listen = ":9480"
+secret_file = "webhook.secret"
+tls_cert_file = "/etc/tls/cert.pem"
+tls_key_file = "tls/key.pem"
 `
 
 func writeFile(t *testing.T, content string) string {
@@ -81,6 +88,10 @@ func TestConfigFile(t *testing.T) {
 
 	if c.GitHub == nil || c.GitHub.Repos[0] != "owner/name" || c.GitHub.TokenFile != filepath.Join(dir, "github.token") {
 		t.Errorf("github: %+v", c.GitHub)
+	}
+	if w := c.GitHub.Webhook; w == nil || w.SecretFile != filepath.Join(dir, "webhook.secret") ||
+		w.TLSCertFile != "/etc/tls/cert.pem" || w.TLSKeyFile != filepath.Join(dir, "tls/key.pem") || c.GitHub.Orgs[0] != "acme" {
+		t.Errorf("github webhook: %+v", c.GitHub.Webhook)
 	}
 }
 

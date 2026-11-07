@@ -90,6 +90,54 @@ A job asking for a class fleetci lacks, or for other labels besides
 carry actions/runner in `~/actions-runner-<version>` (the images of [hack/local](hack/local) do); otherwise
 it is downloaded for each job.
 
+### A whole organization
+
+`orgs = ["acme"]` serves every repo of an organization, new ones included,
+with runners registered on the org in `runner_group_id` (the org's default
+group unless set; the group must allow the repos, and public ones only if
+it allows public repos). A repo of a served org gets org runners even when
+`repos` lists it too.
+
+The token then needs *Self-hosted runners: Read and write* on the org, and
+*Actions: Read* on its repos. Or sign in as a GitHub App instead of a
+token: its tokens belong to no person, are renewed by fleetci every hour,
+and each org it is installed on has its own rate limit.
+
+```toml
+[github]
+orgs = ["acme"]
+app_id = 123456
+app_private_key_file = "github-app.pem"   # the key generated on the App's page
+```
+
+The App needs the same permissions (*Self-hosted runners*, *Actions: Read*,
+and *Administration: Read and write* for repos listed in `repos`), and to
+be installed on each org or repo.
+
+### Webhooks
+
+Without them fleetci finds jobs by listing each repo's queued runs every
+10 seconds: at least two API calls per repo each time, so a token's 5,000
+calls an hour last about seven idle repos, and an org's repos are listed
+every 10 minutes to be polled too. With `[github.webhook]`, GitHub tells
+fleetci when a job is queued, and it gets a VM at once:
+
+```toml
+[github.webhook]
+listen = ":9480"
+path = "/github"                 # default "/"
+secret_file = "webhook.secret"   # the secret set on the webhook
+# tls_cert_file, tls_key_file    # HTTPS; otherwise put it behind a proxy
+```
+
+Point a webhook at it, on the org, the repos or the App, sending
+*Workflow jobs* events as `application/json`, with the same secret. fleetci
+checks each delivery's signature and refuses the rest. Polling goes on
+every 5 minutes (`poll_interval`) for the repos listed in `repos` and those
+a delivery came from in the last day, so a delivery GitHub drops is served
+late, not never. A job whose runner failed or took another job is looked at
+again on its own.
+
 ### Without gitlab-runner
 
 `fleetci serve -config fleetci.toml` runs the GitHub side as a process of its
@@ -183,7 +231,7 @@ fleetci runner-config -token-file /etc/fleetci/runner.token >> /etc/gitlab-runne
 
 **6. GitHub Actions (optional):** a fine-grained token for the repos, with
 *Actions: Read* and *Administration: Read and write*, in a file named by
-`[github] token_file`.
+`[github] token_file`; for a whole org, see [A whole organization](#a-whole-organization).
 
 **7. Check everything**, then start gitlab-runner:
 
@@ -213,7 +261,8 @@ each:
   no two classes share a group;
 - the host's budget, for the classes on this machine (see
   [Sharing this machine's CPUs and memory](#sharing-this-machines-cpus-and-memory));
-- the GitHub token can list each repo's jobs and runners;
+- the GitHub token or App can list each repo's jobs and runners, and each
+  org's repos and runners; the webhook's secret and certificate load;
 - `config.toml` has fleetci's entry, naming each missing or wrong setting
   with the line to write.
 

@@ -190,7 +190,7 @@ ok    class 1vcpu-2gb                  plugin /usr/bin/fleeting-plugin-aws works
 ok    class 2vcpu-4gb                  plugin /usr/bin/fleeting-plugin-aws works; group gitlab-runner-amd64-asg has 0 instances
 ok    class 8vcpu-16gb                 plugin /usr/bin/fleeting-plugin-aws works; group gitlab-runner-amd64-8vcpu-16gb-asg has 0 instances
 ok    gitlab ci                        public template: 3 of its classes are here (1vcpu-2gb, 2vcpu-4gb, 8vcpu-16gb)
-ok    github owner/api                 token can list jobs and runners
+ok    github repo owner/api            can list jobs and runners
 ok    config.toml                      /etc/gitlab-runner/config.toml: fleetci's [[runners]] entry is complete
 ```
 

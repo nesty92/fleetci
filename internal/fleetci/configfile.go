@@ -67,8 +67,14 @@ func (c *Config) loadFile() error {
 		}
 		f.Classes[name] = class
 	}
-	if f.GitHub != nil && f.GitHub.TokenFile != "" {
-		f.GitHub.TokenFile = relativeTo(dir, f.GitHub.TokenFile)
+	if g := f.GitHub; g != nil {
+		g.TokenFile = relativeTo(dir, g.TokenFile)
+		g.AppPrivateKeyFile = relativeTo(dir, g.AppPrivateKeyFile)
+		if w := g.Webhook; w != nil {
+			w.SecretFile = relativeTo(dir, w.SecretFile)
+			w.TLSCertFile = relativeTo(dir, w.TLSCertFile)
+			w.TLSKeyFile = relativeTo(dir, w.TLSKeyFile)
+		}
 	}
 
 	if f.GitLab != nil {

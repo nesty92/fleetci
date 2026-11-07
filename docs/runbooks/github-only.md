@@ -36,6 +36,8 @@ for your own server, `overflow` included.
 
 A fine-grained token for the repos with *Actions: Read* and
 *Administration: Read and write*, in `/etc/fleetci/github.token`, mode 0600.
+For a whole organization, `orgs` and a GitHub App instead: see
+[A whole organization](../../README.md#a-whole-organization).
 
 ## 3. github.toml
 
@@ -61,6 +63,8 @@ token_file = "/etc/fleetci/github.token"
 ```
 
 The other `[github]` keys are in [GitLab and GitHub](gitlab-and-github.md#3-fleetcitoml).
+With more than a few repos, add [webhooks](../../README.md#webhooks): jobs
+start sooner and polling no longer uses up the token's rate limit.
 When it runs beside a gitlab-runner with fleetci, this file's groups must
 be different ones (other Auto Scaling groups, other fleetingd `name`s), and
 only this file has `[github]`.
@@ -114,6 +118,7 @@ runner done          …
 | A job never starts | the log says why: an unknown class, an extra label, or no VM yet. It stays queued and is tried again. |
 | `serve` crashes | systemd starts it within 2 s; jobs on its VMs fail, queued ones are picked up again. |
 | A VM is lost mid-job | GitHub shows the job "in progress" for about 4 minutes, then fails it; re-run it. |
-| Token expires | `fleetci check` fails on the GitHub line and the log shows 401s. Replace the file and restart: the token is read at start. |
+| Token expires | `fleetci check` fails on the GitHub line and the log shows 401s. Replace the file and restart: the token is read at start. A GitHub App's tokens don't expire this way. |
+| Webhook deliveries fail | the webhook's *Recent Deliveries* on GitHub shows the answer: 401 is a secret that differs from `secret_file`. Jobs are still served by the 5-minute poll; redeliver from there to serve them now. |
 | Upgrade | replace the binary, `fleetci check`, `systemctl restart fleetci-serve`. Running jobs fail, so do it while quiet. |
 | Two `serve`s on the same repos | don't: each starts a runner for the same queued job, and one VM is wasted. One `serve` per set of repos. |

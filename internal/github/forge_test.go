@@ -2,6 +2,10 @@ package github
 
 import (
 	"context"
+	"crypto"
+	"crypto/rsa"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -42,6 +46,14 @@ type forge struct {
 	// fault, when set, may answer a request itself, and says so. It is
 	// called for every request, without mu held.
 	fault func(w http.ResponseWriter, r *http.Request) bool
+
+	scopes   []string // where each runner was registered
+	orgRepos []map[string]any
+	// app, when set, is the GitHub App's public key: its JWT mints
+	// installation tokens, which expire after tokenLife.
+	app       *rsa.PublicKey
+	tokenLife time.Duration
+	mints     int
 }
 
 type request struct {
@@ -54,6 +66,10 @@ func newForge(t *testing.T, jobs ...job) *forge {
 }
 
 func (f *forge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if f.app != nil && (strings.HasPrefix(r.URL.Path, "/app/") || strings.HasSuffix(r.URL.Path, "/installation")) {
+		f.appRoute(w, r)
+		return
+	}
 	if r.Header.Get("Authorization") != "Bearer test-token" {
 		http.Error(w, "bad token", http.StatusUnauthorized)
 		return
@@ -71,9 +87,23 @@ func (f *forge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (f *forge) route(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	const runners = "/repos/o/r/actions/runners"
+	runners := "/repos/o/r/actions/runners"
 	path := r.URL.Path
+	if strings.HasPrefix(path, "/orgs/o/actions/runners") {
+		runners = "/orgs/o/actions/runners"
+	}
 	switch {
+	case r.Method == http.MethodGet && path == "/orgs/o/repos":
+		writeJSON(w, f.orgRepos)
+	case r.Method == http.MethodGet && strings.HasPrefix(path, "/repos/o/r/actions/jobs/"):
+		id, _ := strconv.ParseInt(strings.TrimPrefix(path, "/repos/o/r/actions/jobs/"), 10, 64)
+		for _, j := range f.queued {
+			if j.ID == id {
+				writeJSON(w, j)
+				return
+			}
+		}
+		writeJSON(w, job{ID: id, Status: "completed"})
 	case r.Method == http.MethodGet && path == "/repos/o/r/actions/runs":
 		var runs []map[string]int64
 		if r.URL.Query().Get("status") == "queued" {
@@ -111,6 +141,7 @@ func (f *forge) route(w http.ResponseWriter, r *http.Request) {
 		}
 		f.nextID++
 		f.runners[f.nextID] = body.Name
+		f.scopes = append(f.scopes, strings.TrimSuffix(runners, "/actions/runners"))
 		writeJSON(w, map[string]any{"runner": map[string]int64{"id": f.nextID}, "encoded_jit_config": fmt.Sprintf("jit-%d", f.nextID)})
 	case r.Method == http.MethodGet && path == runners:
 		var list []map[string]any
@@ -139,6 +170,60 @@ func (f *forge) route(w http.ResponseWriter, r *http.Request) {
 		f.t.Errorf("unexpected %s %s", r.Method, r.URL)
 		http.NotFound(w, r)
 	}
+}
+
+// appRoute answers as GitHub does a GitHub App with a valid JWT: its
+// installation on org o, and installation tokens.
+func (f *forge) appRoute(w http.ResponseWriter, r *http.Request) {
+	jwt, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if err := verifyJWT(jwt, f.app); err != nil {
+		http.Error(w, `{"message":"`+err.Error()+`"}`, http.StatusUnauthorized)
+		return
+	}
+	switch {
+	case r.Method == http.MethodGet && r.URL.Path == "/orgs/o/installation":
+		writeJSON(w, map[string]any{"id": 42})
+	case r.Method == http.MethodPost && r.URL.Path == "/app/installations/42/access_tokens":
+		f.mu.Lock()
+		f.mints++
+		f.mu.Unlock()
+		writeJSON(w, map[string]any{"token": "test-token", "expires_at": time.Now().Add(f.tokenLife).UTC().Format(time.RFC3339)})
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+// verifyJWT checks an App's RS256 JWT as GitHub would: signature, issuer,
+// and a lifetime of at most ten minutes that covers now.
+func verifyJWT(tok string, pub *rsa.PublicKey) error {
+	parts := strings.Split(tok, ".")
+	if len(parts) != 3 {
+		return errors.New("not a jwt")
+	}
+	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		return err
+	}
+	sum := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
+	if err := rsa.VerifyPKCS1v15(pub, crypto.SHA256, sum[:], sig); err != nil {
+		return errors.New("bad signature")
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return err
+	}
+	var c struct {
+		Iat, Exp int64
+		Iss      string
+	}
+	if err := json.Unmarshal(raw, &c); err != nil {
+		return err
+	}
+	now := time.Now().Unix()
+	if c.Iss != "7" || c.Iat > now || c.Exp < now || c.Exp-c.Iat > 600 {
+		return fmt.Errorf("bad claims %+v", c)
+	}
+	return nil
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -222,14 +307,21 @@ func (f *forge) requestsBetween(from, to time.Time) int {
 // retry, until the returned stop is called.
 func dispatch(t *testing.T, f *forge, url string, backend source.Capacity) (d *Dispatcher, stop func()) {
 	t.Helper()
+	return dispatchWith(t, f, url, backend, func(*Config) {})
+}
+
+// dispatchWith is dispatch with the config changed by edit first.
+func dispatchWith(t *testing.T, f *forge, url string, backend source.Capacity, edit func(*Config)) (d *Dispatcher, stop func()) {
+	t.Helper()
 	pause := retryPause
 	retryPause = 10 * time.Millisecond
 	tokenFile := filepath.Join(t.TempDir(), "token")
 	if err := os.WriteFile(tokenFile, []byte("test-token"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	d, err := New(t.Context(), Config{Repos: []string{"o/r"}, TokenFile: tokenFile, PollInterval: fleet.Duration(5 * time.Millisecond), APIURL: url},
-		backend, f.start, failureLog(t))
+	cfg := Config{Repos: []string{"o/r"}, TokenFile: tokenFile, PollInterval: fleet.Duration(5 * time.Millisecond), APIURL: url}
+	edit(&cfg)
+	d, err := New(t.Context(), cfg, backend, f.start, failureLog(t))
 	if err != nil {
 		t.Fatal(err)
 	}
