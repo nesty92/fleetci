@@ -92,6 +92,7 @@ jobs:
           echo "fleeting-plugin-fleetingd $FLEETINGD_REF" > fleetingd/cmd/fleeting-plugin-fleetingd/NOTICE
           (cd fleetingd && CGO_ENABLED=0 go build -o "$RUNNER_TEMP/fleeting-plugin-fleetingd" ./cmd/fleeting-plugin-fleetingd)
       - name: Build
+        timeout-minutes: 25
         env:
           RUNNER_VERSION: ${{ needs.plan.outputs.runner }}
         run: |
@@ -106,6 +107,11 @@ jobs:
           ls -la out
           size=$(stat -c %s out/small-${{ matrix.arch }}.qcow2)
           [ "$size" -lt 2000000000 ] || { echo "::error::image is $size bytes, over a release asset's 2 GiB"; exit 1; }
+      - name: The build VM's console
+        if: failure()
+        run: |
+          ip -o addr; ip route; sudo nft list ruleset | head -60
+          sudo sh -c 'tail -c 30000 "$0"/build/vms/.instance_data/*_console' "$RUNNER_TEMP" | tr -d '\r'
       - name: Check
         run: sudo images/verify.sh out/small-${{ matrix.arch }}.qcow2 ${{ needs.plan.outputs.runner }} | tee out/small-${{ matrix.arch }}.manifest
       - uses: actions/upload-artifact@v7
