@@ -124,6 +124,8 @@ vm acquired       vm=fleetci-4vcpu-8gb-… class=4vcpu-8gb      (the GitLab job)
 | What | How |
 | --- | --- |
 | A GitHub job never starts | the log says why: an unknown class, an extra label, or no VM ("no vm for job; retrying on the next poll"). It stays queued and is tried again. |
+| GitHub rate-limits the token | the log says "rate limited by github until …". fleetci sends nothing until then, as GitHub asks, and starts no VM; jobs wait. A token shared with other tools spends the same limit. |
+| Runners left registered | when GitHub fails to answer a runner's registration or removal, fleetci looks the runner up by its name (the VM's) and removes it on a later poll ("removed an orphaned runner"). It keeps trying for a day. |
 | A VM is lost during a GitHub job | the job stays "in progress" on GitHub for about 4 minutes, then fails. GitHub never queues it again; re-run it. |
 | gitlab-runner restarts | GitHub jobs running on its VMs fail with it, like GitLab's. To keep GitHub apart, move `[github]` to a `fleetci serve` with classes of its own ([GitHub only](github-only.md)). |
 | Token expires | `fleetci check` fails on the GitHub line, and the log shows 401s. Replace the file and restart gitlab-runner: the token is read at start. |

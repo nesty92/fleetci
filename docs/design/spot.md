@@ -186,6 +186,14 @@ deadline, no notice made up, no truncated output reported as success, the
 host reachable again once the network is, and nothing left open after
 close.
 
+The GitHub dispatcher gets the same treatment from the other side: a fake
+GitHub that keeps state as GitHub does (queued jobs, registered runners, a
+runner taking any job with its labels) sits behind the proxy and answers
+some requests with 502, a rate limit, an answer lost after it acted, a late
+answer or one cut halfway. Once things are good again every job must have
+run once, no runner be left registered, and every VM be released. It found
+that a runner taking another job's place left that job unserved for good.
+
 `go test` runs the written plans and four random ones each time; `go test
 -fuzz FuzzReclaimWatchUnderChaos ./internal/fleet/` searches longer. A
 failure prints the scenario, each fault with when it struck, and the
