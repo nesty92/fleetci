@@ -13,9 +13,11 @@ import (
 	"github.com/nesty92/fleetci/internal/proxy"
 )
 
-// runScript installs actions/runner on first use and runs it with the
-// just-in-time config read from stdin, which keeps it out of the SSH
-// command line. The runner takes one job and exits.
+// runScript runs actions/runner with the just-in-time config read from
+// stdin, which keeps it out of the SSH command line. The runner takes one
+// job and exits. It is the version asked for (%[1]s), or with none the
+// newest in the image's ~/actions-runner-<version>, or else %[3]s;
+// one the image lacks is downloaded.
 const runScript = `set -eu
 read -r jit
 case $(uname -m) in
@@ -23,10 +25,17 @@ case $(uname -m) in
   aarch64|arm64) arch=arm64 ;;
   *) echo "unsupported architecture $(uname -m)" >&2; exit 1 ;;
 esac
-dir=$HOME/actions-runner-%[1]s
+version='%[1]s'
+if [ -z "$version" ]; then
+  version=$(for d in "$HOME"/actions-runner-*; do
+    if [ -x "$d/run.sh" ]; then echo "${d##*/actions-runner-}"; fi
+  done | sort -V | tail -n 1)
+  [ -n "$version" ] || version='%[3]s'
+fi
+dir=$HOME/actions-runner-$version
 if [ ! -x "$dir/run.sh" ]; then
   mkdir -p "$dir"
-  curl -fsSL "https://github.com/actions/runner/releases/download/v%[1]s/actions-runner-linux-$arch-%[1]s.tar.gz" | tar -xz -C "$dir"
+  curl -fsSL "https://github.com/actions/runner/releases/download/v$version/actions-runner-linux-$arch-$version.tar.gz" | tar -xz -C "$dir"
 fi
 cd "$dir"
 cache='%[2]s'
@@ -44,7 +53,8 @@ fi
 exec ./run.sh --jitconfig "$jit"
 `
 
-// SSHStart runs the runner on the VM over SSH and logs its output.
+// SSHStart runs the runner on the VM over SSH and logs its output. An
+// empty version is the newest in the image, or DefaultRunnerVersion.
 // With cacheURL set, jobs use that cache server instead of GitHub's.
 func SSHStart(version, cacheURL string, log hclog.Logger) StartFunc {
 	return func(ctx context.Context, vm VM, jit string, took func(job string)) error {
@@ -68,7 +78,7 @@ func SSHStart(version, cacheURL string, log hclog.Logger) StartFunc {
 		s.Stdin = strings.NewReader(jit + "\n")
 		s.Stdout = out
 		s.Stderr = out
-		if err := s.Run(fmt.Sprintf(runScript, version, cacheURL)); err != nil {
+		if err := s.Run(fmt.Sprintf(runScript, version, cacheURL, DefaultRunnerVersion)); err != nil {
 			select {
 			case <-lost:
 				if ctx.Err() == nil {

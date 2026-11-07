@@ -87,8 +87,9 @@ Docker. GitLab jobs always run in a container on the VM.
 
 A job asking for a class fleetci lacks, or for other labels besides
 `self-hosted` and `linux`, stays queued and is logged. The VM image should
-carry actions/runner in `~/actions-runner-<version>` (the images of [hack/local](hack/local) do); otherwise
-it is downloaded for each job.
+carry actions/runner in `~/actions-runner-<version>` (the images of [hack/local](hack/local) and the
+[small image](images) do); otherwise it is downloaded for each job. Without
+`runner_version`, fleetci runs the newest runner the image has.
 
 ### A whole organization
 
@@ -209,6 +210,9 @@ its fleeting plugin asks (for AWS: min and desired 0, scale-in protection,
   `connector_config.username`);
 - for GitHub Actions jobs, libicu and ideally actions/runner unpacked in
   `~/actions-runner-<version>`.
+
+For fleetingd, the [small image](images) has all of this, rebuilt weekly
+and on each actions/runner release.
 
 fleetci waits for cloud-init to finish and for Docker to answer before it
 hands a VM to a job. [hack/aws](hack/aws) has a working launch template and

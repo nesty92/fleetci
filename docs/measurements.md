@@ -132,3 +132,19 @@ The embedded loop acquired and released 26 VMs and left none. gitlab-runner
 registers its cache adapters and secret resolvers in its own main package;
 until fleetci imported them, `[runners.cache]` was ignored ("No URL
 provided").
+
+## The small VM image
+
+[images/small.json](../images/small.json) built locally with fleetingd's
+`build-image` (Cloud Hypervisor 54.0, 2 vCPU, amd64), then used through
+`vm_image_url` from an HTTP server on the same machine, for the playground
+org's `basic` workflow (two jobs, 1vcpu-2gb).
+
+| | |
+| --- | --- |
+| build, cloud image already downloaded | 3 min |
+| image, compressed qcow2 | 2.17 GB with gitlab-runner's helper images, 1.45 GB without them and trimmed |
+| image, decompressed on the host | 5.4 GB |
+| download, check and decompress on start (local network) | 3.4 s |
+| snapshot from the downloaded image | 14 s |
+| dispatch to both jobs done | 35 s; the runners started 23 s after dispatch and ran 11 s, no runner downloaded |

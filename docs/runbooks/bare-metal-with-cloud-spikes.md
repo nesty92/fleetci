@@ -232,6 +232,10 @@ repos = ["owner/name"]
 token_file = "/etc/fleetci/github.token"
 ```
 
+In place of the commands, `vm_image_url` can name fleetci's [small
+image](../../images), which holds the same software and is rebuilt weekly:
+nothing is built on the server, and a new image is downloaded on start.
+
 Both classes share the server's CPUs and memory. fleetci detects them at
 start and keeps 1 CPU and a tenth of the memory for the host, then gives a
 job a VM only while its size still fits, so `max_instances` (8 and 6 here)

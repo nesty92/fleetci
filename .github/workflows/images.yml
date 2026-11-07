@@ -1,0 +1,162 @@
+name: VM images
+
+# Builds the small VM image of images/ for fleetingd on GitHub's runners,
+# for amd64 and arm64: Ubuntu's daily cloud image, Docker, git, zstd and
+# actions/runner unpacked in ~/actions-runner-<version>. Each build is a
+# release of its own (vm-image-small-<date>); the release vm-image-small
+# holds one SHA256SUMS per architecture naming the newest, which is what
+# fleetingd's vm_image_url points at.
+#
+# Rebuilt every Monday, and on other days when actions/runner has a new
+# release. A push that changes images/ builds and checks without publishing.
+on:
+  schedule:
+    - cron: "17 4 * * 1" # weekly
+    - cron: "47 5 * * *" # daily, only for a new actions/runner
+  workflow_dispatch:
+  push:
+    paths:
+      - images/**
+      - .github/workflows/images.yml
+
+permissions:
+  contents: read
+
+env:
+  # fleetingd with build-image, and Cloud Hypervisor.
+  FLEETINGD_REF: 168c15c23404266b60157900a2900dd79cb057cc # feat/published-images
+  CH_VERSION: "54.0"
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      runner: ${{ steps.plan.outputs.runner }}
+      build: ${{ steps.plan.outputs.build }}
+      publish: ${{ steps.plan.outputs.publish }}
+    steps:
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          runner=$(gh release view -R actions/runner --json tagName --jq .tagName | sed 's/^v//')
+          published=$(gh release view vm-image-small -R "$GITHUB_REPOSITORY" --json body --jq .body 2>/dev/null | sed -n 's/^runner=//p' || true)
+          build=true
+          if [ "$GITHUB_EVENT_NAME" = schedule ] && [ "${{ github.event.schedule }}" = "47 5 * * *" ] && [ "$runner" = "$published" ]; then
+            build=false
+          fi
+          publish=false
+          if [ "$GITHUB_EVENT_NAME" != push ] && [ "$GITHUB_REF" = refs/heads/main ]; then
+            publish=true
+          fi
+          echo "actions/runner $runner, published image has ${published:-none}: build=$build publish=$publish"
+          echo "runner=$runner" >> "$GITHUB_OUTPUT"
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            os: ubuntu-24.04
+            ch: cloud-hypervisor-static
+          - arch: arm64
+            os: ubuntu-24.04-arm
+            ch: cloud-hypervisor-static-aarch64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@v7.0.1
+        with:
+          repository: nesty92/fleeting-plugin-fleetingd
+          ref: ${{ env.FLEETINGD_REF }}
+          path: fleetingd
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: fleetingd/go.mod
+          cache: false
+      - name: Tools
+        run: |
+          test -e /dev/kvm || { echo "::error::no /dev/kvm on this runner"; exit 1; }
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-utils nftables
+          sudo curl -fsSL -o /usr/local/bin/cloud-hypervisor \
+            "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v$CH_VERSION/${{ matrix.ch }}"
+          sudo chmod 755 /usr/local/bin/cloud-hypervisor
+          (cd fleetingd && CGO_ENABLED=0 go build -o "$RUNNER_TEMP/fleeting-plugin-fleetingd" ./cmd/fleeting-plugin-fleetingd)
+      - name: Build
+        env:
+          RUNNER_VERSION: ${{ needs.plan.outputs.runner }}
+        run: |
+          dir=$RUNNER_TEMP/build
+          mkdir -p "$dir"
+          sed -e "s|@DIR@|$dir|g" -e "s|@RUNNER_VERSION@|$RUNNER_VERSION|g" \
+            -e "s|\"egress_interface\": \"eth0\"|\"egress_interface\": \"$(ip -o route get 1.1.1.1 | sed -n 's/.* dev \([^ ]*\).*/\1/p')\"|" \
+            images/small.json > "$dir/small.json"
+          sudo "$RUNNER_TEMP/fleeting-plugin-fleetingd" build-image -config "$dir/small.json" -out out -name small
+          sudo chown -R "$(id -u)" out
+          mv out/SHA256SUMS out/small-${{ matrix.arch }}.SHA256SUMS
+          ls -la out
+          size=$(stat -c %s out/small-${{ matrix.arch }}.qcow2)
+          [ "$size" -lt 2000000000 ] || { echo "::error::image is $size bytes, over a release asset's 2 GiB"; exit 1; }
+      - name: Check
+        run: sudo images/verify.sh out/small-${{ matrix.arch }}.qcow2 ${{ needs.plan.outputs.runner }} | tee out/small-${{ matrix.arch }}.manifest
+      - uses: actions/upload-artifact@v7
+        with:
+          name: small-${{ matrix.arch }}
+          path: out/
+          retention-days: 3
+          if-no-files-found: error
+
+  publish:
+    needs: [plan, build]
+    if: needs.plan.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          path: out
+          merge-multiple: true
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          RUNNER_VERSION: ${{ needs.plan.outputs.runner }}
+        run: |
+          set -eu
+          cd out
+          tag=vm-image-small-$(date -u +%Y%m%d)-$GITHUB_RUN_NUMBER
+          base=https://github.com/$GITHUB_REPOSITORY/releases/download
+          {
+            echo "The small VM image for fleetingd, built from Ubuntu's daily cloud image."
+            echo "Point vm_image_url at $base/vm-image-small/small-{arch}.SHA256SUMS for the newest,"
+            echo "or at $base/$tag/small-{arch}.SHA256SUMS to stay on this one."
+            echo
+            echo '```'
+            sed -n '/^--- manifest/,$p' small-amd64.manifest | tail -n +2
+            echo '```'
+          } > notes.md
+          ls -la
+          gh release create "$tag" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest=false \
+            --title "VM image small, $(date -u +%F)" --notes-file notes.md \
+            small-*.qcow2 small-*.vmlinuz small-*.SHA256SUMS
+          # The newest: the same sums, with the dated release's URLs.
+          mkdir latest
+          for f in small-*.SHA256SUMS; do
+            sed "s| \*| $base/$tag/|" "$f" > "latest/$f"
+          done
+          if ! gh release view vm-image-small -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create vm-image-small -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest=false \
+              --title "VM image small, newest" --notes "runner=$RUNNER_VERSION"
+          fi
+          gh release upload vm-image-small -R "$GITHUB_REPOSITORY" --clobber latest/small-*.SHA256SUMS
+          gh release edit vm-image-small -R "$GITHUB_REPOSITORY" --notes "$(printf 'The newest small VM image: %s\n\nrunner=%s\n' "$tag" "$RUNNER_VERSION")"
+          # Keep the four newest dated images.
+          gh release list -R "$GITHUB_REPOSITORY" --limit 100 --json tagName --jq '.[].tagName' \
+            | grep '^vm-image-small-' | sort -r | tail -n +5 \
+            | xargs -r -n1 gh release delete -R "$GITHUB_REPOSITORY" --yes --cleanup-tag
