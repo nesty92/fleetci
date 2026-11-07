@@ -56,12 +56,17 @@ token_file = "/etc/fleetci/github.token"
 | Key | Default | |
 | --- | --- | --- |
 | `repos` | | `owner/name`, each repo whose jobs fleetci serves |
+| `orgs` | | organizations whose every repo fleetci serves, with runners on the org |
 | `token_file` | | the GitHub token |
+| `app_id`, `app_private_key_file` | | a GitHub App to sign in as, in place of `token_file` |
+| `webhook.listen`, `webhook.secret_file` | | take `workflow_job` deliveries, see the README |
+| `webhook.path` | `/` | the URL path deliveries arrive at |
+| `webhook.tls_cert_file`, `webhook.tls_key_file` | | serve the webhook over HTTPS |
 | `label_prefix` | `fleetci` | `runs-on: fleetci` is the default class, `fleetci-<class>` a class |
-| `poll_interval` | `10s` | how often queued jobs are listed |
+| `poll_interval` | `10s`, `5m` with a webhook | how often queued jobs are listed |
 | `idle_timeout` | `10m` | how long a runner may wait for a job (say its job was cancelled while the VM booted) before its VM is given back |
 | `runner_version` | `2.338.2` | the actions/runner release to run; images with it in `~/actions-runner-<version>` skip the download |
-| `runner_group_id` | `1` | the runner group to register in |
+| `runner_group_id` | `1` | the runner group to register in; for `orgs`, the group must allow the repos |
 | `cache_url` | | an Actions cache server, see the README |
 | `api_url` | `https://api.github.com` | GitHub Enterprise Server's API |
 
@@ -69,7 +74,7 @@ Then:
 
 ```sh
 fleetci runner-config -global -token-file /etc/fleetci/runner.token > /etc/gitlab-runner/config.toml
-fleetci check            # lists "github owner/api: token can list jobs and runners"
+fleetci check            # lists "github repo owner/api: can list jobs and runners"
 systemctl restart gitlab-runner
 ```
 

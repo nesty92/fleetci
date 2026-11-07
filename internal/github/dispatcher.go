@@ -13,12 +13,13 @@ package github
 import (
 	"cmp"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -35,16 +36,32 @@ import (
 
 // Config is plugin_config's [github] table.
 type Config struct {
-	// Repos are the repositories to serve, as "owner/name".
+	// Repos are the repositories to serve, as "owner/name". Their runners
+	// are registered on the repo.
 	Repos []string `json:"repos" toml:"repos"`
-	// TokenFile holds a token that may register runners on Repos: a
-	// fine-grained token with "Administration: write", or a classic one
-	// with "repo".
+	// Orgs are the organizations whose every repo is served, by runners
+	// registered on the org in RunnerGroupID. A repo of one of them is
+	// served this way even when Repos lists it too.
+	Orgs []string `json:"orgs" toml:"orgs"`
+	// TokenFile holds a token that may register runners: for Repos a
+	// fine-grained token with "Administration: write" (a classic one with
+	// "repo"), for Orgs "Self-hosted runners: write" on the org (classic:
+	// "admin:org"). Or authenticate as a GitHub App instead.
 	TokenFile string `json:"token_file" toml:"token_file"`
+	// AppID and AppPrivateKeyFile authenticate as a GitHub App, in place of
+	// TokenFile. The App is found installed on each owner, and its
+	// installation tokens are renewed as they expire.
+	AppID             int64  `json:"app_id" toml:"app_id"`
+	AppPrivateKeyFile string `json:"app_private_key_file" toml:"app_private_key_file"`
+	// Webhook, when set, takes workflow_job events, so a job gets a VM as
+	// soon as it is queued. Polling goes on, by default every 5m, for the
+	// events that never arrive.
+	Webhook *WebhookConfig `json:"webhook" toml:"webhook"`
 	// LabelPrefix starts the runs-on labels fleetci serves. Default
 	// "fleetci".
 	LabelPrefix string `json:"label_prefix" toml:"label_prefix"`
-	// PollInterval is how often queued jobs are listed. Default 10s.
+	// PollInterval is how often queued jobs are listed. Default 10s, or 5m
+	// with Webhook.
 	PollInterval fleet.Duration `json:"poll_interval" toml:"poll_interval"`
 	// IdleTimeout removes a runner that has not started a job by then, such
 	// as one whose job was cancelled while its VM booted. Default 10m.
@@ -63,6 +80,21 @@ type Config struct {
 	// region. The runner is patched on the VM to accept it; other
 	// requests (artifacts) the server passes on to GitHub.
 	CacheURL string `json:"cache_url" toml:"cache_url"`
+}
+
+// WebhookConfig is the [github.webhook] table: where GitHub delivers
+// workflow_job events.
+type WebhookConfig struct {
+	// Listen is the address to listen on, such as ":9480".
+	Listen string `json:"listen" toml:"listen"`
+	// Path is the URL path deliveries arrive at. Default "/".
+	Path string `json:"path" toml:"path"`
+	// SecretFile holds the webhook's secret, which signs each delivery.
+	SecretFile string `json:"secret_file" toml:"secret_file"`
+	// TLSCertFile and TLSKeyFile serve HTTPS; without them it is HTTP,
+	// for behind a proxy that terminates TLS.
+	TLSCertFile string `json:"tls_cert_file" toml:"tls_cert_file"`
+	TLSKeyFile  string `json:"tls_key_file" toml:"tls_key_file"`
 }
 
 // DefaultRunnerVersion is the actions/runner release used when the config
@@ -120,11 +152,21 @@ type Dispatcher struct {
 	start        StartFunc
 	gh           *client
 	log          hclog.Logger
+	secret       []byte          // the webhook's; nil without one
+	orgs         map[string]bool // lower case
+	repos        map[string]bool // lower case
+	listening    chan string     // the webhook's address, once it listens
 
-	mu     sync.Mutex
-	taken  map[int64]*attempt // jobs a runner was started for
-	warned map[int64]bool     // jobs already logged as unservable
-	wg     sync.WaitGroup
+	mu      sync.Mutex
+	taken   map[int64]*attempt   // jobs a runner was started for
+	warned  map[int64]bool       // jobs already logged as unservable
+	watched map[int64]string     // jobs a webhook said are queued → repo
+	active  map[string]time.Time // repos a webhook spoke of → when last
+	orgList map[string][]string  // org → its repos, as last listed
+	listed  time.Time            // when orgList was
+	runCtx  context.Context      // Run's, for the runners webhooks start
+	closing bool                 // Run is waiting for its runners: start no more
+	wg      sync.WaitGroup
 
 	orphans []orphan // runners to remove once GitHub lets us
 
@@ -137,10 +179,10 @@ type Dispatcher struct {
 // one GitHub may have registered without the answer reaching fleetci (by
 // name, the VM's id).
 type orphan struct {
-	repo string
-	id   int64
-	name string
-	at   time.Time
+	scope string // "/repos/owner/name" or "/orgs/name"
+	id    int64
+	name  string
+	at    time.Time
 }
 
 // orphanTTL is how long an orphan is tried before it is left to GitHub,
@@ -154,15 +196,30 @@ func New(ctx context.Context, cfg Config, capacity source.Capacity, start StartF
 	if err != nil {
 		return nil, fmt.Errorf("github: classes: %w", err)
 	}
-	token, err := cfg.token()
+	if cfg.APIURL == "" {
+		cfg.APIURL = "https://api.github.com"
+	}
+	hc := &http.Client{Timeout: 30 * time.Second}
+	tokens, err := cfg.auth(hc)
 	if err != nil {
 		return nil, err
+	}
+	var secret []byte
+	if w := cfg.Webhook; w != nil {
+		s, err := w.check()
+		if err != nil {
+			return nil, err
+		}
+		secret = []byte(s)
 	}
 	if cfg.LabelPrefix == "" {
 		cfg.LabelPrefix = "fleetci"
 	}
 	if cfg.PollInterval == 0 {
 		cfg.PollInterval = fleet.Duration(10 * time.Second)
+		if cfg.Webhook != nil {
+			cfg.PollInterval = fleet.Duration(5 * time.Minute)
+		}
 	}
 	if cfg.IdleTimeout == 0 {
 		cfg.IdleTimeout = fleet.Duration(10 * time.Minute)
@@ -172,9 +229,6 @@ func New(ctx context.Context, cfg Config, capacity source.Capacity, start StartF
 	}
 	if cfg.RunnerGroupID == 0 {
 		cfg.RunnerGroupID = 1
-	}
-	if cfg.APIURL == "" {
-		cfg.APIURL = "https://api.github.com"
 	}
 	if cfg.CacheURL != "" {
 		u, err := url.Parse(cfg.CacheURL)
@@ -189,55 +243,126 @@ func New(ctx context.Context, cfg Config, capacity source.Capacity, start StartF
 	if start == nil {
 		start = SSHStart(cfg.RunnerVersion, cfg.CacheURL, log)
 	}
-	return &Dispatcher{
+	d := &Dispatcher{
 		cfg:          cfg,
 		defaultClass: defaultClass,
 		classes:      source.Names(classes),
 		capacity:     capacity,
 		start:        start,
-		gh:           newClient(cfg.APIURL, token),
+		gh:           newClient(cfg.APIURL, tokens, hc),
 		log:          log,
+		secret:       secret,
+		orgs:         map[string]bool{},
+		repos:        map[string]bool{},
+		listening:    make(chan string, 1),
 		taken:        map[int64]*attempt{},
 		warned:       map[int64]bool{},
+		watched:      map[int64]string{},
+		active:       map[string]time.Time{},
 		settle:       time.Minute,
-	}, nil
+	}
+	for _, o := range cfg.Orgs {
+		d.orgs[strings.ToLower(o)] = true
+	}
+	for _, r := range cfg.Repos {
+		d.repos[strings.ToLower(r)] = true
+	}
+	return d, nil
 }
 
-// token checks the repos and reads the token file.
-func (cfg Config) token() (string, error) {
-	if len(cfg.Repos) == 0 {
-		return "", errors.New("github: repos is required")
+// auth checks what to serve and how to sign in to GitHub.
+func (cfg Config) auth(hc *http.Client) (tokens, error) {
+	if len(cfg.Repos) == 0 && len(cfg.Orgs) == 0 {
+		return nil, errors.New("github: repos or orgs is required")
 	}
 	for _, r := range cfg.Repos {
 		if owner, name, ok := strings.Cut(r, "/"); !ok || owner == "" || name == "" || strings.Contains(name, "/") {
-			return "", fmt.Errorf("github: repo %q must be owner/name", r)
+			return nil, fmt.Errorf("github: repo %q must be owner/name", r)
 		}
 	}
+	for _, o := range cfg.Orgs {
+		if o == "" || strings.Contains(o, "/") {
+			return nil, fmt.Errorf("github: org %q must be an org's name", o)
+		}
+	}
+	app := cfg.AppID != 0 || cfg.AppPrivateKeyFile != ""
+	switch {
+	case app && cfg.TokenFile != "":
+		return nil, errors.New("github: token_file or app_id, not both")
+	case app && (cfg.AppID == 0 || cfg.AppPrivateKeyFile == ""):
+		return nil, errors.New("github: app_id and app_private_key_file go together")
+	case app:
+		key, err := readSecret("app_private_key_file", cfg.AppPrivateKeyFile)
+		if err != nil {
+			return nil, err
+		}
+		t, err := newAppTokens(strings.TrimRight(cmp.Or(cfg.APIURL, "https://api.github.com"), "/"), cfg.AppID, []byte(key), hc)
+		if err != nil {
+			return nil, fmt.Errorf("github: app_private_key_file: %w", err)
+		}
+		return t, nil
+	}
 	if cfg.TokenFile == "" {
-		return "", errors.New("github: token_file is required")
+		return nil, errors.New("github: token_file, or app_id and app_private_key_file, is required")
 	}
-	raw, err := os.ReadFile(cfg.TokenFile)
+	tok, err := readSecret("token_file", cfg.TokenFile)
 	if err != nil {
-		return "", fmt.Errorf("github: reading token_file: %w", err)
+		return nil, err
 	}
-	token := strings.TrimSpace(string(raw))
-	if token == "" {
-		return "", errors.New("github: token_file is empty")
-	}
-	return token, nil
+	return staticToken(tok), nil
 }
 
-// Check proves the token can do what fleetci needs on each repo: list
-// queued jobs (Actions: read) and manage runners (Administration). It
-// registers nothing; whether the token may also write is only seen when
-// the first runner registers.
-func Check(ctx context.Context, cfg Config) map[string]error {
-	token, err := cfg.token()
-	if err != nil {
-		return map[string]error{"": err}
+// check reads the secret and checks the rest of the table.
+func (w WebhookConfig) check() (string, error) {
+	if w.Listen == "" {
+		return "", errors.New("github: webhook.listen is required")
 	}
-	gh := newClient(cmp.Or(cfg.APIURL, "https://api.github.com"), token)
-	out := map[string]error{}
+	if w.Path != "" && !strings.HasPrefix(w.Path, "/") {
+		return "", fmt.Errorf("github: webhook.path %q must start with /", w.Path)
+	}
+	if (w.TLSCertFile == "") != (w.TLSKeyFile == "") {
+		return "", errors.New("github: webhook.tls_cert_file and tls_key_file go together")
+	}
+	return readSecret("webhook.secret_file", w.SecretFile)
+}
+
+// scope is where a repo's runners are registered: on its org when fleetci
+// serves the org, otherwise on the repo.
+func (d *Dispatcher) scope(repo string) string {
+	owner, _, _ := strings.Cut(repo, "/")
+	if d.orgs[strings.ToLower(owner)] {
+		return "/orgs/" + owner
+	}
+	return "/repos/" + repo
+}
+
+// serves says whether fleetci serves a repo's jobs.
+func (d *Dispatcher) serves(repo string) bool {
+	owner, _, _ := strings.Cut(repo, "/")
+	return d.repos[strings.ToLower(repo)] || d.orgs[strings.ToLower(owner)]
+}
+
+// Finding is one line of Check's report.
+type Finding struct {
+	Name string // "repo owner/name", "org name", "webhook" or "config"
+	OK   string // what passed, when Err is nil
+	Err  error
+}
+
+// Check proves the token can do what fleetci needs: on each repo list
+// queued jobs (Actions: read) and manage runners (Administration), on each
+// org list its repos and manage its runners (Self-hosted runners). It
+// registers nothing; whether the token may also write is only seen when
+// the first runner registers. With a GitHub App, minting each owner's
+// installation token is part of it.
+func Check(ctx context.Context, cfg Config) []Finding {
+	hc := &http.Client{Timeout: 30 * time.Second}
+	tokens, err := cfg.auth(hc)
+	if err != nil {
+		return []Finding{{Name: "config", Err: err}}
+	}
+	gh := newClient(cmp.Or(cfg.APIURL, "https://api.github.com"), tokens, hc)
+	var out []Finding
 	for _, repo := range cfg.Repos {
 		var errs []error
 		if err := gh.do(ctx, http.MethodGet, "/repos/"+repo+"/actions/runs?per_page=1", nil, nil); err != nil {
@@ -246,30 +371,76 @@ func Check(ctx context.Context, cfg Config) map[string]error {
 		if err := gh.do(ctx, http.MethodGet, "/repos/"+repo+"/actions/runners?per_page=1", nil, nil); err != nil {
 			errs = append(errs, fmt.Errorf("listing runners (needs Administration: read and write): %w", err))
 		}
-		out[repo] = errors.Join(errs...)
+		out = append(out, Finding{"repo " + repo, "can list jobs and runners", errors.Join(errs...)})
+	}
+	for _, org := range cfg.Orgs {
+		var errs []error
+		if err := gh.do(ctx, http.MethodGet, "/orgs/"+org+"/repos?per_page=1", nil, nil); err != nil {
+			errs = append(errs, fmt.Errorf("listing repos: %w", err))
+		}
+		if err := gh.do(ctx, http.MethodGet, "/orgs/"+org+"/actions/runners?per_page=1", nil, nil); err != nil {
+			errs = append(errs, fmt.Errorf("listing runners (needs Self-hosted runners: read and write): %w", err))
+		}
+		out = append(out, Finding{"org " + org, "can list repos and runners", errors.Join(errs...)})
+	}
+	if w := cfg.Webhook; w != nil {
+		_, err := w.check()
+		if err == nil && w.TLSCertFile != "" {
+			_, err = tls.LoadX509KeyPair(w.TLSCertFile, w.TLSKeyFile)
+		}
+		out = append(out, Finding{"webhook", "listens on " + w.Listen + cmp.Or(w.Path, "/") + " with a secret", err})
 	}
 	return out
 }
 
-// Run polls for queued jobs until ctx ends, then waits for its runners to
-// stop and their VMs to be released.
+// Run serves jobs until ctx ends: it polls, and with a webhook takes
+// deliveries. Then it waits for its runners to stop and their VMs to be
+// released.
 func (d *Dispatcher) Run(ctx context.Context) {
-	d.log.Info("serving github jobs", "repos", d.cfg.Repos, "label_prefix", d.cfg.LabelPrefix)
+	d.log.Info("serving github jobs", "repos", d.cfg.Repos, "orgs", d.cfg.Orgs, "label_prefix", d.cfg.LabelPrefix,
+		"webhook", d.cfg.Webhook != nil, "poll_interval", time.Duration(d.cfg.PollInterval).String())
+	d.mu.Lock()
+	d.runCtx = ctx
+	d.mu.Unlock()
+	var srv *http.Server
+	if d.cfg.Webhook != nil {
+		var err error
+		if srv, err = d.listen(ctx); err != nil {
+			// Polling still serves every job, only later.
+			d.log.Error("webhook not listening; polling only", "err", err)
+		}
+	}
 	t := time.NewTicker(time.Duration(d.cfg.PollInterval))
 	defer t.Stop()
+	recheck := time.NewTicker(retryPause)
+	defer recheck.Stop()
+	d.sweep(ctx)
+	d.pollAll(ctx)
 	for {
-		d.sweep(ctx)
-		for _, repo := range d.cfg.Repos {
-			d.poll(ctx, repo)
-		}
 		select {
 		case <-ctx.Done():
+			if srv != nil {
+				// Deliveries take milliseconds; a connection left open
+				// longer is a client's, not a delivery's.
+				sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+				if srv.Shutdown(sctx) != nil {
+					_ = srv.Close()
+				}
+				cancel()
+			}
+			d.mu.Lock()
+			d.closing = true
+			d.mu.Unlock()
 			d.wg.Wait()
 			sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 			d.sweep(sctx)
 			cancel()
 			return
+		case <-recheck.C:
+			d.recheck(ctx)
 		case <-t.C:
+			d.sweep(ctx)
+			d.pollAll(ctx)
 		}
 	}
 }
@@ -289,7 +460,7 @@ func (d *Dispatcher) sweep(ctx context.Context) {
 		found, err := d.removeOrphan(ctx, o)
 		switch {
 		case err != nil && time.Since(o.at) > orphanTTL:
-			d.log.Warn("leaving a runner registered", "repo", o.repo, "runner_id", strconv.FormatInt(o.id, 10), "runner", o.name, "err", err)
+			d.log.Warn("leaving a runner registered", "scope", o.scope, "runner_id", strconv.FormatInt(o.id, 10), "runner", o.name, "err", err)
 		case err != nil:
 			keep = append(keep, o)
 		case o.id == 0 && !found && time.Since(o.at) < d.settle:
@@ -307,15 +478,15 @@ func (d *Dispatcher) removeOrphan(ctx context.Context, o orphan) (bool, error) {
 	ids := []int64{o.id}
 	if o.id == 0 {
 		var err error
-		if ids, err = d.gh.runnersNamed(ctx, o.repo, o.name); err != nil {
+		if ids, err = d.gh.runnersNamed(ctx, o.scope, o.name); err != nil {
 			return false, err
 		}
 	}
 	for _, id := range ids {
-		if err := d.gh.deleteRunner(ctx, o.repo, id); err != nil {
+		if err := d.gh.deleteRunner(ctx, o.scope, id); err != nil {
 			return false, err
 		}
-		d.log.Info("removed an orphaned runner", "repo", o.repo, "runner_id", strconv.FormatInt(id, 10))
+		d.log.Info("removed an orphaned runner", "scope", o.scope, "runner_id", strconv.FormatInt(id, 10))
 	}
 	return len(ids) > 0, nil
 }
@@ -327,33 +498,131 @@ func (d *Dispatcher) orphaned(o orphan) {
 	d.mu.Unlock()
 }
 
-func (d *Dispatcher) poll(ctx context.Context, repo string) {
-	jobs, err := d.gh.queuedJobs(ctx, repo)
-	if err != nil && ctx.Err() == nil {
-		d.log.Warn("listing queued jobs", "repo", repo, "err", err)
-	}
-	// Rate limited, a runner could not be registered anyway; and a VM
-	// costs.
-	if ctx.Err() != nil || errors.As(err, new(rateLimited)) {
-		return
-	}
+// activeFor is how long a repo a webhook spoke of is polled with the
+// explicit repos, for deliveries that never came.
+const activeFor = 24 * time.Hour
 
-	queued := map[int64]bool{}
-	for _, j := range jobs {
-		queued[j.ID] = true
-		class, ok := d.classFor(repo, j)
-		if !ok || !d.take(j.ID) {
-			continue
-		}
-		d.wg.Add(1)
-		go func() {
-			defer d.wg.Done()
-			d.serve(ctx, repo, j, class)
-		}()
+// listEvery is how often the orgs' repos are listed again.
+const listEvery = 10 * time.Minute
+
+// pollRepos are the repos to poll: those listed, and the orgs'. With a
+// webhook, of the orgs' repos only those it spoke of lately: the others
+// are left to their deliveries.
+func (d *Dispatcher) pollRepos(ctx context.Context) []string {
+	repos := slices.Clone(d.cfg.Repos)
+	seen := map[string]bool{}
+	for _, r := range repos {
+		seen[strings.ToLower(r)] = true
 	}
-	if err == nil {
+	add := func(r string) {
+		if !seen[strings.ToLower(r)] {
+			seen[strings.ToLower(r)] = true
+			repos = append(repos, r)
+		}
+	}
+	if d.cfg.Webhook != nil {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		for r, at := range d.active {
+			if time.Since(at) > activeFor {
+				delete(d.active, r)
+				continue
+			}
+			add(r)
+		}
+		return repos
+	}
+	d.mu.Lock()
+	stale := time.Since(d.listed) > listEvery
+	d.mu.Unlock()
+	if stale && len(d.cfg.Orgs) > 0 {
+		lists := map[string][]string{}
+		ok := true
+		for _, org := range d.cfg.Orgs {
+			l, err := d.gh.orgRepos(ctx, org)
+			if err != nil {
+				if ctx.Err() == nil {
+					d.log.Warn("listing an org's repos; using the last list", "org", org, "err", err)
+				}
+				ok = false
+				continue
+			}
+			lists[org] = l
+		}
+		d.mu.Lock()
+		if d.orgList == nil {
+			d.orgList = map[string][]string{}
+		}
+		maps.Copy(d.orgList, lists)
+		if ok {
+			d.listed = time.Now()
+		}
+		d.mu.Unlock()
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, org := range d.cfg.Orgs {
+		for _, r := range d.orgList[org] {
+			add(r)
+		}
+	}
+	return repos
+}
+
+// pollAll lists every repo's queued jobs and offers each to a runner. Only
+// when every list came back whole are jobs no longer queued forgotten.
+func (d *Dispatcher) pollAll(ctx context.Context) {
+	queued := map[int64]bool{}
+	whole := true
+	for _, repo := range d.pollRepos(ctx) {
+		if ctx.Err() != nil {
+			return
+		}
+		jobs, err := d.gh.queuedJobs(ctx, repo)
+		if err != nil && ctx.Err() == nil {
+			d.log.Warn("listing queued jobs", "repo", repo, "err", err)
+		}
+		// Rate limited, a runner could not be registered anyway; and a VM
+		// costs.
+		if ctx.Err() != nil || errors.As(err, new(rateLimited)) {
+			return
+		}
+		if err != nil {
+			whole = false
+		}
+		for _, j := range jobs {
+			queued[j.ID] = true
+			d.offer(ctx, repo, j)
+		}
+	}
+	if whole {
+		d.mu.Lock()
+		for id := range d.watched {
+			queued[id] = true // a job of a repo not polled
+		}
+		d.mu.Unlock()
 		d.prune(queued) // a job missing from a partial list may still wait
 	}
+}
+
+// offer starts a runner for a queued job, unless it has one or isn't
+// fleetci's.
+func (d *Dispatcher) offer(ctx context.Context, repo string, j job) {
+	class, ok := d.classFor(repo, j)
+	if !ok || !d.take(j.ID) {
+		return
+	}
+	d.mu.Lock()
+	if d.closing {
+		d.mu.Unlock()
+		return
+	}
+	d.wg.Add(1)
+	d.mu.Unlock()
+	go func() {
+		defer d.wg.Done()
+		d.serve(ctx, repo, j, class)
+	}()
 }
 
 // classFor picks the class a job asks for. Jobs without a fleetci label
@@ -483,7 +752,7 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 	created, err := d.capacity.Create(ctx, class)
 	if err != nil {
 		if ctx.Err() == nil {
-			log.Error("no vm for job; retrying on the next poll", "err", err)
+			log.Error("no vm for job; retrying", "err", err)
 		}
 		d.forget(j.ID, false, false)
 		return
@@ -494,19 +763,20 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 	log = log.With("vm", created.ID, "instance", created.Instance)
 	conn, err := d.capacity.Conn(created.ID)
 	if err != nil {
-		log.Error("no connection to the vm; retrying on the next poll", "err", err)
+		log.Error("no connection to the vm; retrying", "err", err)
 		d.forget(j.ID, false, false)
 		return
 	}
 	vm := VM{VM: created, Conn: conn}
 
 	labels := runnerLabels(j.Labels)
-	runnerID, jit, err := d.gh.jitConfig(ctx, repo, vm.ID, d.cfg.RunnerGroupID, labels)
+	scope := d.scope(repo)
+	runnerID, jit, err := d.gh.jitConfig(ctx, scope, vm.ID, d.cfg.RunnerGroupID, labels)
 	if err != nil {
 		log.Error("registering runner; retrying", "err", err)
 		if !refused(err) {
 			// GitHub may have registered it all the same.
-			d.orphaned(orphan{repo: repo, name: vm.ID})
+			d.orphaned(orphan{scope: scope, name: vm.ID})
 		}
 		// A GitHub that errs or limits is no fault of the job's: only a
 		// refusal uses a try.
@@ -516,16 +786,16 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 	defer func() {
 		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		defer cancel()
-		if err := d.gh.deleteRunner(dctx, repo, runnerID); err != nil {
+		if err := d.gh.deleteRunner(dctx, scope, runnerID); err != nil {
 			log.Warn("removing runner; trying again later", "runner_id", strconv.FormatInt(runnerID, 10), "err", err)
-			d.orphaned(orphan{repo: repo, id: runnerID})
+			d.orphaned(orphan{scope: scope, id: runnerID})
 		}
 	}()
 	log.Info("runner starting", "runner_id", strconv.FormatInt(runnerID, 10), "labels", labels, "waited", time.Since(start).Round(time.Second).String())
 
 	rctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	go d.watchIdle(rctx, cancel, repo, runnerID, log)
+	go d.watchIdle(rctx, cancel, scope, runnerID, log)
 
 	var took atomic.Pointer[string]
 	err = d.start(rctx, vm, jit, func(job string) {
@@ -551,7 +821,7 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 }
 
 // watchIdle stops a runner that has not picked up a job within IdleTimeout.
-func (d *Dispatcher) watchIdle(ctx context.Context, stop context.CancelFunc, repo string, id int64, log hclog.Logger) {
+func (d *Dispatcher) watchIdle(ctx context.Context, stop context.CancelFunc, scope string, id int64, log hclog.Logger) {
 	deadline := time.Now().Add(time.Duration(d.cfg.IdleTimeout))
 	t := time.NewTicker(15 * time.Second)
 	defer t.Stop()
@@ -561,7 +831,7 @@ func (d *Dispatcher) watchIdle(ctx context.Context, stop context.CancelFunc, rep
 			return
 		case <-t.C:
 		}
-		r, err := d.gh.runner(ctx, repo, id)
+		r, err := d.gh.runner(ctx, scope, id)
 		switch {
 		case errors.Is(err, errNotFound):
 			return // the job finished and GitHub removed the runner

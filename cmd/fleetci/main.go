@@ -254,12 +254,11 @@ func check(args []string, out io.Writer) (bool, error) {
 	if c.GitHub != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		for repo, err := range github.Check(ctx, *c.GitHub) {
-			label := "github " + cmp.Or(repo, "config")
-			if err != nil {
-				r.fail(label, err)
+		for _, f := range github.Check(ctx, *c.GitHub) {
+			if f.Err != nil {
+				r.fail("github "+f.Name, f.Err)
 			} else {
-				r.pass(label, "token can list jobs and runners")
+				r.pass("github "+f.Name, f.OK)
 			}
 		}
 	}

@@ -17,12 +17,12 @@ import (
 
 // client is the little of GitHub's REST API fleetci needs.
 type client struct {
-	base  string
-	token string
-	http  *http.Client
+	base   string
+	tokens tokens
+	http   *http.Client
 
 	mu    sync.Mutex
-	until time.Time // rate limited: no request before this
+	until map[string]time.Time // rate limited, by token: no request before this
 }
 
 type job struct {
@@ -117,15 +117,19 @@ func (c *client) do(ctx context.Context, method, path string, body, out any) err
 	if err != nil {
 		return err
 	}
+	tok, key, err := c.tokens.token(ctx, ownerOf(path))
+	if err != nil {
+		return err
+	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 
 	c.mu.Lock()
-	until := c.until
+	until := c.until[key]
 	c.mu.Unlock()
 	if time.Now().Before(until) {
 		return fmt.Errorf("%s %s: %w", method, path, rateLimited{until})
@@ -145,8 +149,8 @@ func (c *client) do(ctx context.Context, method, path string, body, out any) err
 		err := statusError{method, path, resp.StatusCode, msg}
 		if until, ok := rateLimit(resp, msg, time.Now()); ok {
 			c.mu.Lock()
-			if until.After(c.until) {
-				c.until = until
+			if until.After(c.until[key]) {
+				c.until[key] = until
 			}
 			c.mu.Unlock()
 			return fmt.Errorf("%w: %w", err, rateLimited{until})
@@ -198,27 +202,28 @@ func (c *client) queuedJobs(ctx context.Context, repo string) ([]job, error) {
 }
 
 // jitConfig registers a runner that takes one job and is then removed by
-// GitHub. It returns the runner's id and the config for run.sh --jitconfig.
-func (c *client) jitConfig(ctx context.Context, repo, name string, groupID int64, labels []string) (int64, string, error) {
+// GitHub, on scope: a repo ("/repos/owner/name") or an org ("/orgs/name").
+// It returns the runner's id and the config for run.sh --jitconfig.
+func (c *client) jitConfig(ctx context.Context, scope, name string, groupID int64, labels []string) (int64, string, error) {
 	var out struct {
 		Runner  runner `json:"runner"`
 		Encoded string `json:"encoded_jit_config"`
 	}
 	body := map[string]any{"name": name, "runner_group_id": groupID, "labels": labels, "work_folder": "_work"}
-	if err := c.do(ctx, http.MethodPost, "/repos/"+repo+"/actions/runners/generate-jitconfig", body, &out); err != nil {
+	if err := c.do(ctx, http.MethodPost, scope+"/actions/runners/generate-jitconfig", body, &out); err != nil {
 		return 0, "", err
 	}
 	return out.Runner.ID, out.Encoded, nil
 }
 
-func (c *client) runner(ctx context.Context, repo string, id int64) (runner, error) {
+func (c *client) runner(ctx context.Context, scope string, id int64) (runner, error) {
 	var r runner
-	err := c.do(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/actions/runners/%d", repo, id), nil, &r)
+	err := c.do(ctx, http.MethodGet, fmt.Sprintf("%s/actions/runners/%d", scope, id), nil, &r)
 	return r, err
 }
 
-// runnersNamed lists the ids of the repo's runners called name.
-func (c *client) runnersNamed(ctx context.Context, repo, name string) ([]int64, error) {
+// runnersNamed lists the ids of the scope's runners called name.
+func (c *client) runnersNamed(ctx context.Context, scope, name string) ([]int64, error) {
 	var out struct {
 		Runners []struct {
 			ID   int64  `json:"id"`
@@ -226,7 +231,7 @@ func (c *client) runnersNamed(ctx context.Context, repo, name string) ([]int64, 
 		} `json:"runners"`
 	}
 	q := url.Values{"name": {name}, "per_page": {"100"}}
-	if err := c.do(ctx, http.MethodGet, "/repos/"+repo+"/actions/runners?"+q.Encode(), nil, &out); err != nil {
+	if err := c.do(ctx, http.MethodGet, scope+"/actions/runners?"+q.Encode(), nil, &out); err != nil {
 		return nil, err
 	}
 	var ids []int64
@@ -238,14 +243,58 @@ func (c *client) runnersNamed(ctx context.Context, repo, name string) ([]int64, 
 	return ids, nil
 }
 
-func (c *client) deleteRunner(ctx context.Context, repo string, id int64) error {
-	err := c.do(ctx, http.MethodDelete, fmt.Sprintf("/repos/%s/actions/runners/%d", repo, id), nil, nil)
+func (c *client) deleteRunner(ctx context.Context, scope string, id int64) error {
+	err := c.do(ctx, http.MethodDelete, fmt.Sprintf("%s/actions/runners/%d", scope, id), nil, nil)
 	if errors.Is(err, errNotFound) {
 		return nil
 	}
 	return err
 }
 
-func newClient(base, token string) *client {
-	return &client{base: strings.TrimRight(base, "/"), token: token, http: &http.Client{Timeout: 30 * time.Second}}
+// job reads one job, to see whether it still waits.
+func (c *client) job(ctx context.Context, repo string, id int64) (job, error) {
+	var j job
+	err := c.do(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/actions/jobs/%d", repo, id), nil, &j)
+	return j, err
+}
+
+// orgRepos lists an org's repos that can run workflows: not archived, not
+// disabled.
+func (c *client) orgRepos(ctx context.Context, org string) ([]string, error) {
+	var repos []string
+	for page := 1; ; page++ {
+		var list []struct {
+			FullName string `json:"full_name"`
+			Archived bool   `json:"archived"`
+			Disabled bool   `json:"disabled"`
+		}
+		q := url.Values{"type": {"all"}, "per_page": {"100"}, "page": {strconv.Itoa(page)}}
+		if err := c.do(ctx, http.MethodGet, "/orgs/"+org+"/repos?"+q.Encode(), nil, &list); err != nil {
+			return nil, err
+		}
+		for _, r := range list {
+			if !r.Archived && !r.Disabled {
+				repos = append(repos, r.FullName)
+			}
+		}
+		if len(list) < 100 {
+			return repos, nil
+		}
+	}
+}
+
+// ownerOf is the owner a request is about: the repo's owner or the org.
+func ownerOf(path string) string {
+	for _, p := range []string{"/repos/", "/orgs/"} {
+		if rest, ok := strings.CutPrefix(path, p); ok {
+			owner, _, _ := strings.Cut(rest, "/")
+			owner, _, _ = strings.Cut(owner, "?")
+			return owner
+		}
+	}
+	return ""
+}
+
+func newClient(base string, t tokens, hc *http.Client) *client {
+	return &client{base: strings.TrimRight(base, "/"), tokens: t, http: hc, until: map[string]time.Time{}}
 }
