@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.6.0](https://github.com/nesty92/fleetci/compare/v0.5.0...v0.6.0) (2026-11-07)
+
+
+### Features
+
+* **fleet:** stop placing jobs on a VM with a spot interruption notice ([91a4888](https://github.com/nesty92/fleetci/commit/91a4888d01ac956fa38b5122b25b64afee7069d4))
+* **gitlab:** run a gitlab-runner config.toml's runners embedded ([1d4fe59](https://github.com/nesty92/fleetci/commit/1d4fe59b5edc20f2c2aa961a52cdf4d604674e09))
+* **gitlab:** run GitLab jobs in fleetci's own process ([8a9bc79](https://github.com/nesty92/fleetci/commit/8a9bc79199cb9cfbf47235cd20240dacd669fe0c))
+* **source:** put job sources behind an interface, as fleeting's providers are ([ccff76e](https://github.com/nesty92/fleetci/commit/ccff76e929af5c3e365e4bfb77ab320ea388c426))
+
+
+### Bug Fixes
+
+* **fleet:** skip hosts the plugin reports unhealthy before placing a job ([22ad22c](https://github.com/nesty92/fleetci/commit/22ad22c9bcf87eeaea13a06d2a14c0841ad8a8cb)), closes [#6](https://github.com/nesty92/fleetci/issues/6)
+* **github:** wait out rate limits, remove orphaned runners, serve a job whose runner took another ([3978e55](https://github.com/nesty92/fleetci/commit/3978e5522fccd381af399c26399cf8d19575a597))
+* **proxy:** bound the ssh handshake, and fuzz the shared connection under network faults ([1bd9d22](https://github.com/nesty92/fleetci/commit/1bd9d226cb94151c5831e792a4283c368f902a34))
+* **reclaim:** keep watching a host through IMDS throttling, errors and resets ([9726948](https://github.com/nesty92/fleetci/commit/9726948721931e64acc4fbe7f23ea4592f56909e))
+
 ## [0.5.0](https://github.com/nesty92/fleetci/compare/v0.4.0...v0.5.0) (2026-11-06)
 
 
