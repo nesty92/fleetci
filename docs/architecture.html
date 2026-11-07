@@ -1,0 +1,611 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>fleetci Architecture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Source+Sans+3:wght@400;600&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+:root {
+  --bg: #f6f5f1; --card: #ffffff; --fg: #1c1f24; --muted: #5d636c; --line: #c3c6cc;
+  --gitlab: #6b4fbb; --gitlab-bg: #f1edfb;
+  --github: #1f6f43; --github-bg: #e7f3ec;
+  --core: #1d5f8a; --core-bg: #e8f0f7;
+  --accent: #b93d0b; --accent-bg: #fbece5;
+  --plain-bg: #ffffff;
+  --halo: var(--bg);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #13161b; --card: #1b1f26; --fg: #e6e8eb; --muted: #9aa1ab; --line: #444b56;
+    --gitlab: #a990f2; --gitlab-bg: #262040;
+    --github: #5cc48a; --github-bg: #17301f;
+    --core: #6cb4e6; --core-bg: #142636;
+    --accent: #f08a5d; --accent-bg: #3a2218;
+    --plain-bg: #1b1f26;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #13161b; --card: #1b1f26; --fg: #e6e8eb; --muted: #9aa1ab; --line: #444b56;
+  --gitlab: #a990f2; --gitlab-bg: #262040;
+  --github: #5cc48a; --github-bg: #17301f;
+  --core: #6cb4e6; --core-bg: #142636;
+  --accent: #f08a5d; --accent-bg: #3a2218;
+  --plain-bg: #1b1f26;
+  color-scheme: dark;
+}
+* { box-sizing: border-box }
+body {
+  background: var(--bg); color: var(--fg);
+  font: 16px/1.5 "Source Sans 3", system-ui, sans-serif;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 28px 48px;
+  margin: 0;
+}
+.wrap { max-width: 1440px; margin: 0 auto; display: grid; gap: 20px }
+header { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 16px }
+h1 { font: 700 2rem/1.1 "Bricolage Grotesque", system-ui, sans-serif; margin: 0; letter-spacing: -0.01em }
+h1 small { display: block; font: 400 1rem/1.4 "Source Sans 3", system-ui, sans-serif; color: var(--muted); margin-top: 6px; letter-spacing: 0 }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 10px; padding: 3px; background: var(--card); gap: 3px }
+.seg button {
+  font: 600 0.95rem "Source Sans 3", system-ui, sans-serif; color: var(--muted);
+  background: none; border: 0; border-radius: 7px; padding: 7px 14px; cursor: pointer;
+}
+.seg button[aria-pressed="true"] { background: var(--core); color: var(--card) }
+.seg code { font: 500 0.85rem "JetBrains Mono", ui-monospace, monospace }
+.layout { display: grid; gap: 20px; grid-template-columns: 1fr }
+@media (min-width: 1180px) { .layout { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); align-items: start } }
+.board, .panel { background: var(--card); border: 1px solid var(--line); border-radius: 14px; min-width: 0 }
+.board { padding: 14px; --halo: var(--card) }
+.scroll { overflow-x: auto }
+.board svg { display: block; width: 100%; min-width: 720px; height: auto }
+.board figcaption { color: var(--muted); font-size: 0.92rem; padding: 8px 4px 0 }
+.panel { padding: 18px; --halo: var(--card) }
+@media (min-width: 1180px) { .panel { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 16px) } }
+.panel h2 { font: 700 1.3rem/1.2 "Bricolage Grotesque", system-ui, sans-serif; margin: 0 0 4px; display: flex; align-items: center; gap: 10px; text-wrap: balance }
+.dot { width: 12px; height: 12px; border-radius: 3px; flex: none; background: var(--c, var(--core)) }
+.panel svg { display: block; width: 100%; height: auto; margin-top: 10px }
+.panel .scroll svg { min-width: 480px }
+.tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px }
+.tag { font-size: 0.85rem; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line); color: var(--fg) }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 14px; font-size: 0.9rem; color: var(--muted) }
+.legend span { display: inline-flex; align-items: center; gap: 6px }
+.hint { color: var(--muted); margin: 6px 0 0 }
+
+/* diagram marks */
+.n rect { fill: var(--plain-bg); stroke: var(--line); stroke-width: 1.3 }
+.n.gitlab rect { fill: var(--gitlab-bg); stroke: var(--gitlab) }
+.n.github rect { fill: var(--github-bg); stroke: var(--github) }
+.n.core rect { fill: var(--core-bg); stroke: var(--core) }
+.n.accent rect { fill: var(--accent-bg); stroke: var(--accent) }
+.n.g rect { fill-opacity: 0.45; stroke-width: 1.1 }
+.n.plain.g rect { fill: none }
+.n.dash rect { stroke-dasharray: 5 4 }
+.n .bar { fill: var(--core); fill-opacity: 0.55; stroke: none }
+.n .bartrack { fill: none; stroke: var(--line); stroke-width: 1 }
+.n.k { cursor: pointer }
+.n.k:hover rect:first-child, .n.k:focus-visible rect:first-child { stroke-width: 2.4 }
+.n.k:focus { outline: none }
+.n.sel rect:first-child { stroke-width: 3 }
+.n.dim { opacity: 0.45 }
+.nt { font: 600 14px "Source Sans 3", system-ui, sans-serif; fill: var(--fg); text-anchor: middle }
+.ns { font: 400 12px "Source Sans 3", system-ui, sans-serif; fill: var(--muted); text-anchor: middle }
+.gt { font: 600 11.5px "JetBrains Mono", ui-monospace, monospace; fill: var(--muted) }
+.n.gitlab .gt { fill: var(--gitlab) } .n.core .gt { fill: var(--core) }
+.e { fill: none; stroke: var(--muted); stroke-width: 1.4 }
+.e.gitlab { stroke: var(--gitlab) } .e.github { stroke: var(--github) }
+.e.core { stroke: var(--core) } .e.accent { stroke: var(--accent) }
+.e.dash { stroke-dasharray: 5 4 }
+.el { font: 400 12px "Source Sans 3", system-ui, sans-serif; fill: var(--muted); paint-order: stroke; stroke: var(--halo); stroke-width: 4px; stroke-linejoin: round }
+.el.accent { fill: var(--accent); font-weight: 600 }
+.el.ok { fill: var(--github); font-weight: 600 }
+.mono { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 11px }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header>
+    <h1>fleetci<small>Single-use CI VMs for GitLab and GitHub, on any fleeting provider.</small></h1>
+    <div class="seg" role="group" aria-label="Mode">
+      <button type="button" data-mode="serve" aria-pressed="true"><code>fleetci serve</code></button>
+      <button type="button" data-mode="plugin" aria-pressed="false">Plugin in <code>gitlab-runner</code></button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <figure class="board" style="margin:0">
+      <div class="scroll" id="main"></div>
+      <figcaption id="cap"></figcaption>
+    </figure>
+    <aside class="panel" id="panel" aria-live="polite"></aside>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const COLORS = ["fg", "gitlab", "github", "core", "accent"];
+
+  // ---- a tiny renderer: boxes, edges, free text ----
+  function draw(id, d) {
+    const defs = COLORS.map(c =>
+      `<marker id="${id}-${c}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">` +
+      `<path d="M0,0L10,5L0,10z" style="fill:var(--${c === "fg" ? "muted" : c})"/></marker>`).join("");
+    const out = [`<svg viewBox="0 0 ${d.w} ${d.h}" role="img" aria-label="${esc(d.label)}"><defs>${defs}</defs>`];
+    for (const n of d.nodes.filter(n => n.g)) out.push(node(n));
+    for (const e of d.edges || []) out.push(edge(id, e));
+    for (const n of d.nodes.filter(n => !n.g)) out.push(node(n));
+    for (const t of d.texts || []) out.push(`<text x="${t.x}" y="${t.y}" class="el ${t.c || ""} ${t.m ? "mono" : ""}" text-anchor="${t.a || "start"}">${esc(t.t)}</text>`);
+    out.push("</svg>");
+    return out.join("");
+  }
+  function node(n) {
+    const h = n.h || 50, c = n.c || "plain";
+    const attrs = n.k ? ` data-k="${n.k}"${n.p ? ` data-p="${n.p}"` : ""} tabindex="0" role="button" aria-label="${esc(n.t)}"` : "";
+    let s = `<g class="n ${c}${n.g ? " g" : ""}${n.dash ? " dash" : ""}${n.k ? " k" : ""}"${n.p && !n.k ? ` data-p="${n.p}"` : ""}${attrs}>`;
+    s += `<rect x="${n.x}" y="${n.y}" width="${n.w}" height="${h}" rx="9"/>`;
+    if (n.g) {
+      s += `<text class="gt" x="${n.x + 12}" y="${n.y + 18}">${esc(n.t)}</text>`;
+    } else {
+      const cx = n.x + n.w / 2, cy = n.y + h / 2;
+      if (n.s) {
+        s += `<text class="nt" x="${cx}" y="${cy - 3}">${esc(n.t)}</text>`;
+        s += `<text class="ns" x="${cx}" y="${cy + 14}">${esc(n.s)}</text>`;
+      } else {
+        s += `<text class="nt" x="${cx}" y="${cy + 5}">${esc(n.t)}</text>`;
+      }
+      if (n.bar != null) {
+        const bx = n.x + 14, bw = n.w - 28, by = n.y + h - 10;
+        s += `<rect class="bartrack" x="${bx}" y="${by}" width="${bw}" height="5" rx="2.5"/>`;
+        s += `<rect class="bar" x="${bx}" y="${by}" width="${bw * n.bar}" height="5" rx="2.5"/>`;
+      }
+    }
+    return s + "</g>";
+  }
+  function edge(id, e) {
+    const c = e.c || "fg", pts = e.p.map(p => p.join(",")).join(" ");
+    let s = `<polyline class="e ${c === "fg" ? "" : c}${e.dash ? " dash" : ""}" points="${pts}"`;
+    if (!e.none) s += ` marker-end="url(#${id}-${c})"`;
+    if (e.both) s += ` marker-start="url(#${id}-${c})"`;
+    s += "/>";
+    if (e.l) {
+      const [a, b] = [e.p[0], e.p[1]];
+      const [x, y] = e.lp || [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2 - 6];
+      const rot = e.rot ? ` transform="rotate(${e.rot} ${x} ${y})"` : "";
+      s += `<text class="el ${e.lc || ""}" x="${x}" y="${y}" text-anchor="${e.la || "start"}"${rot}>${esc(e.l)}</text>`;
+    }
+    return s;
+  }
+
+  // ---- the two modes ----
+  const providers = [
+    { t: "aws", s: "Auto Scaling group", p: "aws" },
+    { t: "fleetingd", s: "bare-metal microVMs", p: "fleetingd" },
+    { t: "googlecloud", s: "instance group", p: "googlecloud" },
+    { t: "azure", s: "scale set", p: "azure" },
+    { t: "dockervm", s: "local testing only", p: "dockervm", dash: 1 },
+  ].map((p, i) => ({ ...p, x: 30 + i * 192, y: 590, w: 172, k: "providers" }));
+  const provEdges = providers.flatMap((p, i) => {
+    const cx = p.x + p.w / 2;
+    return [
+      { p: [[cx, 560], [cx, 590]] },
+      { p: [[cx, 640], [cx, 680]], l: i === 0 ? "creates" : "", lp: [cx + 8, 664] },
+    ];
+  });
+  const bottom = {
+    nodes: [
+      ...providers,
+      { x: 30, y: 680, w: 940, h: 48, t: "single-use VMs", s: "one job each · Docker · SSH user in the docker group", k: "vms" },
+    ],
+    edges: [
+      { p: [[116, 560], [884, 560]], none: true },
+      ...provEdges,
+      { p: [[525, 500], [525, 560]], l: "one plugin per class", lp: [535, 552], none: true },
+      { p: [[404, 484], [404, 680]], c: "core", dash: true, l: "SSH, one per VM", lp: [300, 552] },
+    ],
+  };
+  const core = [
+    { x: 310, y: 335, w: 430, h: 165, g: 1, t: "core · source.Capacity", c: "core" },
+    { x: 325, y: 365, w: 195, h: 54, t: "host queue", s: "budget · overflow", k: "hostq" },
+    { x: 530, y: 365, w: 195, h: 54, t: "classes", s: "plugin + taskscaler each", k: "classes" },
+    { x: 325, y: 430, w: 195, h: 54, t: "Conns", s: "one SSH per VM", k: "conns", c: "core" },
+    { x: 530, y: 430, w: 195, h: 54, t: "reclaim watch", s: "IMDS every 2 s", k: "reclaim", c: "accent" },
+  ];
+  const MODES = {
+    plugin: {
+      cap: "gitlab-runner loads fleetci as its fleeting plugin. The optional GitHub dispatcher runs in the same process, on the same classes.",
+      d: {
+        w: 1000, h: 740, label: "Plugin mode: gitlab-runner, its fleeting plugin with gateway, nesting API, GitHub dispatcher and core, over per-class providers and single-use VMs",
+        nodes: [
+          { x: 60, y: 20, w: 220, t: "GitLab", s: "jobs API", c: "gitlab", k: "jobloop" },
+          { x: 520, y: 20, w: 220, t: "GitHub", s: "Actions API", c: "github", k: "github" },
+          { x: 30, y: 100, w: 750, h: 430, g: 1, t: "gitlab-runner", c: "gitlab" },
+          { x: 60, y: 135, w: 220, t: "job loop", s: "docker-autoscaler", c: "gitlab", k: "jobloop" },
+          { x: 50, y: 210, w: 710, h: 305, g: 1, t: "fleeting-plugin-fleetci", c: "core" },
+          { x: 70, y: 245, w: 210, t: "SSH gateway", s: "loopback · own keys", c: "core", k: "gateway" },
+          { x: 70, y: 335, w: 210, t: "nesting API", s: "Create · Delete", c: "core", k: "nesting" },
+          { x: 520, y: 245, w: 220, t: "GitHub dispatcher", s: "optional [github]", c: "github", dash: 1, k: "github" },
+          ...core,
+          { x: 810, y: 240, w: 160, t: "watchdog", s: "fleetci watchdog", k: "watchdog" },
+          ...bottom.nodes,
+        ],
+        edges: [
+          { p: [[170, 70], [170, 135]], c: "gitlab", l: "requests a job", lp: [180, 88] },
+          { p: [[240, 185], [240, 245]], c: "gitlab", l: "SSH", lp: [250, 203] },
+          { p: [[175, 295], [175, 335]], c: "core", l: "nesting.sock", lp: [185, 319] },
+          { p: [[280, 360], [310, 360]], c: "core" },
+          { p: [[280, 282], [298, 282], [298, 457], [325, 457]], c: "core", dash: true, l: "job stream", lp: [292, 400], rot: -90, la: "middle" },
+          { p: [[630, 70], [630, 245]], c: "github", l: "polls queued jobs", lp: [640, 88] },
+          { p: [[630, 295], [630, 335]], c: "github", l: "Create · Conn · Delete", lp: [640, 319] },
+          { p: [[890, 240], [890, 160], [780, 160]], l: "restarts", lp: [835, 152], la: "middle" },
+          ...bottom.edges,
+        ],
+      },
+    },
+    serve: {
+      cap: "fleetci serve runs both job sources itself, with gitlab-runner's job loop built in. Its classes must not be the plugin's.",
+      d: {
+        w: 1000, h: 740, label: "Serve mode: fleetci serve with GitLab and GitHub sources over the core, per-class providers and single-use VMs",
+        nodes: [
+          { x: 60, y: 20, w: 220, t: "GitLab", s: "jobs API", c: "gitlab", k: "gitlab" },
+          { x: 520, y: 20, w: 220, t: "GitHub", s: "Actions API", c: "github", k: "github" },
+          { x: 30, y: 100, w: 750, h: 430, g: 1, t: "fleetci serve", c: "core" },
+          { x: 60, y: 135, w: 220, t: "GitLab source", s: "embedded job loop", c: "gitlab", k: "gitlab" },
+          { x: 520, y: 135, w: 220, t: "GitHub source", s: "dispatcher", c: "github", k: "github" },
+          { x: 70, y: 245, w: 210, t: "executor provider", s: "Acquire = reserve", c: "gitlab", k: "gitlab" },
+          { x: 70, y: 335, w: 210, t: "Docker executor", s: "over the shared Conn", c: "gitlab", k: "executor" },
+          ...core,
+          { x: 810, y: 240, w: 160, t: "own classes", s: "never the plugin's", c: "accent", dash: 1, k: "isolation" },
+          ...bottom.nodes,
+        ],
+        edges: [
+          { p: [[170, 70], [170, 135]], c: "gitlab", l: "requests a job", lp: [180, 88] },
+          { p: [[630, 70], [630, 135]], c: "github", l: "polls queued jobs", lp: [640, 88] },
+          { p: [[175, 185], [175, 245]], c: "gitlab", l: "only with room", lp: [185, 220] },
+          { p: [[175, 295], [175, 335]], c: "gitlab", l: "VM + Conn", lp: [185, 319] },
+          { p: [[280, 270], [440, 270], [440, 335]], c: "gitlab", l: "Reserve · Acquire · Release", lp: [292, 262] },
+          { p: [[280, 370], [298, 370], [298, 457], [325, 457]], c: "core", dash: true, l: "job", lp: [292, 415], rot: -90, la: "middle" },
+          { p: [[630, 185], [630, 335]], c: "github", l: "Create · Conn · Delete", lp: [640, 262] },
+          ...bottom.edges,
+        ],
+      },
+    },
+  };
+
+  // ---- one small diagram per component ----
+  const row = (y, items, opt = {}) => {
+    const w = opt.w || 104, gap = opt.gap || 15, x0 = opt.x || 10;
+    return items.map((it, i) => ({ x: x0 + i * (w + gap), y, w, h: opt.h || 50, ...it }));
+  };
+  const chain = (nodes, c, labels = []) => nodes.slice(1).map((n, i) => {
+    const a = nodes[i], ay = a.y + (a.h || 50) / 2;
+    return { p: [[a.x + a.w, ay], [n.x, ay]], c, l: labels[i] || "", lp: [(a.x + a.w + n.x) / 2, ay - 8], la: "middle" };
+  });
+  const vchain = (a, b, c, l) => ({ p: [[a.x + a.w / 2, a.y + (a.h || 50)], [b.x + b.w / 2, b.y]], c, l, lp: [a.x + a.w / 2 + 8, (a.y + (a.h || 50) + b.y) / 2 + 4] });
+
+  const D = {};
+
+  (() => { // GitLab job, fleetci's own source
+    const r = row(20, [
+      { t: "Acquire", s: "reserve room", c: "core" },
+      { t: "request", s: "a job", c: "gitlab" },
+      { t: "Prepare", s: "VM + Conn", c: "core" },
+      { t: "run", s: "over SSH", c: "gitlab" },
+      { t: "Release", s: "delete VM", c: "core" },
+    ]);
+    const full = { x: 10, y: 130, w: 104, t: "no room", s: "no request", c: "accent" };
+    const none = { x: 129, y: 130, w: 104, t: "no job", s: "room released" };
+    D.gitlab = {
+      t: "GitLab job", c: "gitlab",
+      d: { w: 600, h: 200, label: "A GitLab job: room is reserved before a job is requested and given back whatever happens", nodes: [...r, full, none],
+        edges: [...chain(r, "fg"), vchain(r[0], full, "accent", "full"), vchain(r[1], none, "fg", "empty · error"),
+          { p: [[233, 155], [536, 155], [536, 70]], dash: true, l: "nothing left reserved", lp: [384, 147], la: "middle" }] },
+      tags: ["NoFreeExecutorError when full", "class: extends .fleetci-<class>"],
+    };
+  })();
+
+  (() => { // plugin mode: gitlab-runner's job loop
+    const r = row(20, [
+      { t: ".gitlab-ci.yml", s: "extends a class", c: "gitlab" },
+      { t: "FLEETCI_CLASS", s: "4vcpu-8gb", c: "gitlab" },
+      { t: "vm_isolation", s: "Create, per job", c: "core" },
+      { t: "VM", s: "class-4vcpu-8gb" },
+    ], { w: 132, gap: 18 });
+    const r2 = row(130, [
+      { t: "docker-autoscaler", s: "fleeting group", c: "gitlab" },
+      { t: "sees 1 instance", s: "the SSH gateway", c: "core" },
+    ], { w: 132, gap: 18 });
+    D.jobloop = {
+      t: "gitlab-runner's job loop", c: "gitlab",
+      d: { w: 600, h: 200, label: "Plugin mode: the autoscaler sees one instance, the gateway; each job asks the nesting API for a VM of its class", nodes: [...r, ...r2],
+        edges: [...chain(r, "gitlab"), ...chain(r2, "gitlab")] },
+      tags: ["one VM per job", "nesting_path /fleetci/nesting.sock"],
+    };
+  })();
+
+  D.gateway = {
+    t: "SSH gateway", c: "core",
+    d: { w: 600, h: 270, label: "The gateway lets gitlab-runner do three things only: reach the nesting socket, reach a job VM by id, and run exit 0",
+      nodes: [
+        { x: 10, y: 85, w: 140, t: "gitlab-runner", s: "short-lived key", c: "gitlab" },
+        { x: 200, y: 85, w: 140, t: "gateway", s: "loopback", c: "core" },
+        { x: 420, y: 10, w: 170, t: "nesting.sock", s: "Create · Delete", c: "core" },
+        { x: 420, y: 85, w: 170, t: "VM by id", s: "via its Conn", c: "core" },
+        { x: 420, y: 160, w: 170, t: "exit 0", s: "health check" },
+        { x: 420, y: 220, w: 170, h: 40, t: "anything else", c: "accent", dash: 1 },
+      ],
+      edges: [
+        { p: [[150, 110], [200, 110]], c: "gitlab", l: "SSH", lp: [175, 102], la: "middle" },
+        { p: [[340, 100], [380, 35], [420, 35]], c: "core" },
+        { p: [[340, 110], [420, 110]], c: "core" },
+        { p: [[340, 120], [380, 185], [420, 185]], c: "core" },
+        { p: [[340, 130], [370, 240], [420, 240]], c: "accent", dash: true, l: "✕ refused", lp: [300, 240], lc: "accent" },
+      ] },
+    tags: ["accepts only keys it issued"],
+  };
+
+  (() => {
+    const r = row(20, [
+      { t: "Create", s: "class-4vcpu-8gb", c: "gitlab" },
+      { t: "Reserve", s: "host queue", c: "core" },
+      { t: "Acquire", s: "taskscaler", c: "core" },
+      { t: "VM id", s: "to the runner" },
+    ], { w: 132, gap: 18 });
+    const r2 = row(120, [
+      { t: "Delete", s: "VM id", c: "gitlab" },
+      { t: "Release", s: "room back", c: "core" },
+      { t: "remove", s: "single-use" },
+    ], { w: 132, gap: 18 });
+    D.nesting = {
+      t: "nesting API", c: "core",
+      d: { w: 600, h: 190, label: "Nesting Create reserves room and acquires a VM; Delete releases and removes it", nodes: [...r, ...r2], edges: [...chain(r, "fg"), ...chain(r2, "fg")] },
+      tags: ["reached only through the gateway"],
+    };
+  })();
+
+  (() => {
+    const W = 132, G = 18, x = i => 10 + i * (W + G);
+    const n = [
+      { x: x(0), y: 20, w: W, t: "poll", s: "every 10 s", c: "github" },
+      { x: x(1), y: 20, w: W, t: "Create VM", s: "fleetci-<class>", c: "core" },
+      { x: x(2), y: 20, w: W, t: "Conn", s: "SSH", c: "core" },
+      { x: x(3), y: 20, w: W, t: "jitconfig", s: "name = VM ID", c: "github" },
+      { x: x(3), y: 115, w: W, t: "runner", s: "jit on stdin", c: "github" },
+      { x: x(2), y: 115, w: W, t: "idle watch", s: "15 s · 10 min", c: "github" },
+      { x: x(1), y: 115, w: W, t: "remove runner", c: "github" },
+      { x: x(0), y: 115, w: W, t: "delete VM", c: "core" },
+      { x: x(0), y: 215, w: W, t: "rate limit", s: "wait as told", c: "accent" },
+      { x: x(1), y: 215, w: W, t: "orphan runners", s: "swept each loop", c: "accent" },
+      { x: x(2), y: 215, w: W, t: "lost answer", s: "found by name", c: "accent" },
+    ];
+    const back = (a, b) => ({ p: [[a.x, a.y + 25], [b.x + b.w, b.y + 25]] });
+    D.github = {
+      t: "GitHub job", c: "github",
+      d: { w: 600, h: 275, label: "A GitHub job: a VM, then a just-in-time runner named after it, both removed after the job; faults handled on the side",
+        nodes: n,
+        edges: [...chain(n.slice(0, 4), "fg"), vchain(n[3], n[4], "fg", "start"), back(n[4], n[5]), back(n[5], n[6]), back(n[6], n[7])],
+        texts: [{ x: 10, y: 205, t: "on faults", c: "accent" }] },
+      tags: ["job still queued → new runner"],
+    };
+  })();
+
+  D.hostq = {
+    t: "host queue", c: "core",
+    d: { w: 600, h: 250, label: "Jobs wait in the host queue; the fullest host with room gets the next VM, and a full class spills to its overflow class",
+      nodes: [
+        { x: 10, y: 30, w: 100, h: 40, t: "job 4vcpu" },
+        { x: 10, y: 80, w: 100, h: 40, t: "job 8vcpu" },
+        { x: 10, y: 130, w: 100, h: 40, t: "job 4vcpu" },
+        { x: 160, y: 72, w: 130, h: 56, t: "host queue", s: "MostAllocated", c: "core" },
+        { x: 350, y: 14, w: 240, h: 58, t: "host A", s: "CPUs · memory lent", bar: 0.78 },
+        { x: 350, y: 90, w: 240, h: 58, t: "host B", s: "", bar: 0.3 },
+        { x: 350, y: 180, w: 240, h: 50, t: "overflow class", s: "e.g. cloud VMs", c: "accent", dash: 1 },
+      ],
+      edges: [
+        { p: [[110, 50], [160, 88]] }, { p: [[110, 100], [160, 100]] }, { p: [[110, 150], [160, 112]] },
+        { p: [[290, 90], [320, 43], [350, 43]], c: "core", l: "fullest first", lp: [355, 85] },
+        { p: [[290, 110], [320, 119], [350, 119]], dash: true },
+        { p: [[225, 128], [225, 205], [350, 205]], c: "accent", l: "class full", lp: [235, 197] },
+      ] },
+    tags: ["budget = cgroup − reserve", "nominated after nominate_after"],
+  };
+
+  D.classes = {
+    t: "classes", c: "core",
+    d: { w: 600, h: 200, label: "Each class has its own fleeting plugin and taskscaler; a supervisor restarts a plugin that dies",
+      nodes: [
+        { x: 10, y: 10, w: 400, h: 115, g: 1, t: "class 4vcpu-8gb", c: "core" },
+        { x: 30, y: 50, w: 160, t: "fleeting plugin", s: "aws · fleetingd · …" },
+        { x: 230, y: 50, w: 160, t: "taskscaler", s: "max · idle · policy", c: "core" },
+        { x: 450, y: 50, w: 140, t: "supervisor", c: "core" },
+      ],
+      edges: [
+        { p: [[190, 75], [230, 75]], both: true },
+        { p: [[520, 100], [520, 160], [110, 160], [110, 100]], c: "accent", l: "restarts if it dies", lp: [315, 152], la: "middle" },
+      ],
+      texts: [{ x: 230, y: 118, t: "drops vanished VMs" }] },
+    tags: ["one per class", "overflow = another class"],
+  };
+
+  D.conns = {
+    t: "Conns", c: "core",
+    d: { w: 600, h: 200, label: "One SSH connection per VM, shared by job streams, the reclaim watch and the GitHub runner start",
+      nodes: [
+        { x: 10, y: 10, w: 150, h: 46, t: "job streams", c: "gitlab" },
+        { x: 10, y: 77, w: 150, h: 46, t: "reclaim watch", c: "accent" },
+        { x: 10, y: 144, w: 150, h: 46, t: "runner start", c: "github" },
+        { x: 230, y: 72, w: 130, h: 56, t: "Conn", s: "one SSH client", c: "core" },
+        { x: 450, y: 72, w: 140, h: 56, t: "VM", s: "sshd" },
+      ],
+      edges: [
+        { p: [[160, 33], [230, 90]], c: "gitlab" }, { p: [[160, 100], [230, 100]], c: "accent" }, { p: [[160, 167], [230, 110]], c: "github" },
+        { p: [[360, 100], [450, 100]], c: "core", l: "1 TCP", lp: [405, 92], la: "middle" },
+      ] },
+    tags: ["keepalive", "one redial at a time"],
+  };
+
+  (() => {
+    const r = row(20, [
+      { t: "poll IMDS", s: "every 2 s", c: "core" },
+      { t: "notice", s: "spot · rebalance", c: "accent" },
+      { t: "cordon", s: "no new VMs", c: "accent" },
+      { t: "drain", s: "jobs finish", c: "core" },
+      { t: "remove", s: "VM gone" },
+    ]);
+    const r2 = row(130, [
+      { t: "Conn", s: "existing SSH", c: "core" },
+      { t: "direct-tcpip", s: "tunnel", c: "core" },
+      { t: "169.254.169.254", s: "in the VM" },
+    ], { w: 150, gap: 30 });
+    D.reclaim = {
+      t: "reclaim watch", c: "accent",
+      d: { w: 600, h: 200, label: "The watch reads the VM's metadata service through its SSH connection every 2 seconds; a notice cordons the VM until its jobs end",
+        nodes: [...r, ...r2], edges: [...chain(r, "fg"), ...chain(r2, "core"), vchain(r[0], r2[0], "core", "via")] },
+      tags: ["never kills a job", "rebalance: opt-in per class", "no curl needed"],
+    };
+  })();
+
+  D.watchdog = {
+    t: "watchdog", c: "core",
+    d: { w: 600, h: 170, label: "The watchdog restarts gitlab-runner once the plugin has been missing past a grace period",
+      nodes: row(20, [
+        { t: "check", s: "plugin alive?", c: "core" },
+        { t: "missing", s: "past grace", c: "accent" },
+        { t: "restart", s: "gitlab-runner", c: "gitlab" },
+        { t: "back off", s: "before the next" },
+      ], { w: 132, gap: 18 }),
+      edges: [
+        ...chain(row(20, [{}, {}, {}, {}], { w: 132, gap: 18 }), "fg"),
+        { p: [[76, 70], [76, 130], [40, 130], [40, 70]], c: "core", l: "alive: check again", lp: [90, 128] },
+      ] },
+    tags: ["plugin mode only"],
+  };
+
+  D.providers = {
+    t: "fleeting providers", c: "core",
+    d: { w: 600, h: 260, label: "Each class names a fleeting plugin; these are the ones fleetci is used with",
+      nodes: [
+        ["aws", "EC2 Auto Scaling group · spot"],
+        ["fleetingd", "microVMs on your machines"],
+        ["googlecloud", "managed instance group"],
+        ["azure", "VM scale set"],
+        ["dockervm", "Docker-in-Docker · local testing, not prod"],
+      ].flatMap(([p, s], i) => [
+        { x: 10, y: 10 + i * 50, w: 150, h: 40, t: p, c: "core", p, dash: p === "dockervm" },
+        { x: 210, y: 10 + i * 50, w: 380, h: 40, t: s, p, dash: p === "dockervm" },
+      ]),
+      edges: [0, 1, 2, 3, 4].map(i => ({ p: [[160, 30 + i * 50], [210, 30 + i * 50]] })) },
+    tags: ["plugin = per class", "fleetingd · dockervm count on [host]"],
+  };
+
+  D.vms = {
+    t: "single-use VMs", c: "core",
+    d: { w: 600, h: 170, label: "A VM is created for one job and deleted after it",
+      nodes: [
+        ...row(20, [
+          { t: "created", s: "for one job", c: "core" },
+          { t: "job runs", s: "Docker", c: "gitlab" },
+          { t: "deleted", s: "never reused", c: "accent" },
+        ], { w: 170, gap: 40 }),
+        { x: 220, y: 110, w: 170, h: 46, t: "SSH user", s: "in the docker group" },
+      ],
+      edges: [...chain(row(20, [{}, {}, {}], { w: 170, gap: 40 }), "fg"), { p: [[305, 110], [305, 70]], dash: true }] },
+    tags: ["capacity_per_instance 1", "max_use_count 1"],
+  };
+
+  (() => {
+    const r = row(30, [
+      { t: "job", s: "script", c: "gitlab" },
+      { t: "Docker executor", c: "gitlab" },
+      { t: "connector", s: "Client", c: "gitlab" },
+      { t: "Conn", s: "shared", c: "core" },
+      { t: "VM", s: "docker.sock" },
+    ]);
+    D.executor = {
+      t: "Docker executor", c: "gitlab",
+      d: { w: 600, h: 110, label: "In serve mode the job's containers run on the VM's Docker through the shared SSH connection", nodes: r, edges: chain(r, "fg") },
+      tags: ["no second SSH connection"],
+    };
+  })();
+
+  D.isolation = {
+    t: "own classes", c: "accent",
+    d: { w: 600, h: 300, label: "The plugin and fleetci serve must use separate classes and groups, or they remove each other's VMs",
+      nodes: [
+        { x: 10, y: 10, w: 160, h: 44, t: "plugin", c: "gitlab" },
+        { x: 10, y: 66, w: 160, h: 44, t: "fleetci serve", c: "core" },
+        { x: 290, y: 10, w: 150, h: 44, t: "group A" },
+        { x: 290, y: 66, w: 150, h: 44, t: "group B" },
+        { x: 10, y: 150, w: 160, h: 44, t: "plugin", c: "gitlab" },
+        { x: 10, y: 206, w: 160, h: 44, t: "fleetci serve", c: "core" },
+        { x: 290, y: 178, w: 150, h: 44, t: "group A", c: "accent" },
+      ],
+      edges: [
+        { p: [[170, 32], [290, 32]] }, { p: [[170, 88], [290, 88]] },
+        { p: [[170, 172], [290, 192]], c: "accent" }, { p: [[170, 228], [290, 208]], c: "accent" },
+      ],
+      texts: [
+        { x: 455, y: 64, t: "✓ separate", c: "ok" },
+        { x: 455, y: 196, t: "✕ remove each", c: "accent" },
+        { x: 455, y: 212, t: "other's VMs", c: "accent" },
+        { x: 10, y: 285, t: "on stop, serve removes its own VMs" },
+      ] },
+    tags: ["separate groups per process"],
+  };
+
+  // ---- page wiring ----
+  const main = document.getElementById("main"), cap = document.getElementById("cap"), panel = document.getElementById("panel");
+  let mode = "serve", sel = null, selP = null;
+
+  function hint() {
+    const sw = (c, t) => `<span><i class="dot" style="--c:var(--${c})"></i>${t}</span>`;
+    panel.innerHTML = `<h2>Click a box</h2><p class="hint">Each one opens its own small diagram.</p>` +
+      `<div class="legend">${sw("gitlab", "GitLab")}${sw("github", "GitHub")}${sw("core", "fleetci core")}${sw("accent", "spot reclaim · faults")}</div>`;
+  }
+  function show(k, p) {
+    const it = D[k];
+    if (!it) return;
+    sel = k; selP = p || null;
+    const tags = (it.tags || []).map(t => `<span class="tag">${esc(t)}</span>`).join("");
+    panel.innerHTML = `<h2><i class="dot" style="--c:var(--${it.c})"></i>${esc(it.t)}</h2>` +
+      `<figure style="margin:0"><div class="scroll">${draw("d-" + k, it.d)}</div></figure><div class="tags">${tags}</div>`;
+    if (selP) panel.querySelectorAll("[data-p]").forEach(g => g.classList.toggle("dim", g.dataset.p !== selP));
+    main.querySelectorAll(".n.k").forEach(g => g.classList.toggle("sel", g.dataset.k === k && (!selP || g.dataset.p === selP)));
+    if (window.matchMedia("(max-width: 1179px)").matches) {
+      const r = panel.getBoundingClientRect();
+      if (r.top > window.innerHeight * 0.6) panel.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }
+  function setMode(m) {
+    mode = MODES[m] ? m : "serve";
+    main.innerHTML = draw("m-" + mode, MODES[mode].d);
+    cap.textContent = MODES[mode].cap;
+    document.querySelectorAll(".seg button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.mode === mode)));
+    if (sel && main.querySelector(`[data-k="${sel}"]`)) show(sel, selP); else { sel = null; hint(); }
+  }
+  main.addEventListener("click", e => {
+    const g = e.target.closest(".n.k");
+    if (g) show(g.dataset.k, g.dataset.p);
+  });
+  main.addEventListener("keydown", e => {
+    if ((e.key === "Enter" || e.key === " ") && e.target.closest(".n.k")) {
+      e.preventDefault();
+      const g = e.target.closest(".n.k");
+      show(g.dataset.k, g.dataset.p);
+    }
+  });
+  document.querySelectorAll(".seg button").forEach(b => b.addEventListener("click", () => {
+    try { history.replaceState(null, "", "#" + b.dataset.mode); } catch (_) {}
+    setMode(b.dataset.mode);
+  }));
+  window.addEventListener("hashchange", () => setMode(location.hash.slice(1)));
+  setMode(location.hash.slice(1) || "serve");
+})();
+</script>
+</body>
+</html>
