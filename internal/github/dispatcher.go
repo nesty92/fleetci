@@ -125,7 +125,27 @@ type Dispatcher struct {
 	taken  map[int64]*attempt // jobs a runner was started for
 	warned map[int64]bool     // jobs already logged as unservable
 	wg     sync.WaitGroup
+
+	orphans []orphan // runners to remove once GitHub lets us
+
+	// settle is how long a runner whose registration went unanswered is
+	// looked for, in case GitHub registers it late.
+	settle time.Duration
 }
+
+// orphan is a runner left registered: one whose removal failed (by id), or
+// one GitHub may have registered without the answer reaching fleetci (by
+// name, the VM's id).
+type orphan struct {
+	repo string
+	id   int64
+	name string
+	at   time.Time
+}
+
+// orphanTTL is how long an orphan is tried before it is left to GitHub,
+// which drops runners that stay offline.
+const orphanTTL = 24 * time.Hour
 
 // New checks the config and reads the token. Runners are started with
 // SSHStart unless start is set.
@@ -179,6 +199,7 @@ func New(ctx context.Context, cfg Config, capacity source.Capacity, start StartF
 		log:          log,
 		taken:        map[int64]*attempt{},
 		warned:       map[int64]bool{},
+		settle:       time.Minute,
 	}, nil
 }
 
@@ -237,24 +258,83 @@ func (d *Dispatcher) Run(ctx context.Context) {
 	t := time.NewTicker(time.Duration(d.cfg.PollInterval))
 	defer t.Stop()
 	for {
+		d.sweep(ctx)
 		for _, repo := range d.cfg.Repos {
 			d.poll(ctx, repo)
 		}
 		select {
 		case <-ctx.Done():
 			d.wg.Wait()
+			sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			d.sweep(sctx)
+			cancel()
 			return
 		case <-t.C:
 		}
 	}
 }
 
+// sweep removes the orphaned runners it can.
+func (d *Dispatcher) sweep(ctx context.Context) {
+	d.mu.Lock()
+	list := d.orphans
+	d.orphans = nil
+	d.mu.Unlock()
+	var keep []orphan
+	for _, o := range list {
+		if ctx.Err() != nil {
+			keep = append(keep, o)
+			continue
+		}
+		found, err := d.removeOrphan(ctx, o)
+		switch {
+		case err != nil && time.Since(o.at) > orphanTTL:
+			d.log.Warn("leaving a runner registered", "repo", o.repo, "runner_id", strconv.FormatInt(o.id, 10), "runner", o.name, "err", err)
+		case err != nil:
+			keep = append(keep, o)
+		case o.id == 0 && !found && time.Since(o.at) < d.settle:
+			// GitHub may yet register it, from a request still on its way.
+			keep = append(keep, o)
+		}
+	}
+	d.mu.Lock()
+	d.orphans = append(d.orphans, keep...)
+	d.mu.Unlock()
+}
+
+// removeOrphan removes o, and says whether it was there to remove.
+func (d *Dispatcher) removeOrphan(ctx context.Context, o orphan) (bool, error) {
+	ids := []int64{o.id}
+	if o.id == 0 {
+		var err error
+		if ids, err = d.gh.runnersNamed(ctx, o.repo, o.name); err != nil {
+			return false, err
+		}
+	}
+	for _, id := range ids {
+		if err := d.gh.deleteRunner(ctx, o.repo, id); err != nil {
+			return false, err
+		}
+		d.log.Info("removed an orphaned runner", "repo", o.repo, "runner_id", strconv.FormatInt(id, 10))
+	}
+	return len(ids) > 0, nil
+}
+
+func (d *Dispatcher) orphaned(o orphan) {
+	o.at = time.Now()
+	d.mu.Lock()
+	d.orphans = append(d.orphans, o)
+	d.mu.Unlock()
+}
+
 func (d *Dispatcher) poll(ctx context.Context, repo string) {
 	jobs, err := d.gh.queuedJobs(ctx, repo)
-	if err != nil {
-		if ctx.Err() == nil {
-			d.log.Warn("listing queued jobs", "repo", repo, "err", err)
-		}
+	if err != nil && ctx.Err() == nil {
+		d.log.Warn("listing queued jobs", "repo", repo, "err", err)
+	}
+	// Rate limited, a runner could not be registered anyway; and a VM
+	// costs.
+	if ctx.Err() != nil || errors.As(err, new(rateLimited)) {
 		return
 	}
 
@@ -271,7 +351,9 @@ func (d *Dispatcher) poll(ctx context.Context, repo string) {
 			d.serve(ctx, repo, j, class)
 		}()
 	}
-	d.prune(queued)
+	if err == nil {
+		d.prune(queued) // a job missing from a partial list may still wait
+	}
 }
 
 // classFor picks the class a job asks for. Jobs without a fleetci label
@@ -346,8 +428,9 @@ const maxTries = 3
 var retryPause = 30 * time.Second
 
 // forget lets the next poll start a new runner for the job if it is still
-// queued: at once when no VM was found, after a pause when a runner failed.
-func (d *Dispatcher) forget(id int64, failed bool) {
+// queued. A try that used counts against maxTries; one that pauses holds
+// the next off for retryPause.
+func (d *Dispatcher) forget(id int64, used, pause bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	a, ok := d.taken[id]
@@ -355,21 +438,20 @@ func (d *Dispatcher) forget(id int64, failed bool) {
 		return
 	}
 	a.running = false
-	if failed {
+	if pause {
 		a.retryAt = time.Now().Add(retryPause)
-	} else {
+	}
+	if !used {
 		a.tries--
 	}
 }
 
-// done marks the job's runner finished; the job is not served again.
+// done marks the job's runner finished. GitHub hands a runner any queued
+// job with its labels, so the one it took may be another: a job still
+// queued once retryPause has given GitHub time to show it taken gets a
+// runner again, without using a try.
 func (d *Dispatcher) done(id int64) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if a, ok := d.taken[id]; ok {
-		a.running = false
-		a.tries = maxTries
-	}
+	d.forget(id, false, true)
 }
 
 // prune drops jobs that are no longer queued after an hour, so the map stays
@@ -403,7 +485,7 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 		if ctx.Err() == nil {
 			log.Error("no vm for job; retrying on the next poll", "err", err)
 		}
-		d.forget(j.ID, false)
+		d.forget(j.ID, false, false)
 		return
 	}
 	defer func() {
@@ -413,7 +495,7 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 	conn, err := d.capacity.Conn(created.ID)
 	if err != nil {
 		log.Error("no connection to the vm; retrying on the next poll", "err", err)
-		d.forget(j.ID, false)
+		d.forget(j.ID, false, false)
 		return
 	}
 	vm := VM{VM: created, Conn: conn}
@@ -422,14 +504,21 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 	runnerID, jit, err := d.gh.jitConfig(ctx, repo, vm.ID, d.cfg.RunnerGroupID, labels)
 	if err != nil {
 		log.Error("registering runner; retrying", "err", err)
-		d.forget(j.ID, true)
+		if !refused(err) {
+			// GitHub may have registered it all the same.
+			d.orphaned(orphan{repo: repo, name: vm.ID})
+		}
+		// A GitHub that errs or limits is no fault of the job's: only a
+		// refusal uses a try.
+		d.forget(j.ID, refused(err), true)
 		return
 	}
 	defer func() {
 		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		defer cancel()
 		if err := d.gh.deleteRunner(dctx, repo, runnerID); err != nil {
-			log.Warn("removing runner", "runner_id", strconv.FormatInt(runnerID, 10), "err", err)
+			log.Warn("removing runner; trying again later", "runner_id", strconv.FormatInt(runnerID, 10), "err", err)
+			d.orphaned(orphan{repo: repo, id: runnerID})
 		}
 	}()
 	log.Info("runner starting", "runner_id", strconv.FormatInt(runnerID, 10), "labels", labels, "waited", time.Since(start).Round(time.Second).String())
@@ -454,7 +543,7 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 		if rctx.Err() == nil {
 			log.Error("runner failed; retrying if the job is still queued", "err", err)
 		}
-		d.forget(j.ID, true)
+		d.forget(j.ID, true, true)
 	default:
 		d.done(j.ID)
 		log.Info("runner done", "took", time.Since(start).Round(time.Second).String())
