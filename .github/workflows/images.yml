@@ -87,6 +87,10 @@ jobs:
           sudo curl -fsSL -o /usr/local/bin/cloud-hypervisor \
             "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v$CH_VERSION/${{ matrix.ch }}"
           sudo chmod 755 /usr/local/bin/cloud-hypervisor
+          # Docker on the runner drops forwarded packets, the build VM's
+          # included; let them through.
+          sudo sysctl -q -w net.ipv4.ip_forward=1
+          sudo iptables -P FORWARD ACCEPT
           # The release workflow bundles these; build-image doesn't need them.
           cp fleetingd/LICENSE fleetingd/cmd/fleeting-plugin-fleetingd/
           echo "fleeting-plugin-fleetingd $FLEETINGD_REF" > fleetingd/cmd/fleeting-plugin-fleetingd/NOTICE
@@ -113,7 +117,9 @@ jobs:
           ip -o addr; ip route; sudo nft list ruleset | head -60
           sudo sh -c 'tail -c 30000 "$0"/build/vms/.instance_data/*_console' "$RUNNER_TEMP" | tr -d '\r'
       - name: Check
-        run: sudo images/verify.sh out/small-${{ matrix.arch }}.qcow2 ${{ needs.plan.outputs.runner }} | tee out/small-${{ matrix.arch }}.manifest
+        run: |
+          set -o pipefail
+          sudo images/verify.sh out/small-${{ matrix.arch }}.qcow2 ${{ needs.plan.outputs.runner }} | tee out/small-${{ matrix.arch }}.manifest
       - uses: actions/upload-artifact@v7
         with:
           name: small-${{ matrix.arch }}
