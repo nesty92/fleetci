@@ -369,9 +369,15 @@ func scalerOptions(c Class, settings provider.Settings, up taskscaler.UpFunc, lo
 		taskscaler.WithMaxInstances(c.MaxInstances),
 		taskscaler.WithInstanceUpFunc(up),
 		taskscaler.WithDeleteInstancesOnShutdown(),
-		// A job is waiting while instances are expected: look every second
-		// instead of every two. One list call per second per scaling class.
-		taskscaler.WithUpdateIntervalWhenExpecting(time.Second),
+		// A job is waiting while instances are expected: look often. Each
+		// look is a list call to the plugin: for a class on this host a look
+		// at the plugin's own memory, every quarter second; for a cloud one
+		// an API call, every second.
+		taskscaler.WithUpdateIntervalWhenExpecting(expectingInterval(c)),
+		// A job waiting for a VM looks for a ready one this often. The look
+		// is in taskscaler's memory, and the default two seconds was most
+		// of a restored VM's wait.
+		taskscaler.WithAcquireDelay(100 * time.Millisecond),
 		// Without a heartbeat function taskscaler never asks the plugin about
 		// an instance before placing a job on it. With one, every placement
 		// first calls the plugin's Heartbeat, and a failure skips the
@@ -382,6 +388,15 @@ func scalerOptions(c Class, settings provider.Settings, up taskscaler.UpFunc, lo
 		// connects to the VM anyway.
 		taskscaler.WithHeartbeatFunc(func(context.Context, provider.ConnectInfo) error { return nil }),
 	}
+}
+
+// expectingInterval is how often taskscaler lists a class's instances
+// while it waits for new ones.
+func expectingInterval(c Class) time.Duration {
+	if c.OnHost() {
+		return 250 * time.Millisecond
+	}
+	return time.Second
 }
 
 // initialised is an instance group whose Init already ran; taskscaler's own
@@ -711,7 +726,9 @@ func dockerReady(group provider.InstanceGroup, external bool, log hclog.Logger) 
 // readyScript waits for cloud-init where the image has it, then asks the
 // Docker server for its version. The client alone can print an empty
 // version and exit 0 when no daemon answers, so the output is what counts.
-const readyScript = `if command -v cloud-init >/dev/null 2>&1; then cloud-init status --wait >/dev/null 2>&1 || true; fi
+// cloud-init writes result.json when it is done; while it is there,
+// cloud-init status, a Python program slow to start, has nothing to add.
+const readyScript = `if [ ! -e /run/cloud-init/result.json ] && command -v cloud-init >/dev/null 2>&1; then cloud-init status --wait >/dev/null 2>&1 || true; fi
 docker version --format '{{.Server.Version}}'`
 
 func dockerVersion(ctx context.Context, group provider.InstanceGroup, id string, external bool) (string, error) {

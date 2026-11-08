@@ -148,3 +148,33 @@ org's `basic` workflow (two jobs, 1vcpu-2gb).
 | download, check and decompress on start (local network) | 3.4 s |
 | snapshot from the downloaded image | 14 s |
 | dispatch to both jobs done | 35 s; the runners started 23 s after dispatch and ran 11 s, no runner downloaded |
+
+## From a waiting job to its VM
+
+The playground's `basic` workflow, two jobs at once on 1vcpu-2gb VMs
+restored from a snapshot, from fleetci asking for the VMs to each job
+holding one.
+
+| Step | Before | After |
+| --- | --- | --- |
+| taskscaler decides to scale, then asks the plugin | 1.2 s | 0.46 s; up to 2 s, on taskscaler's 1 s tick and its provisioning loop |
+| both VMs restored | 0.84 s, one after the other | 0.26 s, side by side |
+| taskscaler sees them | 1.0 s | at once |
+| SSH and `docker version` answer | 1.1 s | 0.85 s |
+| the waiting job takes a ready VM | 1.85 s | 30 ms |
+| total | 6.0 s | 1.6 s |
+
+One restore, 460 ms before: 100 ms waiting for the tap device (looked for
+every 100 ms), then the identity script, where `ssh-keygen -A` took 86 ms
+and `hostnamectl` 50 ms; each process right after a restore is slow to
+start, its memory read in from the snapshot. After: 250–260 ms, with the
+tap looked for every 5 ms, the host key made by the plugin, and fewer
+processes.
+
+What changed: taskscaler's acquire delay is 100 ms (it was 2 s), a class
+on this host is listed every 250 ms while VMs are expected (cloud classes
+stay at 1 s), the readiness check skips `cloud-init status` once cloud-init
+has written its result, and fleetingd restores a burst in parallel.
+
+The rest is GitHub's: 0.8 s to register the JIT runner, 3 s for the runner
+to start and connect, 2.3 s for GitHub to hand it the job.
