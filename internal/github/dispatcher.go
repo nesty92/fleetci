@@ -13,7 +13,9 @@ package github
 import (
 	"cmp"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -748,8 +750,28 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 	// the same labels, logged as job once the runner says which.
 	log := d.log.With("repo", repo, "queued_job", j.Name, "queued_job_id", strconv.FormatInt(j.ID, 10), "class", class)
 	start := time.Now()
+	labels := runnerLabels(j.Labels)
+	scope := d.scope(repo)
 
+	// The runner is registered while the VM is taken: each takes most of a
+	// second, and neither needs the other.
+	regc := make(chan registration, 1)
+	go func() { regc <- d.register(ctx, scope, class, labels) }()
 	created, err := d.capacity.Create(ctx, class)
+	reg := <-regc
+	if err == nil && reg.err == nil && time.Since(reg.at) > registrationFresh {
+		// A long wait for room: a config that old is swapped for a new one
+		// rather than trusted to still work.
+		d.unregister(ctx, scope, reg.id, log)
+		reg = d.register(ctx, scope, class, labels)
+	}
+	if reg.err == nil {
+		defer d.unregister(ctx, scope, reg.id, log)
+	} else if !refused(reg.err) {
+		// GitHub may have registered it all the same.
+		d.orphaned(orphan{scope: scope, name: reg.name})
+	}
+
 	if err != nil {
 		if ctx.Err() == nil {
 			log.Error("no vm for job; retrying", "err", err)
@@ -769,29 +791,15 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 	}
 	vm := VM{VM: created, Conn: conn}
 
-	labels := runnerLabels(j.Labels)
-	scope := d.scope(repo)
-	runnerID, jit, err := d.gh.jitConfig(ctx, scope, vm.ID, d.cfg.RunnerGroupID, labels)
-	if err != nil {
-		log.Error("registering runner; retrying", "err", err)
-		if !refused(err) {
-			// GitHub may have registered it all the same.
-			d.orphaned(orphan{scope: scope, name: vm.ID})
-		}
+	if reg.err != nil {
+		log.Error("registering runner; retrying", "err", reg.err)
 		// A GitHub that errs or limits is no fault of the job's: only a
 		// refusal uses a try.
-		d.forget(j.ID, refused(err), true)
+		d.forget(j.ID, refused(reg.err), true)
 		return
 	}
-	defer func() {
-		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-		defer cancel()
-		if err := d.gh.deleteRunner(dctx, scope, runnerID); err != nil {
-			log.Warn("removing runner; trying again later", "runner_id", strconv.FormatInt(runnerID, 10), "err", err)
-			d.orphaned(orphan{scope: scope, id: runnerID})
-		}
-	}()
-	log.Info("runner starting", "runner_id", strconv.FormatInt(runnerID, 10), "labels", labels, "waited", time.Since(start).Round(time.Second).String())
+	runnerID, jit := reg.id, reg.jit
+	log.Info("runner starting", "runner", reg.name, "runner_id", strconv.FormatInt(runnerID, 10), "labels", labels, "waited", time.Since(start).Round(time.Second).String())
 
 	rctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -818,6 +826,47 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 		d.done(j.ID)
 		log.Info("runner done", "took", time.Since(start).Round(time.Second).String())
 	}
+}
+
+// registrationFresh is how old a runner's registration may be when its VM
+// comes. Most come within a second; one that waited for room longer is
+// registered again.
+var registrationFresh = time.Minute
+
+// registration is a just-in-time runner GitHub registered, or why it did
+// not.
+type registration struct {
+	name string
+	id   int64
+	jit  string
+	at   time.Time
+	err  error
+}
+
+// register registers a runner for a job of class, under a name of its own:
+// the VM it will run on is not known yet.
+func (d *Dispatcher) register(ctx context.Context, scope, class string, labels []string) registration {
+	r := registration{name: runnerName(class)}
+	r.id, r.jit, r.err = d.gh.jitConfig(ctx, scope, r.name, d.cfg.RunnerGroupID, labels)
+	r.at = time.Now()
+	return r
+}
+
+// unregister removes a runner, or leaves it to the orphan sweep.
+func (d *Dispatcher) unregister(ctx context.Context, scope string, id int64, log hclog.Logger) {
+	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	if err := d.gh.deleteRunner(dctx, scope, id); err != nil {
+		log.Warn("removing runner; trying again later", "runner_id", strconv.FormatInt(id, 10), "err", err)
+		d.orphaned(orphan{scope: scope, id: id})
+	}
+}
+
+// runnerName names a runner after its class, as fleetci's VMs are.
+func runnerName(class string) string {
+	b := make([]byte, 4)
+	_, _ = rand.Read(b)
+	return "fleetci-" + class + "-" + hex.EncodeToString(b)
 }
 
 // watchIdle stops a runner that has not picked up a job within IdleTimeout.
