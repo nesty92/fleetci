@@ -10,10 +10,13 @@ For [fleetingd](https://github.com/nesty92/fleeting-plugin-fleetingd), amd64
 (arm64 once a GitHub runner for it has `/dev/kvm`): Ubuntu's daily cloud image (the one fleetingd builds on) with
 what fleetci needs and little else.
 
-- Docker with buildx, the `ubuntu` user in the `docker` group;
+- Docker with buildx and compose, the `ubuntu` user in the `docker` group;
 - actions/runner unpacked in `~/actions-runner-<version>`, with libicu and
   the rest of its dependencies;
-- git, zstd, curl, cloud-init;
+- what workflows written for GitHub's runners most often call without
+  installing it: git with git-lfs, the GitHub CLI (`gh`), `python` and pip,
+  make and gcc (`build-essential`), zip and unzip;
+- zstd, curl, cloud-init;
 - snapd, unattended-upgrades and apt's timers removed or masked, so a VM's
   first minute is the job's.
 

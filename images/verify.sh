@@ -16,8 +16,17 @@ fail=0
 need() { if [ -e "$mnt/$1" ]; then echo "ok    $1"; else echo "MISSING $1"; fail=1; fi; }
 need usr/bin/docker
 need usr/libexec/docker/cli-plugins/docker-buildx
+need usr/libexec/docker/cli-plugins/docker-compose
 need usr/bin/git
+need usr/bin/git-lfs
+need usr/bin/gh
 need usr/bin/zstd
+need usr/bin/unzip
+need usr/bin/make
+need usr/bin/gcc
+need usr/bin/python
+need usr/bin/pip3
+need var/lib/systemd/linger/ubuntu
 need usr/bin/cloud-init
 need home/ubuntu/actions-runner-$runner/run.sh
 need etc/fleetci-image
