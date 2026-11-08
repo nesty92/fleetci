@@ -135,7 +135,8 @@ provided").
 
 ## The small VM image
 
-[images/small.json](../images/small.json) built locally with fleetingd's
+The image now called [github](../images/github.json), then
+`images/small.json`, built locally with fleetingd's
 `build-image` (Cloud Hypervisor 54.0, 2 vCPU, amd64), then used through
 `vm_image_url` from an HTTP server on the same machine, for the playground
 org's `basic` workflow (two jobs, 1vcpu-2gb).

@@ -35,7 +35,7 @@ fi
 dir=$HOME/actions-runner-$version
 if [ ! -x "$dir/run.sh" ]; then
   mkdir -p "$dir"
-  curl -fsSL "https://github.com/actions/runner/releases/download/v$version/actions-runner-linux-$arch-$version.tar.gz" | tar -xz -C "$dir"
+  curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "https://github.com/actions/runner/releases/download/v$version/actions-runner-linux-$arch-$version.tar.gz" | tar -xz -C "$dir"
 fi
 cd "$dir"
 # Paths workflows written for GitHub's runners name: the work directory as
