@@ -609,7 +609,22 @@ func (d *Dispatcher) pollAll(ctx context.Context) {
 			queued[id] = true // a job of a repo not polled
 		}
 		d.mu.Unlock()
+		d.unwait(queued)
 		d.prune(queued) // a job missing from a partial list may still wait
+	}
+}
+
+// unwait stops the wait for a VM of each job no longer queued: another
+// runner took it, or it was cancelled, while it waited for room. Without,
+// it would get a VM only to find it has nothing to run.
+func (d *Dispatcher) unwait(queued map[int64]bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for id, a := range d.taken {
+		if !queued[id] && a.unwait != nil {
+			a.unwait()
+			a.unwait = nil
+		}
 	}
 }
 
@@ -706,6 +721,8 @@ type attempt struct {
 	serves  int // every serve, those forgotten unused too
 	running bool
 	retryAt time.Time
+	// unwait stops the wait for the job's VM, set while it lasts.
+	unwait context.CancelFunc
 }
 
 // maxTries caps the runners started for one job whose runners keep failing
@@ -774,7 +791,20 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 	// second, and neither needs the other.
 	regc := make(chan registration, 1)
 	go func() { regc <- d.register(ctx, scope, class, labels) }()
-	created, err := d.capacity.Create(ctx, class)
+	wctx, unwait := context.WithCancel(ctx)
+	d.mu.Lock()
+	if a := d.taken[j.ID]; a != nil {
+		a.unwait = unwait
+	}
+	d.mu.Unlock()
+	created, err := d.capacity.Create(wctx, class)
+	d.mu.Lock()
+	if a := d.taken[j.ID]; a != nil {
+		a.unwait = nil
+	}
+	d.mu.Unlock()
+	gone := wctx.Err() != nil && ctx.Err() == nil
+	unwait()
 	reg := <-regc
 	if err == nil && reg.err == nil && time.Since(reg.at) > registrationFresh {
 		// A long wait for room: a config that old is swapped for a new one
@@ -789,6 +819,11 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 		d.orphaned(orphan{scope: scope, name: reg.name})
 	}
 
+	if err != nil && gone {
+		log.Info("job taken by another runner while it waited for a vm", "waited", time.Since(start).Round(time.Second).String())
+		d.done(j.ID)
+		return
+	}
 	if err != nil {
 		if ctx.Err() == nil {
 			log.Error("no vm for job; retrying", "err", err)

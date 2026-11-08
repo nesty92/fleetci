@@ -34,6 +34,7 @@ type fakeBackend struct {
 
 	createWait time.Duration // before Create answers
 	createErr  error
+	full       bool // Create waits for room until its context ends
 }
 
 func (b *fakeBackend) Classes(context.Context) ([]source.Class, string, error) {
@@ -67,7 +68,11 @@ func (b *fakeBackend) Conn(id string) (*proxy.Conn, error) {
 	return b.conns[id], nil
 }
 
-func (b *fakeBackend) Create(_ context.Context, class string) (source.VM, error) {
+func (b *fakeBackend) Create(ctx context.Context, class string) (source.VM, error) {
+	if b.full {
+		<-ctx.Done()
+		return source.VM{}, ctx.Err()
+	}
 	time.Sleep(b.createWait)
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -113,7 +118,10 @@ func (g *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprint(w, `{"workflow_runs":[]}`)
 		}
 	case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/actions/runs/7/jobs":
-		fmt.Fprint(w, g.jobsJSON)
+		g.mu.Lock()
+		jobs := g.jobsJSON
+		g.mu.Unlock()
+		fmt.Fprint(w, jobs)
 	case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/actions/runners/generate-jitconfig":
 		var body struct {
 			Name   string   `json:"name"`
@@ -354,6 +362,51 @@ func TestDispatcherSkipsAJobTakenElsewhere(t *testing.T) {
 	defer backend.mu.Unlock()
 	if len(backend.created) != len(backend.deleted) {
 		t.Errorf("%d vms created, %d removed", len(backend.created), len(backend.deleted))
+	}
+}
+
+// A job that leaves the queue while it waits for room gets no VM.
+func TestDispatcherStopsWaitingForAJobTakenElsewhere(t *testing.T) {
+	gh := &fakeGitHub{t: t, jit: map[string][]string{}, jobsJSON: `{"jobs":[
+	  {"id":1,"name":"build","status":"queued","labels":["fleetci"]}
+	]}`}
+	srv := httptest.NewServer(gh)
+	defer srv.Close()
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	_ = os.WriteFile(tokenFile, []byte("test-token"), 0o600)
+	backend := &fakeBackend{defaultClass: "2vcpu-1gb", full: true}
+	start := func(context.Context, VM, string, func(string)) error {
+		t.Error("a runner started")
+		return nil
+	}
+	d, err := New(t.Context(), Config{Repos: []string{"o/r"}, TokenFile: tokenFile, PollInterval: fleet.Duration(5 * time.Millisecond), APIURL: srv.URL},
+		backend, start, hclog.NewNullLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { d.Run(ctx); close(done) }()
+	waiting := func() bool {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		return d.taken[1] != nil && d.taken[1].unwait != nil
+	}
+	waitFor(t, waiting)
+	gh.mu.Lock()
+	gh.jobsJSON = `{"jobs":[]}`
+	gh.mu.Unlock()
+	waitFor(t, func() bool {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		return d.taken[1] != nil && !d.taken[1].running
+	})
+	cancel()
+	<-done
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if len(backend.created) != 0 {
+		t.Errorf("%d vms created", len(backend.created))
 	}
 }
 
