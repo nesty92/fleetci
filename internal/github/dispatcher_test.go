@@ -31,6 +31,9 @@ type fakeBackend struct {
 	created []string // classes
 	deleted []string // vm ids
 	conns   map[string]*proxy.Conn
+
+	createWait time.Duration // before Create answers
+	createErr  error
 }
 
 func (b *fakeBackend) Classes(context.Context) ([]source.Class, string, error) {
@@ -65,8 +68,12 @@ func (b *fakeBackend) Conn(id string) (*proxy.Conn, error) {
 }
 
 func (b *fakeBackend) Create(_ context.Context, class string) (source.VM, error) {
+	time.Sleep(b.createWait)
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.createErr != nil {
+		return source.VM{}, b.createErr
+	}
 	b.created = append(b.created, class)
 	return source.VM{ID: fmt.Sprintf("fleetci-%s-%d", class, len(b.created)), Class: class}, nil
 }
@@ -84,6 +91,7 @@ type fakeGitHub struct {
 	polls    atomic.Int32
 	mu       sync.Mutex
 	jit      map[string][]string // runner name → labels
+	names    []string            // runner names, as registered
 	removed  []int64
 	nextID   int64
 	jobsJSON string
@@ -117,6 +125,7 @@ func (g *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.nextID++
 		id := g.nextID
 		g.jit[body.Name] = body.Labels
+		g.names = append(g.names, body.Name)
 		g.mu.Unlock()
 		fmt.Fprintf(w, `{"runner":{"id":%d},"encoded_jit_config":"jit-%s"}`, id, body.Name)
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/actions/runners/"):
@@ -154,11 +163,11 @@ func TestDispatcher(t *testing.T) {
 	backend := &fakeBackend{defaultClass: "2vcpu-1gb"}
 	release := make(chan struct{})
 	var mu sync.Mutex
-	started := map[string]string{} // vm id → jit config
+	started := map[string]string{} // jit config → vm id
 	conns := map[string]*proxy.Conn{}
 	start := func(ctx context.Context, vm VM, jit string, took func(string)) error {
 		mu.Lock()
-		started[vm.ID] = jit
+		started[jit] = vm.ID
 		conns[vm.ID] = vm.Conn
 		mu.Unlock()
 		select {
@@ -202,10 +211,12 @@ func TestDispatcher(t *testing.T) {
 		if !slices.Equal(labels, want) {
 			t.Errorf("runner %s labels %v; want %v", name, labels, want)
 		}
-		if started[name] != "jit-"+name {
-			t.Errorf("runner %s started with %q", name, started[name])
+		vm := started["jit-"+name]
+		if vm == "" {
+			t.Errorf("runner %s never started", name)
+			continue
 		}
-		if want, _ := backend.Conn(name); conns[name] == nil || conns[name] != want {
+		if want, _ := backend.Conn(vm); conns[vm] == nil || conns[vm] != want {
 			t.Errorf("runner %s started without its vm's connection", name)
 		}
 	}
@@ -291,6 +302,75 @@ func TestDispatcherRetriesFailedRunner(t *testing.T) {
 	defer backend.mu.Unlock()
 	if len(backend.deleted) != maxTries {
 		t.Errorf("%d vms removed; want %d", len(backend.deleted), maxTries)
+	}
+}
+
+// runOne serves one queued job on backend until wait holds, and returns
+// the fake GitHub it talked to.
+func runOne(t *testing.T, backend *fakeBackend, start StartFunc, wait func(*fakeGitHub) bool) *fakeGitHub {
+	t.Helper()
+	gh := &fakeGitHub{t: t, jit: map[string][]string{}, jobsJSON: `{"jobs":[
+	  {"id":1,"name":"build","status":"queued","labels":["fleetci"]}
+	]}`}
+	srv := httptest.NewServer(gh)
+	t.Cleanup(srv.Close)
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	_ = os.WriteFile(tokenFile, []byte("test-token"), 0o600)
+	d, err := New(t.Context(), Config{Repos: []string{"o/r"}, TokenFile: tokenFile, PollInterval: fleet.Duration(5 * time.Millisecond), APIURL: srv.URL},
+		backend, start, hclog.NewNullLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { d.Run(ctx); close(done) }()
+	waitFor(t, func() bool { gh.mu.Lock(); defer gh.mu.Unlock(); return wait(gh) })
+	cancel()
+	<-done
+	return gh
+}
+
+// A runner registered while its VM was taken is removed when no VM came.
+func TestDispatcherRemovesRunnerWithoutVM(t *testing.T) {
+	backend := &fakeBackend{defaultClass: "2vcpu-1gb", createErr: errors.New("no room")}
+	start := func(context.Context, VM, string, func(string)) error {
+		t.Error("a runner started without a vm")
+		return nil
+	}
+	gh := runOne(t, backend, start, func(g *fakeGitHub) bool { return g.nextID >= 2 && len(g.removed) >= 2 })
+	gh.mu.Lock()
+	defer gh.mu.Unlock()
+	if int64(len(gh.removed)) < gh.nextID-1 {
+		t.Errorf("%d runners registered, %d removed", gh.nextID, len(gh.removed))
+	}
+}
+
+// A registration older than registrationFresh by the time its VM comes is
+// replaced by a new one, and the runner starts on that.
+func TestDispatcherRegistersAgainAfterLongWait(t *testing.T) {
+	defer func(f time.Duration) { registrationFresh = f }(registrationFresh)
+	registrationFresh = 20 * time.Millisecond
+
+	backend := &fakeBackend{defaultClass: "2vcpu-1gb", createWait: 100 * time.Millisecond}
+	jits := make(chan string, 4)
+	release := make(chan struct{})
+	start := func(ctx context.Context, _ VM, jit string, _ func(string)) error {
+		jits <- jit
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return nil
+	}
+	gh := runOne(t, backend, start, func(g *fakeGitHub) bool { return len(jits) == 1 })
+	close(release)
+	gh.mu.Lock()
+	defer gh.mu.Unlock()
+	if gh.nextID != 2 || len(gh.removed) < 1 || gh.removed[0] != 1 {
+		t.Fatalf("registered %d, removed %v; want the first removed and a second registered", gh.nextID, gh.removed)
+	}
+	if jit := <-jits; jit != "jit-"+gh.names[1] {
+		t.Errorf("runner started with %q; want the second registration's, %q", jit, "jit-"+gh.names[1])
 	}
 }
 
