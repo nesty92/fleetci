@@ -268,6 +268,8 @@ func checkOverflow(name string, classes map[string]Class) error {
 		return fmt.Errorf("class %q: overflow class %q doesn't exist", name, o)
 	case oc.Overflow != "":
 		return fmt.Errorf("class %q: overflow class %q has an overflow of its own (%q); one step only", name, o, oc.Overflow)
+	case classes[name].Arch() != "" && oc.Arch() != "" && classes[name].Arch() != oc.Arch():
+		return fmt.Errorf("class %q is %s, its overflow %q %s", name, classes[name].Arch(), o, oc.Arch())
 	}
 	return nil
 }

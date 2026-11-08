@@ -374,6 +374,35 @@ func TestDispatcherRegistersAgainAfterLongWait(t *testing.T) {
 	}
 }
 
+// GitHub's architecture labels are served by a class of that architecture.
+func TestClassForArchLabels(t *testing.T) {
+	d := &Dispatcher{
+		cfg:          Config{LabelPrefix: "fleetci"},
+		defaultClass: "small",
+		classes:      []string{"small", "arm", "cloud"},
+		arches:       arches([]source.Class{{Name: "small", Arch: "amd64"}, {Name: "arm", Arch: "arm64"}, {Name: "cloud"}}),
+		log:          hclog.NewNullLogger(),
+		warned:       map[int64]bool{},
+	}
+	for i, c := range []struct {
+		labels []string
+		class  string
+	}{
+		{[]string{"self-hosted", "Linux", "X64", "fleetci"}, "small"},
+		{[]string{"self-hosted", "linux", "ARM64", "fleetci-arm"}, "arm"},
+		{[]string{"fleetci-arm", "x64"}, ""},
+		{[]string{"fleetci", "arm64"}, ""},
+		{[]string{"fleetci-cloud", "X64"}, ""}, // its architecture isn't known
+		{[]string{"fleetci-cloud", "self-hosted"}, "cloud"},
+		{[]string{"fleetci", "macOS"}, ""},
+	} {
+		class, ok := d.classFor("o/r", job{ID: int64(i), Labels: c.labels})
+		if ok != (c.class != "") || class != c.class && ok {
+			t.Errorf("%v: class %q, %v; want %q", c.labels, class, ok, c.class)
+		}
+	}
+}
+
 func TestNewCacheURLGetsTrailingSlash(t *testing.T) {
 	tokenFile := filepath.Join(t.TempDir(), "token")
 	_ = os.WriteFile(tokenFile, []byte("x"), 0o600)

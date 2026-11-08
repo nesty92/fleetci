@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -141,6 +142,18 @@ func (c Class) capacity() int { return max(c.CapacityPerInstance, 1) }
 
 // useCount is how many jobs a VM runs before it is removed.
 func (c Class) useCount() int { return max(c.MaxUseCount, 1) }
+
+// Arch is the GOARCH of the class's VMs: connector_config.arch, or this
+// machine's for VMs booted on it. "" when the config doesn't say.
+func (c Class) Arch() string {
+	switch {
+	case c.Connector.Arch != "":
+		return c.Connector.Arch
+	case c.OnHost():
+		return runtime.GOARCH
+	}
+	return ""
+}
 
 // Slots is how many of the class's jobs run at once.
 func (c Class) Slots() int { return c.MaxInstances * c.capacity() }

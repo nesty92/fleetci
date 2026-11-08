@@ -107,6 +107,10 @@ const DefaultRunnerVersion = "2.338.2"
 // has them.
 var genericLabels = []string{"self-hosted", "linux"}
 
+// archLabels are GitHub's labels for a runner's architecture, by GOARCH,
+// served by a class of that architecture.
+var archLabels = map[string]string{"x64": "amd64", "arm64": "arm64", "arm": "arm"}
+
 // VM is a job's VM and how to reach it.
 type VM struct {
 	source.VM
@@ -150,6 +154,7 @@ type Dispatcher struct {
 	cfg          Config
 	defaultClass string
 	classes      []string
+	arches       map[string]string // class → GOARCH, where known
 	capacity     source.Capacity
 	start        StartFunc
 	gh           *client
@@ -249,6 +254,7 @@ func New(ctx context.Context, cfg Config, capacity source.Capacity, start StartF
 		cfg:          cfg,
 		defaultClass: defaultClass,
 		classes:      source.Names(classes),
+		arches:       arches(classes),
 		capacity:     capacity,
 		start:        start,
 		gh:           newClient(cfg.APIURL, tokens, hc),
@@ -650,8 +656,17 @@ func (d *Dispatcher) classFor(repo string, j job) (string, bool) {
 	}
 	for _, l := range j.Labels {
 		l = strings.ToLower(l)
-		if l != d.cfg.LabelPrefix && !strings.HasPrefix(l, d.cfg.LabelPrefix+"-") && !slices.Contains(genericLabels, l) {
+		if l == d.cfg.LabelPrefix || strings.HasPrefix(l, d.cfg.LabelPrefix+"-") || slices.Contains(genericLabels, l) {
+			continue
+		}
+		arch, isArch := archLabels[l]
+		switch {
+		case !isArch:
 			problem = fmt.Sprintf("label %q is not served by fleetci", l)
+		case d.arches[class] == "":
+			problem = fmt.Sprintf("label %q: class %q's architecture is not known; set its connector_config.arch", l, class)
+		case d.arches[class] != arch:
+			problem = fmt.Sprintf("label %q: class %q is %s", l, class, d.arches[class])
 		}
 	}
 	if problem != "" {
@@ -894,6 +909,17 @@ func (d *Dispatcher) watchIdle(ctx context.Context, stop context.CancelFunc, sco
 			return
 		}
 	}
+}
+
+// arches maps each class to its architecture, where known.
+func arches(classes []source.Class) map[string]string {
+	m := map[string]string{}
+	for _, c := range classes {
+		if c.Arch != "" {
+			m[c.Name] = c.Arch
+		}
+	}
+	return m
 }
 
 // runnerLabels registers the job's own labels, so the runner can take it.

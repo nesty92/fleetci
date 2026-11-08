@@ -126,9 +126,13 @@ func TestCheckOverflow(t *testing.T) {
 		"self":  {Overflow: "self"},
 		"lost":  {Overflow: "nowhere"},
 		"chain": {Overflow: "own"},
+		"x86":   {Overflow: "arm", Connector: Connector{Arch: "amd64"}},
+		"arm":   {Connector: Connector{Arch: "arm64"}},
+		"maybe": {Overflow: "arm"},
 	}
 	for name, want := range map[string]string{
 		"own": "", "cloud": "", "self": "the class itself", "lost": "doesn't exist", "chain": "one step only",
+		"x86": `is amd64, its overflow "arm" arm64`, "maybe": "",
 	} {
 		err := checkOverflow(name, classes)
 		if want == "" && err != nil || want != "" && (err == nil || !strings.Contains(err.Error(), want)) {
