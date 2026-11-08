@@ -24,7 +24,7 @@ permissions:
 
 env:
   # fleetingd with build-image, and Cloud Hypervisor.
-  FLEETINGD_REF: f1b2641883aeb761075a84534c1944a0336184fd # main
+  FLEETINGD_REF: 1786d0bda792bc2e1bec13360f9dba7f22e5b388 # feat/prebuild-failures
   CH_VERSION: "54.0"
 
 jobs:
