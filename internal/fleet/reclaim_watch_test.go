@@ -334,7 +334,9 @@ func TestALostConnectionIsOpenedAgain(t *testing.T) {
 	defer w.close()
 
 	w.start("i-1")
-	eventually(t, "never connected", func() bool { return vm.opened.Load() == 1 })
+	// accepted, not opened: opened counts the dial before the VM holds the
+	// connection, and a drop before then drops nothing.
+	eventually(t, "never connected", func() bool { return vm.accepted() == 1 })
 	vm.drop()
 	eventually(t, "never connected again", func() bool { return vm.opened.Load() >= 2 })
 	imds.set("spot/instance-action", `{"action": "hibernate"}`)
