@@ -33,6 +33,8 @@ type Class struct {
 	Slots int `json:"slots"`
 	// Overflow is the class that takes the class's jobs when it is full.
 	Overflow string `json:"overflow,omitempty"`
+	// Arch is the GOARCH of the class's VMs, "" if not known.
+	Arch string `json:"arch,omitempty"`
 }
 
 // VM is a job's VM.

@@ -3,23 +3,21 @@
   "egress_interface": "eth0",
   "vm_disk_directory": "@DIR@/vms",
   "vm_image_directory": "@DIR@/images",
-  "vm_subnet": "172.16.130.",
+  "vm_subnet": "172.16.131.",
   "vm_num_cpu_cores": 2,
   "vm_memory_mb": 4096,
   "vm_disk_size_gb": 16,
   "vm_enable_virtio_console": true,
+  "vm_prebuild_skip_gitlab_runner": true,
   "vm_prebuild_cloudinit_extra_cmds": [
-    "DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-buildx git zstd",
+    "DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-buildx zstd",
     "usermod -aG docker ubuntu",
-    "su - ubuntu -c 'v=@RUNNER_VERSION@; a=$(dpkg --print-architecture | sed s/amd64/x64/); mkdir -p actions-runner-$v && curl -fsSL https://github.com/actions/runner/releases/download/v$v/actions-runner-linux-$a-$v.tar.gz | tar -xz -C actions-runner-$v'",
-    "/home/ubuntu/actions-runner-@RUNNER_VERSION@/bin/installdependencies.sh",
     "DEBIAN_FRONTEND=noninteractive apt-get purge -y --auto-remove snapd modemmanager udisks2 multipath-tools open-iscsi unattended-upgrades",
     "systemctl mask fail2ban.service chrony-wait.service",
     "systemctl mask apt-daily.timer apt-daily-upgrade.timer motd-news.timer update-notifier-download.timer fwupd-refresh.timer",
-    "rm -f /usr/lib/gitlab-runner/helper-images/*",
     "apt-get clean",
     "rm -rf /var/lib/apt/lists/* /var/cache/apt/*.bin /var/log/*.gz",
     "fstrim -av",
-    "printf 'image=small\\nrunner=@RUNNER_VERSION@\\nbuilt=%s\\n' \"$(date -u +%FT%TZ)\" > /etc/fleetci-image"
+    "printf 'image=gitlab\\nbuilt=%s\\n' \"$(date -u +%FT%TZ)\" > /etc/fleetci-image"
   ]
 }

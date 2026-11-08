@@ -35,9 +35,23 @@ fi
 dir=$HOME/actions-runner-$version
 if [ ! -x "$dir/run.sh" ]; then
   mkdir -p "$dir"
-  curl -fsSL "https://github.com/actions/runner/releases/download/v$version/actions-runner-linux-$arch-$version.tar.gz" | tar -xz -C "$dir"
+  curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "https://github.com/actions/runner/releases/download/v$version/actions-runner-linux-$arch-$version.tar.gz" | tar -xz -C "$dir"
 fi
 cd "$dir"
+# Paths workflows written for GitHub's runners name: the work directory as
+# /home/runner/work and the tool cache at /opt/hostedtoolcache.
+if sudo -n true 2>/dev/null; then
+  if [ ! -e /home/runner ]; then
+    sudo mkdir -p /home/runner && sudo chown "$(id -u):$(id -g)" /home/runner &&
+    mkdir -p _work && ln -s "$dir/_work" /home/runner/work || true
+  fi
+  sudo mkdir -p /opt/hostedtoolcache && sudo chown "$(id -u):$(id -g)" /opt/hostedtoolcache || true
+fi
+if [ -w /opt/hostedtoolcache ]; then
+  export RUNNER_TOOL_CACHE=/opt/hostedtoolcache AGENT_TOOLSDIRECTORY=/opt/hostedtoolcache
+fi
+if [ -r /etc/os-release ]; then . /etc/os-release; fi
+if [ "${ID:-}" = ubuntu ]; then export ImageOS="ubuntu${VERSION_ID%%%%.*}"; fi
 cache='%[2]s'
 if [ -n "$cache" ]; then
   # The runner sets ACTIONS_RESULTS_URL for each job from GitHub's answer.

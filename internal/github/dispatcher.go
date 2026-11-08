@@ -107,6 +107,10 @@ const DefaultRunnerVersion = "2.338.2"
 // has them.
 var genericLabels = []string{"self-hosted", "linux"}
 
+// archLabels are GitHub's labels for a runner's architecture, by GOARCH,
+// served by a class of that architecture.
+var archLabels = map[string]string{"x64": "amd64", "arm64": "arm64", "arm": "arm"}
+
 // VM is a job's VM and how to reach it.
 type VM struct {
 	source.VM
@@ -150,6 +154,7 @@ type Dispatcher struct {
 	cfg          Config
 	defaultClass string
 	classes      []string
+	arches       map[string]string // class → GOARCH, where known
 	capacity     source.Capacity
 	start        StartFunc
 	gh           *client
@@ -249,6 +254,7 @@ func New(ctx context.Context, cfg Config, capacity source.Capacity, start StartF
 		cfg:          cfg,
 		defaultClass: defaultClass,
 		classes:      source.Names(classes),
+		arches:       arches(classes),
 		capacity:     capacity,
 		start:        start,
 		gh:           newClient(cfg.APIURL, tokens, hc),
@@ -603,7 +609,22 @@ func (d *Dispatcher) pollAll(ctx context.Context) {
 			queued[id] = true // a job of a repo not polled
 		}
 		d.mu.Unlock()
+		d.unwait(queued)
 		d.prune(queued) // a job missing from a partial list may still wait
+	}
+}
+
+// unwait stops the wait for a VM of each job no longer queued: another
+// runner took it, or it was cancelled, while it waited for room. Without,
+// it would get a VM only to find it has nothing to run.
+func (d *Dispatcher) unwait(queued map[int64]bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for id, a := range d.taken {
+		if !queued[id] && a.unwait != nil {
+			a.unwait()
+			a.unwait = nil
+		}
 	}
 }
 
@@ -650,8 +671,17 @@ func (d *Dispatcher) classFor(repo string, j job) (string, bool) {
 	}
 	for _, l := range j.Labels {
 		l = strings.ToLower(l)
-		if l != d.cfg.LabelPrefix && !strings.HasPrefix(l, d.cfg.LabelPrefix+"-") && !slices.Contains(genericLabels, l) {
+		if l == d.cfg.LabelPrefix || strings.HasPrefix(l, d.cfg.LabelPrefix+"-") || slices.Contains(genericLabels, l) {
+			continue
+		}
+		arch, isArch := archLabels[l]
+		switch {
+		case !isArch:
 			problem = fmt.Sprintf("label %q is not served by fleetci", l)
+		case d.arches[class] == "":
+			problem = fmt.Sprintf("label %q: class %q's architecture is not known; set its connector_config.arch", l, class)
+		case d.arches[class] != arch:
+			problem = fmt.Sprintf("label %q: class %q is %s", l, class, d.arches[class])
 		}
 	}
 	if problem != "" {
@@ -678,6 +708,7 @@ func (d *Dispatcher) take(id int64) bool {
 		return false
 	}
 	a.tries++
+	a.serves++
 	a.running = true
 	a.at = time.Now()
 	return true
@@ -687,8 +718,11 @@ func (d *Dispatcher) take(id int64) bool {
 type attempt struct {
 	at      time.Time
 	tries   int
+	serves  int // every serve, those forgotten unused too
 	running bool
 	retryAt time.Time
+	// unwait stops the wait for the job's VM, set while it lasts.
+	unwait context.CancelFunc
 }
 
 // maxTries caps the runners started for one job whose runners keep failing
@@ -757,7 +791,20 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 	// second, and neither needs the other.
 	regc := make(chan registration, 1)
 	go func() { regc <- d.register(ctx, scope, class, labels) }()
-	created, err := d.capacity.Create(ctx, class)
+	wctx, unwait := context.WithCancel(ctx)
+	d.mu.Lock()
+	if a := d.taken[j.ID]; a != nil {
+		a.unwait = unwait
+	}
+	d.mu.Unlock()
+	created, err := d.capacity.Create(wctx, class)
+	d.mu.Lock()
+	if a := d.taken[j.ID]; a != nil {
+		a.unwait = nil
+	}
+	d.mu.Unlock()
+	gone := wctx.Err() != nil && ctx.Err() == nil
+	unwait()
 	reg := <-regc
 	if err == nil && reg.err == nil && time.Since(reg.at) > registrationFresh {
 		// A long wait for room: a config that old is swapped for a new one
@@ -772,6 +819,11 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 		d.orphaned(orphan{scope: scope, name: reg.name})
 	}
 
+	if err != nil && gone {
+		log.Info("job taken by another runner while it waited for a vm", "waited", time.Since(start).Round(time.Second).String())
+		d.done(j.ID)
+		return
+	}
 	if err != nil {
 		if ctx.Err() == nil {
 			log.Error("no vm for job; retrying", "err", err)
@@ -783,6 +835,9 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 		_ = d.capacity.Delete(context.WithoutCancel(ctx), created.ID)
 	}()
 	log = log.With("vm", created.ID, "instance", created.Instance)
+	if d.takenElsewhere(ctx, repo, j, start, log) {
+		return
+	}
 	conn, err := d.capacity.Conn(created.ID)
 	if err != nil {
 		log.Error("no connection to the vm; retrying", "err", err)
@@ -826,6 +881,31 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 		d.done(j.ID)
 		log.Info("runner done", "took", time.Since(start).Round(time.Second).String())
 	}
+}
+
+// recheckAfter is how long a job may wait for its VM before it is checked
+// again: by then another runner may have taken it.
+var recheckAfter = 5 * time.Second
+
+// takenElsewhere reports whether the job no longer waits, so its runner
+// would find nothing to do: GitHub gives a runner any queued job its labels
+// fit, and while this job waited for a VM, or since its last runner took
+// another job, a runner of another job may have taken it. Checked only then,
+// sparing a job whose VM came at once the call.
+func (d *Dispatcher) takenElsewhere(ctx context.Context, repo string, j job, start time.Time, log hclog.Logger) bool {
+	d.mu.Lock()
+	retry := d.taken[j.ID] != nil && d.taken[j.ID].serves > 1
+	d.mu.Unlock()
+	if !retry && time.Since(start) < recheckAfter {
+		return false
+	}
+	cur, err := d.gh.job(ctx, repo, j.ID)
+	if err != nil || cur.Status == "queued" {
+		return false // unsure: a runner too many beats a job left waiting
+	}
+	log.Info("job taken by another runner; vm not used", "status", cur.Status)
+	d.done(j.ID)
+	return true
 }
 
 // registrationFresh is how old a runner's registration may be when its VM
@@ -894,6 +974,17 @@ func (d *Dispatcher) watchIdle(ctx context.Context, stop context.CancelFunc, sco
 			return
 		}
 	}
+}
+
+// arches maps each class to its architecture, where known.
+func arches(classes []source.Class) map[string]string {
+	m := map[string]string{}
+	for _, c := range classes {
+		if c.Arch != "" {
+			m[c.Name] = c.Arch
+		}
+	}
+	return m
 }
 
 // runnerLabels registers the job's own labels, so the runner can take it.

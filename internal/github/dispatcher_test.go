@@ -34,6 +34,7 @@ type fakeBackend struct {
 
 	createWait time.Duration // before Create answers
 	createErr  error
+	full       bool // Create waits for room until its context ends
 }
 
 func (b *fakeBackend) Classes(context.Context) ([]source.Class, string, error) {
@@ -67,7 +68,11 @@ func (b *fakeBackend) Conn(id string) (*proxy.Conn, error) {
 	return b.conns[id], nil
 }
 
-func (b *fakeBackend) Create(_ context.Context, class string) (source.VM, error) {
+func (b *fakeBackend) Create(ctx context.Context, class string) (source.VM, error) {
+	if b.full {
+		<-ctx.Done()
+		return source.VM{}, ctx.Err()
+	}
 	time.Sleep(b.createWait)
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -92,6 +97,8 @@ type fakeGitHub struct {
 	mu       sync.Mutex
 	jit      map[string][]string // runner name → labels
 	names    []string            // runner names, as registered
+	taken    atomic.Bool         // the jobs read one by one are in progress
+	jobReads atomic.Int32
 	removed  []int64
 	nextID   int64
 	jobsJSON string
@@ -111,7 +118,10 @@ func (g *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprint(w, `{"workflow_runs":[]}`)
 		}
 	case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/actions/runs/7/jobs":
-		fmt.Fprint(w, g.jobsJSON)
+		g.mu.Lock()
+		jobs := g.jobsJSON
+		g.mu.Unlock()
+		fmt.Fprint(w, jobs)
 	case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/actions/runners/generate-jitconfig":
 		var body struct {
 			Name   string   `json:"name"`
@@ -128,6 +138,13 @@ func (g *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.names = append(g.names, body.Name)
 		g.mu.Unlock()
 		fmt.Fprintf(w, `{"runner":{"id":%d},"encoded_jit_config":"jit-%s"}`, id, body.Name)
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/actions/jobs/"):
+		g.jobReads.Add(1)
+		status := "queued"
+		if g.taken.Load() {
+			status = "in_progress"
+		}
+		fmt.Fprintf(w, `{"id":1,"status":%q}`, status)
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/actions/runners/"):
 		fmt.Fprint(w, `{"id":1,"busy":true}`)
 	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/repos/o/r/actions/runners/"):
@@ -305,6 +322,94 @@ func TestDispatcherRetriesFailedRunner(t *testing.T) {
 	}
 }
 
+// A job's next runner is not started once another runner has taken it.
+func TestDispatcherSkipsAJobTakenElsewhere(t *testing.T) {
+	defer func(p time.Duration) { retryPause = p }(retryPause)
+	retryPause = 10 * time.Millisecond
+
+	var gh *fakeGitHub
+	var starts atomic.Int32
+	start := func(context.Context, VM, string, func(string)) error {
+		// The first runner took another job: this one, meanwhile, went to a
+		// runner of another.
+		starts.Add(1)
+		gh.taken.Store(true)
+		return nil
+	}
+	gh = &fakeGitHub{t: t, jit: map[string][]string{}, jobsJSON: `{"jobs":[
+	  {"id":1,"name":"build","status":"queued","labels":["fleetci"]}
+	]}`}
+	srv := httptest.NewServer(gh)
+	defer srv.Close()
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	_ = os.WriteFile(tokenFile, []byte("test-token"), 0o600)
+	backend := &fakeBackend{defaultClass: "2vcpu-1gb"}
+	d, err := New(t.Context(), Config{Repos: []string{"o/r"}, TokenFile: tokenFile, PollInterval: fleet.Duration(5 * time.Millisecond), APIURL: srv.URL},
+		backend, start, hclog.NewNullLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { d.Run(ctx); close(done) }()
+	waitFor(t, func() bool { return gh.jobReads.Load() >= 2 })
+	cancel()
+	<-done
+	if n := starts.Load(); n != 1 {
+		t.Errorf("%d runners started; want 1", n)
+	}
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if len(backend.created) != len(backend.deleted) {
+		t.Errorf("%d vms created, %d removed", len(backend.created), len(backend.deleted))
+	}
+}
+
+// A job that leaves the queue while it waits for room gets no VM.
+func TestDispatcherStopsWaitingForAJobTakenElsewhere(t *testing.T) {
+	gh := &fakeGitHub{t: t, jit: map[string][]string{}, jobsJSON: `{"jobs":[
+	  {"id":1,"name":"build","status":"queued","labels":["fleetci"]}
+	]}`}
+	srv := httptest.NewServer(gh)
+	defer srv.Close()
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	_ = os.WriteFile(tokenFile, []byte("test-token"), 0o600)
+	backend := &fakeBackend{defaultClass: "2vcpu-1gb", full: true}
+	start := func(context.Context, VM, string, func(string)) error {
+		t.Error("a runner started")
+		return nil
+	}
+	d, err := New(t.Context(), Config{Repos: []string{"o/r"}, TokenFile: tokenFile, PollInterval: fleet.Duration(5 * time.Millisecond), APIURL: srv.URL},
+		backend, start, hclog.NewNullLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { d.Run(ctx); close(done) }()
+	waiting := func() bool {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		return d.taken[1] != nil && d.taken[1].unwait != nil
+	}
+	waitFor(t, waiting)
+	gh.mu.Lock()
+	gh.jobsJSON = `{"jobs":[]}`
+	gh.mu.Unlock()
+	waitFor(t, func() bool {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		return d.taken[1] != nil && !d.taken[1].running
+	})
+	cancel()
+	<-done
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if len(backend.created) != 0 {
+		t.Errorf("%d vms created", len(backend.created))
+	}
+}
+
 // runOne serves one queued job on backend until wait holds, and returns
 // the fake GitHub it talked to.
 func runOne(t *testing.T, backend *fakeBackend, start StartFunc, wait func(*fakeGitHub) bool) *fakeGitHub {
@@ -371,6 +476,35 @@ func TestDispatcherRegistersAgainAfterLongWait(t *testing.T) {
 	}
 	if jit := <-jits; jit != "jit-"+gh.names[1] {
 		t.Errorf("runner started with %q; want the second registration's, %q", jit, "jit-"+gh.names[1])
+	}
+}
+
+// GitHub's architecture labels are served by a class of that architecture.
+func TestClassForArchLabels(t *testing.T) {
+	d := &Dispatcher{
+		cfg:          Config{LabelPrefix: "fleetci"},
+		defaultClass: "small",
+		classes:      []string{"small", "arm", "cloud"},
+		arches:       arches([]source.Class{{Name: "small", Arch: "amd64"}, {Name: "arm", Arch: "arm64"}, {Name: "cloud"}}),
+		log:          hclog.NewNullLogger(),
+		warned:       map[int64]bool{},
+	}
+	for i, c := range []struct {
+		labels []string
+		class  string
+	}{
+		{[]string{"self-hosted", "Linux", "X64", "fleetci"}, "small"},
+		{[]string{"self-hosted", "linux", "ARM64", "fleetci-arm"}, "arm"},
+		{[]string{"fleetci-arm", "x64"}, ""},
+		{[]string{"fleetci", "arm64"}, ""},
+		{[]string{"fleetci-cloud", "X64"}, ""}, // its architecture isn't known
+		{[]string{"fleetci-cloud", "self-hosted"}, "cloud"},
+		{[]string{"fleetci", "macOS"}, ""},
+	} {
+		class, ok := d.classFor("o/r", job{ID: int64(i), Labels: c.labels})
+		if ok != (c.class != "") || class != c.class && ok {
+			t.Errorf("%v: class %q, %v; want %q", c.labels, class, ok, c.class)
+		}
 	}
 }
 

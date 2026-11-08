@@ -53,7 +53,7 @@ func NewCapacity(b Backend, classes map[string]fleet.Class, defaultClass string)
 func newCapacity(b backend, classes map[string]fleet.Class, defaultClass string) *capacity {
 	cs := make([]Class, 0, len(classes))
 	for name, c := range classes {
-		cs = append(cs, Class{Name: name, Slots: c.Slots(), Overflow: c.Overflow})
+		cs = append(cs, Class{Name: name, Slots: c.Slots(), Overflow: c.Overflow, Arch: c.Arch()})
 	}
 	slices.SortFunc(cs, func(a, b Class) int { return strings.Compare(a.Name, b.Name) })
 	return &capacity{b: b, classes: cs, defaultClass: defaultClass,
