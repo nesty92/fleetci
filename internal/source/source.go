@@ -72,6 +72,11 @@ type Capacity interface {
 	Conn(vm string) (*proxy.Conn, error)
 	// Delete removes a VM.
 	Delete(ctx context.Context, vm string) error
+	// HandOver leaves a VM whose job runs on the VM itself, apart from
+	// this process, to the next fleetci, which follows the job to its end
+	// and removes the VM then. It is in place of Delete, and false when
+	// the VM's class can't be handed over; Delete it then.
+	HandOver(ctx context.Context, vm string) bool
 }
 
 // Source takes jobs from a forge and runs them on Capacity's VMs.

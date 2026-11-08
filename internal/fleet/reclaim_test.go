@@ -93,7 +93,7 @@ func scaler(t *testing.T, group provider.InstanceGroup, c Class) taskscaler.Task
 	ctx, cancel := context.WithCancel(context.Background())
 	up := func(taskscaler.Taskscaler, taskscaler.UpFuncInstance) error { return nil }
 	ts, err := taskscaler.New(ctx, initialised{group, provider.ProviderInfo{ID: "cloud", MaxSize: 10}},
-		append(scalerOptions(c, provider.Settings{}, up, hclog.NewNullLogger()),
+		append(scalerOptions(c, provider.Settings{}, up, nil, hclog.NewNullLogger()),
 			// Faster than production, so the tests take seconds.
 			taskscaler.WithAcquireDelay(50*time.Millisecond),
 			taskscaler.WithUpdateInterval(100*time.Millisecond),

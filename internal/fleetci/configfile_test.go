@@ -11,6 +11,7 @@ import (
 
 const sampleFile = `
 default_class = "2vcpu-4gb"
+state_dir = "state"
 
 [classes.2vcpu-4gb]
 plugin = "fleeting-plugin-aws"
@@ -64,7 +65,7 @@ func TestConfigFile(t *testing.T) {
 	if err := c.loadFile(); err != nil {
 		t.Fatal(err)
 	}
-	if c.DefaultClass != "2vcpu-4gb" || len(c.Classes) != 2 || c.NestingPath != "/custom/nesting.sock" {
+	if c.DefaultClass != "2vcpu-4gb" || len(c.Classes) != 2 || c.NestingPath != "/custom/nesting.sock" || c.StateDir != filepath.Join(dir, "state") {
 		t.Fatalf("loaded %+v", c)
 	}
 

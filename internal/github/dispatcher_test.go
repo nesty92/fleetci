@@ -35,6 +35,9 @@ type fakeBackend struct {
 	createWait time.Duration // before Create answers
 	createErr  error
 	full       bool // Create waits for room until its context ends
+
+	handOver bool     // HandOver takes VMs
+	handed   []string // vm ids
 }
 
 func (b *fakeBackend) Classes(context.Context) ([]source.Class, string, error) {
@@ -81,6 +84,16 @@ func (b *fakeBackend) Create(ctx context.Context, class string) (source.VM, erro
 	}
 	b.created = append(b.created, class)
 	return source.VM{ID: fmt.Sprintf("fleetci-%s-%d", class, len(b.created)), Class: class}, nil
+}
+
+func (b *fakeBackend) HandOver(_ context.Context, id string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.handOver {
+		return false
+	}
+	b.handed = append(b.handed, id)
+	return true
 }
 
 func (b *fakeBackend) Delete(_ context.Context, id string) error {
@@ -517,5 +530,63 @@ func TestNewCacheURLGetsTrailingSlash(t *testing.T) {
 	}
 	if d.cfg.CacheURL != "http://10.0.0.5:3000/" {
 		t.Errorf("cache_url %q", d.cfg.CacheURL)
+	}
+}
+
+// fleetci stopping leaves a runner that took its job to the next fleetci:
+// its VM is handed over, not removed, and the runner stays registered. One
+// that took no job yet goes with its VM.
+func TestStoppingHandsOverOnlyARunnerWithAJob(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		took   bool
+		handed bool
+	}{
+		{"with a job", true, true},
+		{"before its job", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gh := &fakeGitHub{t: t, jit: map[string][]string{}, jobsJSON: `{"jobs":[
+			  {"id":1,"name":"build","status":"queued","labels":["fleetci"]}
+			]}`}
+			srv := httptest.NewServer(gh)
+			defer srv.Close()
+			tokenFile := filepath.Join(t.TempDir(), "token")
+			_ = os.WriteFile(tokenFile, []byte("test-token"), 0o600)
+			running := make(chan struct{}, 1)
+			start := func(ctx context.Context, _ VM, _ string, took func(string)) error {
+				if tc.took {
+					took("build")
+				}
+				running <- struct{}{}
+				<-ctx.Done()
+				return ctx.Err()
+			}
+			backend := &fakeBackend{defaultClass: "2vcpu-1gb", handOver: true}
+			d, err := New(t.Context(), Config{Repos: []string{"o/r"}, TokenFile: tokenFile, PollInterval: fleet.Duration(time.Hour), APIURL: srv.URL},
+				backend, start, hclog.NewNullLogger())
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			go func() { d.Run(ctx); close(done) }()
+			<-running
+			cancel()
+			<-done
+
+			backend.mu.Lock()
+			handed, deleted := len(backend.handed), len(backend.deleted)
+			backend.mu.Unlock()
+			gh.mu.Lock()
+			removed := len(gh.removed)
+			gh.mu.Unlock()
+			if tc.handed && (handed != 1 || deleted != 0 || removed != 0) {
+				t.Fatalf("handed %d, vms removed %d, runners removed %d; want the vm handed over and the runner left", handed, deleted, removed)
+			}
+			if !tc.handed && (handed != 0 || deleted != 1 || removed != 1) {
+				t.Fatalf("handed %d, vms removed %d, runners removed %d; want both removed", handed, deleted, removed)
+			}
+		})
 	}
 }

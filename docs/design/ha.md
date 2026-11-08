@@ -1,6 +1,7 @@
 # fleetci that outlives its process
 
-Status: plan. It answers #23 and replaces the order of
+Status: phase 0 built, but for its GitLab drain and fleetingd adoption;
+phases 1–3 planned. It answers #23 and replaces the order of
 [multi-host.md](multi-host.md)'s step 2: high availability first, on a
 store fleetci already has, and the Raft cluster later, as one more backend
 of the same store.
@@ -48,37 +49,47 @@ which instance runs which job, use counts, the dispatcher's `taken` jobs.
 One process, no lease. An upgrade or a crash of `fleetci serve` no longer
 fails the jobs on a cloud class.
 
-- **The runner on the VM, detached.** `SSHStart` writes the JIT config to a
-  file of mode 0600 and starts the run script under `setsid`, with its
-  output to `~/.fleetci/runner.log` and its exit status to
-  `~/.fleetci/runner.exit`. It doesn't need systemd, so it works on any
-  image. fleetci follows the job on a session of its own (`tail -F` of the
-  log, then the exit file), and losing that session no longer touches the
-  runner. The log lines it parses today, such as the job taken, stay the
-  same.
+- **The runner on the VM, detached** (`internal/vmjob`). `SSHStart` writes
+  the run script and the JIT config into `~/.fleetci/jobs/<vm>/`, mode
+  0700, and starts the script under `setsid`, with its output to `log`
+  there, its process group to `pid` and its exit status to `exit`. The
+  config file is removed as soon as the script has opened it. It doesn't
+  need systemd, so it works on any image. fleetci follows the job on a
+  session of its own, polling the log and then the exit file, and losing
+  that session, or the connection, no longer touches the runner: fleetci
+  dials again and goes on from the line it had read. The log lines it
+  parses, such as the job taken, stay the same.
 - **taskscaler state on disk.** `WithStorage(storage.NewFileStorage(dir))`
-  per class, in a `state_dir` of fleetci.toml.
+  per class not on this host, in `<state_dir>/classes/<class>`, with
+  `state_dir` in fleetci.toml (`serve` only; the plugin refuses it).
 - **Adoption in the UpFunc.**
   - **Restored, with acquisitions:** a job ran on it. fleetci reconnects and
     follows the runner: still running, it waits for the exit and then
     releases the key, so the VM goes as after any job. Exited while fleetci
-    was down, it releases at once. Unreachable, it's removed.
+    was down, or with no job there (a GitLab job's VM), it releases at
+    once. Unreachable for 10 minutes, it's removed.
   - **Restored, no acquisitions:** a warm VM that never ran a job, since
     the use count was saved. It's kept.
   - **Preexisted, not restored:** nothing says what it ran; it's removed, as
     today.
-- **Stopping drains.** SIGTERM stops taking jobs, removes idle VMs, and
-  leaves VMs with jobs to the next process. `WithDeleteInstancesOnShutdown`
-  goes. `fleetci serve --remove-all` keeps today's behaviour, for tearing a
-  setup down.
-- **GitLab.** Embedded GitLab jobs run their executor in fleetci's process
-  and can't be handed over. SIGTERM stops asking for jobs and waits up to
-  `drain_timeout` for the running ones, as gitlab-runner does on SIGQUIT.
-  Plugin mode doesn't change: gitlab-runner owns that process.
-- **On-host classes (fleetingd), optional, a change to the plugin.** Drop
+- **Stopping hands over.** SIGTERM stops taking jobs. The dispatcher hands
+  each VM whose runner took a job to the next process (`Capacity.HandOver`)
+  instead of removing it and its runner; a runner that took no job yet goes
+  with its VM, and its job waits. `Backend.Stop` then removes every other
+  VM, idle ones too, and leaves the handed-over and adopted ones.
+  `WithDeleteInstancesOnShutdown` stays for classes without stored state.
+  `fleetci serve -remove-all`, or a config without `state_dir`, keeps
+  today's behaviour, for tearing a setup down.
+- **GitLab (not yet).** Embedded GitLab jobs run their executor in
+  fleetci's process and can't be handed over; today they end with it, and
+  their VMs are removed. To do: SIGTERM stops asking for jobs and waits up
+  to `drain_timeout` for the running ones, as gitlab-runner does on
+  SIGQUIT. Plugin mode doesn't change: gitlab-runner owns that process.
+- **On-host classes (fleetingd), not yet, a change to the plugin.** Drop
   `Pdeathsig`, keep the inventory in its state directory, and adopt running
   Cloud Hypervisor processes on start. Without it, a restart still loses
-  on-host VMs, and the plan doesn't depend on it.
+  on-host VMs, which is why their classes keep no state, and the plan
+  doesn't depend on it.
 
 The acceptance:
 - **kill -9 mid-job:** `kill -9` of `serve` during a long GitHub job on an
@@ -193,8 +204,8 @@ tests, the demo, chaos) apply to every backend.
    without consensus.
 2. **First backend:** `dir` and `s3`. DynamoDB is the alternative, but
    it's one more service to set up for the same thing.
-3. **SIGTERM:** it starts draining instead of removing everything, and
-   `--remove-all` does what it did. This changes `serve`'s behaviour, not
-   the plugin's.
+3. **SIGTERM:** with `state_dir`, it hands running GitHub jobs over instead
+   of removing everything, and `-remove-all` does what it did. Without
+   `state_dir`, nothing changes; nor does the plugin.
 4. **fleetingd adoption:** do it in phase 0, or leave on-host VMs lost on a
    restart for now.

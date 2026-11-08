@@ -81,6 +81,8 @@ func (b *fakeBackend) Create(_ context.Context, class string) (fleet.VM, error) 
 	return b.vm(class), nil
 }
 
+func (b *fakeBackend) HandOver(string) bool { return false }
+
 func (b *fakeBackend) Delete(_ context.Context, id string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()

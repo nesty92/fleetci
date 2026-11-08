@@ -18,6 +18,7 @@ type Backend interface {
 	Reserve(class string) (*fleet.Reservation, error)
 	Create(ctx context.Context, class string) (fleet.VM, error)
 	Delete(ctx context.Context, id string) error
+	HandOver(id string) bool
 }
 
 // held is a *fleet.Reservation.
@@ -33,6 +34,7 @@ type backend interface {
 	Reserve(class string) (held, error)
 	Create(ctx context.Context, class string) (fleet.VM, error)
 	Delete(ctx context.Context, id string) error
+	HandOver(id string) bool
 }
 
 type fleetBackend struct{ Backend }
@@ -145,6 +147,16 @@ func (c *capacity) Delete(ctx context.Context, id string) error {
 	delete(c.vms, id)
 	c.mu.Unlock()
 	return c.b.Delete(ctx, id)
+}
+
+func (c *capacity) HandOver(_ context.Context, id string) bool {
+	if !c.b.HandOver(id) {
+		return false
+	}
+	c.mu.Lock()
+	delete(c.vms, id)
+	c.mu.Unlock()
+	return true
 }
 
 func randomHex() string {

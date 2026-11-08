@@ -68,7 +68,8 @@ func (r *room) Release(_ context.Context, res source.Reservation) error {
 func (r *room) Create(context.Context, string) (source.VM, error) {
 	return source.VM{}, errors.New("not here")
 }
-func (r *room) Conn(string) (*proxy.Conn, error) { return nil, errors.New("no vms") }
+func (r *room) HandOver(context.Context, string) bool { return false }
+func (r *room) Conn(string) (*proxy.Conn, error)      { return nil, errors.New("no vms") }
 func (r *room) Delete(_ context.Context, id string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -30,6 +30,7 @@ import (
 func serve(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	path := configFlag(fs)
+	removeAll := fs.Bool("remove-all", false, "on stopping, remove every VM, those running jobs too, even with state_dir")
 	_ = fs.Parse(args)
 
 	c, err := fleetci.Load(*path)
@@ -47,17 +48,26 @@ func serve(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	var opts []fleet.Option
+	if c.StateDir != "" {
+		opts = append(opts, fleet.WithStateDir(c.StateDir))
+	}
 	startCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-	backend, err := fleet.New(startCtx, c.Classes, c.Host, log)
+	backend, err := fleet.New(startCtx, c.Classes, c.Host, log, opts...)
 	cancel()
 	if err != nil {
 		return err
 	}
 	defer func() {
-		log.Info("stopping: removing this process's VMs")
 		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
-		_ = backend.Shutdown(sctx)
+		if c.StateDir == "" || *removeAll {
+			log.Info("stopping: removing this process's VMs")
+			_ = backend.Shutdown(sctx)
+			return
+		}
+		log.Info("stopping: removing idle VMs; VMs running GitHub jobs are left to the next fleetci", "state_dir", c.StateDir)
+		_ = backend.Stop(sctx)
 	}()
 
 	// The job sources, each over the same capacity.

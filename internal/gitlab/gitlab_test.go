@@ -40,6 +40,7 @@ func (*noRoom) Release(context.Context, source.Reservation) error {
 func (*noRoom) Create(context.Context, string) (source.VM, error) {
 	return source.VM{}, source.ErrNoRoom
 }
+func (*noRoom) HandOver(context.Context, string) bool { return false }
 func (*noRoom) Conn(string) (*proxy.Conn, error) {
 	return nil, errors.New("no vms")
 }
