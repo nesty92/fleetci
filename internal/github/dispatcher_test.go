@@ -92,6 +92,8 @@ type fakeGitHub struct {
 	mu       sync.Mutex
 	jit      map[string][]string // runner name → labels
 	names    []string            // runner names, as registered
+	taken    atomic.Bool         // the jobs read one by one are in progress
+	jobReads atomic.Int32
 	removed  []int64
 	nextID   int64
 	jobsJSON string
@@ -128,6 +130,13 @@ func (g *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.names = append(g.names, body.Name)
 		g.mu.Unlock()
 		fmt.Fprintf(w, `{"runner":{"id":%d},"encoded_jit_config":"jit-%s"}`, id, body.Name)
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/actions/jobs/"):
+		g.jobReads.Add(1)
+		status := "queued"
+		if g.taken.Load() {
+			status = "in_progress"
+		}
+		fmt.Fprintf(w, `{"id":1,"status":%q}`, status)
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/actions/runners/"):
 		fmt.Fprint(w, `{"id":1,"busy":true}`)
 	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/repos/o/r/actions/runners/"):
@@ -302,6 +311,49 @@ func TestDispatcherRetriesFailedRunner(t *testing.T) {
 	defer backend.mu.Unlock()
 	if len(backend.deleted) != maxTries {
 		t.Errorf("%d vms removed; want %d", len(backend.deleted), maxTries)
+	}
+}
+
+// A job's next runner is not started once another runner has taken it.
+func TestDispatcherSkipsAJobTakenElsewhere(t *testing.T) {
+	defer func(p time.Duration) { retryPause = p }(retryPause)
+	retryPause = 10 * time.Millisecond
+
+	var gh *fakeGitHub
+	var starts atomic.Int32
+	start := func(context.Context, VM, string, func(string)) error {
+		// The first runner took another job: this one, meanwhile, went to a
+		// runner of another.
+		starts.Add(1)
+		gh.taken.Store(true)
+		return nil
+	}
+	gh = &fakeGitHub{t: t, jit: map[string][]string{}, jobsJSON: `{"jobs":[
+	  {"id":1,"name":"build","status":"queued","labels":["fleetci"]}
+	]}`}
+	srv := httptest.NewServer(gh)
+	defer srv.Close()
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	_ = os.WriteFile(tokenFile, []byte("test-token"), 0o600)
+	backend := &fakeBackend{defaultClass: "2vcpu-1gb"}
+	d, err := New(t.Context(), Config{Repos: []string{"o/r"}, TokenFile: tokenFile, PollInterval: fleet.Duration(5 * time.Millisecond), APIURL: srv.URL},
+		backend, start, hclog.NewNullLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { d.Run(ctx); close(done) }()
+	waitFor(t, func() bool { return gh.jobReads.Load() >= 2 })
+	cancel()
+	<-done
+	if n := starts.Load(); n != 1 {
+		t.Errorf("%d runners started; want 1", n)
+	}
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if len(backend.created) != len(backend.deleted) {
+		t.Errorf("%d vms created, %d removed", len(backend.created), len(backend.deleted))
 	}
 }
 

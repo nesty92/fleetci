@@ -693,6 +693,7 @@ func (d *Dispatcher) take(id int64) bool {
 		return false
 	}
 	a.tries++
+	a.serves++
 	a.running = true
 	a.at = time.Now()
 	return true
@@ -702,6 +703,7 @@ func (d *Dispatcher) take(id int64) bool {
 type attempt struct {
 	at      time.Time
 	tries   int
+	serves  int // every serve, those forgotten unused too
 	running bool
 	retryAt time.Time
 }
@@ -798,6 +800,9 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 		_ = d.capacity.Delete(context.WithoutCancel(ctx), created.ID)
 	}()
 	log = log.With("vm", created.ID, "instance", created.Instance)
+	if d.takenElsewhere(ctx, repo, j, start, log) {
+		return
+	}
 	conn, err := d.capacity.Conn(created.ID)
 	if err != nil {
 		log.Error("no connection to the vm; retrying", "err", err)
@@ -841,6 +846,31 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 		d.done(j.ID)
 		log.Info("runner done", "took", time.Since(start).Round(time.Second).String())
 	}
+}
+
+// recheckAfter is how long a job may wait for its VM before it is checked
+// again: by then another runner may have taken it.
+var recheckAfter = 5 * time.Second
+
+// takenElsewhere reports whether the job no longer waits, so its runner
+// would find nothing to do: GitHub gives a runner any queued job its labels
+// fit, and while this job waited for a VM, or since its last runner took
+// another job, a runner of another job may have taken it. Checked only then,
+// sparing a job whose VM came at once the call.
+func (d *Dispatcher) takenElsewhere(ctx context.Context, repo string, j job, start time.Time, log hclog.Logger) bool {
+	d.mu.Lock()
+	retry := d.taken[j.ID] != nil && d.taken[j.ID].serves > 1
+	d.mu.Unlock()
+	if !retry && time.Since(start) < recheckAfter {
+		return false
+	}
+	cur, err := d.gh.job(ctx, repo, j.ID)
+	if err != nil || cur.Status == "queued" {
+		return false // unsure: a runner too many beats a job left waiting
+	}
+	log.Info("job taken by another runner; vm not used", "status", cur.Status)
+	d.done(j.ID)
+	return true
 }
 
 // registrationFresh is how old a runner's registration may be when its VM
