@@ -63,7 +63,12 @@ To build one yourself, as root on a host with `/dev/kvm`, cloud-hypervisor,
 nft and qemu-img:
 
 ```sh
-sed -e "s|@DIR@|/var/tmp/image|g" -e "s|@RUNNER_VERSION@|2.338.2|g" images/github.json > github.json
+sed -e "s|@DIR@|/var/tmp/image|g" -e "s|@RUNNER_VERSION@|2.338.2|g" -e "s|@RUNNER_MIRROR@||g" images/github.json > github.json
 fleeting-plugin-fleetingd build-image -config github.json -out out -name github
 images/verify.sh out/github-amd64.qcow2 github 2.338.2
 ```
+
+`@RUNNER_MIRROR@` empty downloads actions/runner from GitHub. A URL in its
+place is where the build VM gets `actions-runner-linux-<arch>-<version>.tar.gz`
+instead, such as an HTTP server on the build host; the workflow serves one
+downloaded with its token.

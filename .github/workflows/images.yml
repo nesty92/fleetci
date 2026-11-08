@@ -102,10 +102,23 @@ jobs:
         env:
           RUNNER_VERSION: ${{ needs.plan.outputs.runner }}
           IMAGE: ${{ matrix.image }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           dir=$RUNNER_TEMP/build
           mkdir -p "$dir"
-          sed -e "s|@DIR@|$dir|g" -e "s|@RUNNER_VERSION@|$RUNNER_VERSION|g" \
+          # The build VM gets actions/runner from this machine, downloaded
+          # here with the job's token: GitHub times out anonymous downloads
+          # at times.
+          mirror=
+          if [ "$IMAGE" = github ]; then
+            mkdir -p "$RUNNER_TEMP/mirror"
+            gh release download "v$RUNNER_VERSION" -R actions/runner -D "$RUNNER_TEMP/mirror" \
+              -p "actions-runner-linux-x64-$RUNNER_VERSION.tar.gz" -p "actions-runner-linux-arm64-$RUNNER_VERSION.tar.gz"
+            host=$(ip -o route get 1.1.1.1 | sed -n 's/.* src \([^ ]*\).*/\1/p')
+            python3 -m http.server -b "$host" -d "$RUNNER_TEMP/mirror" 18780 >/dev/null 2>&1 &
+            mirror=http://$host:18780
+          fi
+          sed -e "s|@DIR@|$dir|g" -e "s|@RUNNER_VERSION@|$RUNNER_VERSION|g" -e "s|@RUNNER_MIRROR@|$mirror|g" \
             -e "s|\"egress_interface\": \"eth0\"|\"egress_interface\": \"$(ip -o route get 1.1.1.1 | sed -n 's/.* dev \([^ ]*\).*/\1/p')\"|" \
             images/$IMAGE.json > "$dir/$IMAGE.json"
           sudo "$RUNNER_TEMP/fleeting-plugin-fleetingd" build-image -config "$dir/$IMAGE.json" -out out -name "$IMAGE"
