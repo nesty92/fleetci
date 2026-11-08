@@ -66,8 +66,8 @@ type Config struct {
 	// IdleTimeout removes a runner that has not started a job by then, such
 	// as one whose job was cancelled while its VM booted. Default 10m.
 	IdleTimeout fleet.Duration `json:"idle_timeout" toml:"idle_timeout"`
-	// RunnerVersion is the actions/runner release to run. Default
-	// DefaultRunnerVersion.
+	// RunnerVersion is the actions/runner release to run. Default the
+	// newest in the VM's image, or DefaultRunnerVersion if it has none.
 	RunnerVersion string `json:"runner_version" toml:"runner_version"`
 	// RunnerGroupID is the runner group to register in. Default 1, the
 	// default group.
@@ -98,7 +98,7 @@ type WebhookConfig struct {
 }
 
 // DefaultRunnerVersion is the actions/runner release used when the config
-// names none.
+// names none and the image has none.
 const DefaultRunnerVersion = "2.338.2"
 
 // genericLabels may sit next to a fleetci label in runs-on; every fleetci VM
@@ -224,8 +224,8 @@ func New(ctx context.Context, cfg Config, capacity source.Capacity, start StartF
 	if cfg.IdleTimeout == 0 {
 		cfg.IdleTimeout = fleet.Duration(10 * time.Minute)
 	}
-	if cfg.RunnerVersion == "" {
-		cfg.RunnerVersion = DefaultRunnerVersion
+	if strings.ContainsAny(cfg.RunnerVersion, "'\"\\ $`/") {
+		return nil, fmt.Errorf("github runner_version %q: want a release such as %s", cfg.RunnerVersion, DefaultRunnerVersion)
 	}
 	if cfg.RunnerGroupID == 0 {
 		cfg.RunnerGroupID = 1

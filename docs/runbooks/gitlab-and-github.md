@@ -65,7 +65,7 @@ token_file = "/etc/fleetci/github.token"
 | `label_prefix` | `fleetci` | `runs-on: fleetci` is the default class, `fleetci-<class>` a class |
 | `poll_interval` | `10s`, `5m` with a webhook | how often queued jobs are listed |
 | `idle_timeout` | `10m` | how long a runner may wait for a job (say its job was cancelled while the VM booted) before its VM is given back |
-| `runner_version` | `2.338.2` | the actions/runner release to run; images with it in `~/actions-runner-<version>` skip the download |
+| `runner_version` | the image's newest, else `2.338.2` | the actions/runner release to run; images with it in `~/actions-runner-<version>` skip the download |
 | `runner_group_id` | `1` | the runner group to register in; for `orgs`, the group must allow the repos |
 | `cache_url` | | an Actions cache server, see the README |
 | `api_url` | `https://api.github.com` | GitHub Enterprise Server's API |
