@@ -64,7 +64,8 @@ type Config struct {
 
 // Runner is one class's GitLab runner.
 type Runner struct {
-	// Class is the class whose jobs the runner takes.
+	// Class is the class whose jobs the runner takes. Unset, the runner
+	// takes jobs of every class, each picked by its FLEETCI_CLASS.
 	Class string `json:"class" toml:"class"`
 	// TokenFile holds the runner's authentication token (glrt-...).
 	TokenFile string `json:"token_file" toml:"token_file"`
@@ -80,7 +81,7 @@ func (c Config) Validate(classes []string) error {
 	seen := map[string]bool{}
 	for i, r := range c.Runners {
 		where := fmt.Sprintf("gitlab: runner %d", i+1)
-		if !slices.Contains(classes, r.Class) {
+		if r.Class != "" && !slices.Contains(classes, r.Class) {
 			return fmt.Errorf("%s: no class %q", where, r.Class)
 		}
 		if seen[r.Class] {
@@ -183,7 +184,7 @@ func New(ctx context.Context, c Config, capacity source.Capacity, log hclog.Logg
 			return nil, fmt.Errorf("gitlab: runner of %s: %w", r.Class, err)
 		}
 		rc := &common.RunnerConfig{
-			Name: "fleetci " + r.Class,
+			Name: strings.TrimSpace("fleetci " + r.Class),
 			RunnerCredentials: common.RunnerCredentials{
 				URL:   cmp.Or(c.URL, "https://gitlab.com"),
 				Token: strings.TrimSpace(string(token)),
@@ -197,7 +198,11 @@ func New(ctx context.Context, c Config, capacity source.Capacity, log hclog.Logg
 		config.Runners = append(config.Runners, rc)
 		classOf[rc] = r.Class
 
-		if !fromFile {
+		if !fromFile && r.Class == "" {
+			for _, class := range classes {
+				concurrent += class.Slots
+			}
+		} else if !fromFile {
 			class := byName[r.Class]
 			concurrent += class.Slots
 			if o, ok := byName[class.Overflow]; ok {
