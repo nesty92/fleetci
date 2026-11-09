@@ -55,6 +55,10 @@ func supervise(ctx context.Context, start startFunc, log hclog.Logger) (*supervi
 	s := &supervised{start: start, log: log, backoff: restartBackoffMin}
 	group, info, kill, err := start(ctx, s.exited(0))
 	if err != nil {
+		// A plugin that exits as its start fails is not restarted.
+		s.mu.Lock()
+		s.closed = true
+		s.mu.Unlock()
 		return nil, provider.ProviderInfo{}, err
 	}
 	s.id, s.group, s.kill = info.ID, group, kill
