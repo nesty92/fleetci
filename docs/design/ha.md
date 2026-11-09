@@ -1,46 +1,58 @@
-# fleetci that outlives its process
+# fleetci across restarts and machines
 
-Status: phase 0 built, but for its GitLab drain and fleetingd adoption;
-phases 1–3 planned. It answers #23 and replaces the order of
-[multi-host.md](multi-host.md)'s step 2: high availability first, on a
-store fleetci already has, and the Raft cluster later, as one more backend
-of the same store.
+Status: phase 0 built, but for its GitLab drain and fleetingd adoption.
+The federation is planned. It answers #23 and replaces
+[multi-host.md](multi-host.md)'s step 2, the Raft cluster.
 
-## Where things stand
+## The setup this is for
 
-A fleetci process that stops takes its jobs with it, and a second process
-can't stand by:
+Several machines, at several sites, each with its own CPUs and memory, and
+perhaps a cloud class for spikes. They reach each other over one VPN
+(WireGuard, Tailscale, headscale), since most sit behind NAT or on private
+networks. Each machine's VMs run on that machine and die with it.
 
-1. **The GitHub runner dies with fleetci.** `SSHStart` runs it inside
-   fleetci's SSH session (`internal/github/runner.go`), so when the process
-   goes, the session closes and the runner gets SIGHUP, however healthy the
-   VM is.
-2. **A new process removes every VM it finds.** `dockerReady` rejects an
-   instance whose cause is `preexisted` (`internal/fleet/backend.go`): it
-   may have run a job already, and nothing says whether it did.
-3. **Stopping removes every VM.** `scalerOptions` sets
-   `WithDeleteInstancesOnShutdown`, running jobs included.
+So the high availability that matters is:
+- **A restart of one machine's fleetci keeps its jobs** (phase 0).
+- **The machines share the job queue,** and a machine that goes, or a site
+  that is cut off, takes away only its own capacity. The others, and the
+  cut-off site itself, keep serving what they can.
+
+A standby on another machine can't save a machine's on-host VMs, and
+consensus would do harm here: Raft stops the minority side of a cut, so a
+site whose VPN link drops would stop taking jobs it has the machines for.
+
+## Where things stood
+
+A fleetci process that stopped took its jobs with it, and two processes
+couldn't share work:
+
+1. **The GitHub runner died with fleetci.** `SSHStart` ran it inside
+   fleetci's SSH session, so when the process went, the runner went too,
+   however healthy the VM was. *Fixed in phase 0.*
+2. **A new process removed every VM it found.** `dockerReady` rejects an
+   instance whose cause is `preexisted`: nothing said whether it had run a
+   job. *Fixed in phase 0 for classes with `state_dir`.*
+3. **Stopping removed every VM,** running jobs included. *Fixed in phase 0.*
 4. **On-host VMs die with their plugin.** fleetingd starts Cloud Hypervisor
-   with `Pdeathsig: SIGKILL` and keeps its inventory in memory, so even a
-   plugin restart by `supervise` loses them.
-5. **Two processes can't share a cloud class.** Each would remove the
-   other's instances as unknown; `startPool` already refuses two classes on
-   one group in one process, and nothing stops it across processes.
-
-Everything the process knows that the cloud doesn't, it keeps in memory:
-which instance runs which job, use counts, the dispatcher's `taken` jobs.
+   with `Pdeathsig: SIGKILL` and keeps its inventory in memory.
+5. **Two processes can't serve the same GitHub repos.** Each starts a
+   runner for every queued job, so all but one runner per job sit idle
+   until the dispatcher's idle watch removes them, and each polls every
+   repo, using the token's rate limit once per machine.
+6. **Two processes can't share a cloud class.** Each would remove the
+   other's instances as unknown.
 
 ## What the reference projects do
 
 | Project | What it does | What fleetci takes |
 |---|---|---|
-| taskscaler (MIT) | `WithStorage` saves each instance's slots, acquisition keys and use count; on start, `createInstanceOrRestore` restores them and the UpFunc sees `Restored` and the keys | The handover itself: a store the next process reads, through taskscaler's own `storage.Storage` interface |
-| gitlab-runner (MIT) | `state_storage` uses it, but releases every restored acquisition and removes the instance, since its jobs ran in the dead process | Only VMs whose job lives on the VM can be kept; embedded GitLab jobs can't, so they drain |
-| Karpenter (Apache-2.0) | The cloud is the truth: the GC controller lists instances, deletes those no NodeClaim claims after 30 s, every 10 s at first and every 2 min later | A sweep for instances nobody's state claims, with a grace period, in place of "remove all preexisting" |
-| client-go `leaderelection` (Apache-2.0) | Lease of 15 s, renewed within 10 s, retried every 2 s; expiry is measured from when the observer last saw the record change, so clocks needn't agree; a leader that can't renew in time stops itself | The lease and its timings, ported with credit |
-| terraform-aws-github-runner (MIT) | Stateless control plane; scale-down asks GitHub whether a runner is busy, and found the flag stale for 25–60 s and even 12+ min, so it needs readings over a window | Never decide from GitHub's `busy` flag; ask the VM |
-| actions/scaleset (MIT) | One message session per scale set; a second listener gets 409 Conflict | Not used: fleetci's JIT runners have no session. If it moves to scale sets, the session is a free lock for dispatch |
-| Nomad (BUSL, ideas only) | A client that loses its servers keeps running its allocations for a grace period; heartbeat TTLs grow with the cluster | A host cut off from the store keeps its running jobs; only shared things pause |
+| taskscaler (MIT) | `WithStorage` saves each instance's slots, acquisition keys and use count; on start, `createInstanceOrRestore` restores them | Phase 0's handover across a restart |
+| gitlab-runner (MIT) | `state_storage` releases every restored acquisition, since its jobs ran in the dead process | Only jobs that live on the VM can be kept; embedded GitLab jobs drain instead |
+| memberlist (MPL-2.0, imported as a library) | SWIM membership: failure detection by indirect probes, gossip of state, push-pull sync, AES-GCM encryption with a rotatable keyring | Membership and the gossip of each machine's room, over the VPN |
+| Serf and Consul (MPL-2.0, ideas) | Events and queries on top of memberlist; members that leave versus fail; reaping failed members after a timeout | Telling a machine that left from one that failed; reaping |
+| Rendezvous hashing (Thaler and Ravishankar, 1996) | Every node ranks the same candidates the same way from a hash, with no coordination, and only the keys of a node that goes move | Who polls each repo, and the order in which machines take a job |
+| terraform-aws-github-runner (MIT) | Found GitHub's `busy` flag stale for 25–60 s and even 12+ min | Decide from what the VM and the job say, not `busy` |
+| client-go `leaderelection` (Apache-2.0) | Lease of 15 s, renewed within 10 s, retried every 2 s, expiry measured by the observer | Only for the optional shared cloud class (below) |
 
 ## The plan
 
@@ -98,114 +110,143 @@ The acceptance:
 - **Warm VM kept:** an idle warm VM survives the restart and takes the
   next job.
 
-### Phase 1: a standby (#23)
+### The federation
 
-Two processes, one active.
+Several `fleetci serve` processes, one per machine, that know of each other
+and share the GitHub queue. Nothing in it needs agreement: each machine
+decides for itself from what it has heard, the same way the others do, and
+a machine that hears wrong costs a runner too many, never a job.
 
-- **A store** with two primitives, a lease and taskscaler's instance state:
+#### What needs sharing
 
-  ```go
-  type Store interface {
-  	// Lease takes or renews name for holder. Token grows each time the
-  	// holder changes.
-  	Lease(ctx context.Context, name, holder string, ttl time.Duration) (Lease, error)
-  	Release(ctx context.Context, l Lease) error
-  	// Claim records key for holder unless a live claim exists (phase 2).
-  	Claim(ctx context.Context, key, holder string, ttl time.Duration) (bool, error)
-  	// Instance state of one class, as taskscaler's storage.Storage.
-  	Instances(class string) storage.Storage
-  }
+| | Shared how |
+|---|---|
+| On-host VMs (fleetingd) | Not at all: each machine's budget is its own |
+| GitLab jobs | Not at all: GitLab gives each job to one runner, and each machine asks only while it has room. One `serve` per machine, with its own runners, or the same runner token on each, works today |
+| Which machine starts a runner for a GitHub job | Each machine ranks the machines with room the same way (below) |
+| Polling GitHub | Each repo is polled by one live machine, chosen by rendezvous hashing; what it finds is gossiped |
+| Cloud classes | Not at all: each site has its own fleeting group and `max_instances`. A class shared by machines needs one owner; see the optional lease |
+
+#### Membership
+
+- **memberlist over the VPN,** with its WAN settings (probes every 5 s,
+  3 s timeouts), since sites are tens of milliseconds apart. It needs one
+  TCP and UDP port.
+- **Config:**
+
+  ```toml
+  [federation]
+  id = "wroclaw-1"                         # default: the hostname
+  listen = "100.64.0.11:9481"              # an address on the VPN
+  join = ["100.64.0.12:9481"]              # any member or two; more are found
+  key_file = "/etc/fleetci/federation.key" # 32 random bytes, base64
   ```
 
-  Backends:
-  - `dir`: flock and files. Two processes on one machine, and the tests.
-  - `s3`: conditional writes (`If-None-Match: *` to take a lease, `If-Match`
-    on its ETag to renew it). It works on any S3 that has them, such as the
-    bucket a setup already has for its CI cache, and needs no new service.
-    fleetci has no S3 client of its own yet; this adds one.
-  - Raft later (phase 3); the interface doesn't change.
-- **One lease, `active`,** with client-go's timings: 15 s lease, renewed
-  within 10 s, tried every 2 s. Expiry is counted from when the standby last
-  saw the record change, so clocks needn't agree.
-- **Takeover** is phase 0's restart, reading the shared instance state.
-  Before it places a job on an adopted idle VM, the new active waits out
-  one lease period, so a delete the old one had in flight can't hit a VM
-  that has just been given a job.
-- **Fencing.** The cloud's API takes no token, so the old active fences
-  itself. The group taskscaler drives is wrapped (`initialised` already
-  wraps it), and every `Increase`, `Decrease` and `Update` first checks that
-  the lease was renewed within the renew deadline; otherwise it fails
-  without calling the plugin. After a SIGSTOP the check sees the stopped
-  time and refuses. A process that can't renew stops dispatching, stops its
-  taskscalers without removing anything, and goes back to standby.
-- **Webhooks.** Both processes can sit behind one URL; the standby answers
-  503. A takeover's first poll lists every repo whole, so a delivery lost in
-  the gap costs a poll interval, not a job.
+  A new machine joins with one known address and the key: no list of every
+  peer, no certificates, no minimum count. One machine alone works as
+  today. `key_file` may hold several keys, the first used to send, so the
+  key can be rotated without stopping the federation, as memberlist's
+  keyring allows.
+- **What is gossiped:** each member's id, fleetci version, the repos and
+  orgs it serves, and per class its free slots and whether it is on the
+  host. Then, as events: jobs found queued, and runners started for them.
+  No tokens, no JIT configs, no SSH details: those never leave the machine.
+  memberlist's node metadata holds 512 bytes, too few for many classes, so
+  the room travels in its broadcasts and push-pull state instead.
+- **Left versus failed.** A member that stops says so and is dropped at
+  once; one that fails is marked suspect and then dead by SWIM, and reaped
+  after an hour.
+- **Trust.** Everyone with the key is a member, and a member can claim room
+  it doesn't have: the key is a secret like the GitHub token. The VPN is
+  the first fence; the key's encryption is the second.
 
-The acceptance, #23's own:
-- **kill -9 of the active:** the standby takes jobs within a lease period,
-  and the jobs running on the old active's VMs finish.
-- **No VM with a job is removed** during the handover.
-- **One process alone** works as in phase 0.
+#### Dispatching a GitHub job
 
-### Phase 2: both active
+For a queued job of class `c` in repo `r`, every machine computes the same
+list: the live members that serve `r` and have a free slot of `c`, ranked
+by the hash of the job's id with each member's id (rendezvous), the free
+room weighing in so that fuller machines rank lower.
 
-Several processes, all taking jobs. This is what multi-host.md step 2
-needs, minus placing VMs on other hosts.
+- **Rank 0 starts a runner at once** and gossips `started job <id>`.
+- **Rank k waits k × `federation.grace`** (10 s by default), then starts one
+  if it hasn't heard a start and the job is still queued, which it checks
+  with GitHub first.
+- **A machine that finds no room for the job** waits, as today, and ranks
+  again when the room changes.
+- **Views differ for a few seconds** after a member joins, fails or fills
+  up. Two machines may then both take rank 0 and both start a runner: one
+  takes the job, and the idle watch removes the other, as it already does
+  for a runner GitHub gives another job. That is the price of no
+  consensus, and it is bounded by the grace period.
+- **A cut-off site** sees only its own members, so it serves every job it
+  can, and the other side does the same. The price is again runners too
+  many, never a job that waits while some machine has room.
 
-- **On-host classes are always on.** A host's budget is its own, and
-  nothing about it needs agreement.
-- **Each cloud class has its own lease,** `class/<name>`; any process may
-  hold it, and only the holder runs its taskscaler. With one owner,
-  `max_instances` is global by construction, as multi-host.md proposed.
-- **GitHub: one claim per job id** (`Claim("job/<id>", ttl)`) before a
-  runner starts, taken only by a process with room for the job's class.
-  Hosts with room take jobs and full hosts leave them, which answers
-  multi-host.md's "a full host takes a job another host has room for"
-  without moving VMs between hosts. The existing check for jobs taken
-  elsewhere stays, for runners GitHub gives another job anyway.
-- **GitLab is safe already:** GitLab gives each job to one runner, and the
-  embedded runners ask only while they have room.
+#### Polling and webhooks
 
-### Phase 3: the Raft cluster
+- **Each repo and org is polled by one live member** that serves it,
+  chosen by rendezvous hashing, so N machines use the rate limit once.
+  When that member goes, the repo moves to the next in rank within one
+  failure detection. Jobs found are gossiped to the members that serve the
+  repo.
+- **Every member still polls every repo slowly** (every 5 minutes, as with
+  a webhook today), so a lost broadcast, or a poller that is alive but
+  stuck, costs minutes, not the job. The poller itself polls at
+  `poll_interval` (10 s by default).
+- **Webhooks** reach whichever member has a public address, or a relay in
+  front of one; it gossips the jobs as a poll would. Machines behind NAT
+  need none.
 
-multi-host.md's step 2 and later, unchanged in substance:
-- running a taken job on another host's VM;
-- nominations between hosts;
-- gossip of free room.
+#### Optional: a cloud class shared by machines
 
-Raft becomes the store's third backend; leases and claims keep their API,
-and phases 1 and 2 don't change. Steps 3–5 there (the in-process cluster
-tests, the demo, chaos) apply to every backend.
+Only for setups that want one cloud class with one `max_instances` across
+machines. Its owner holds a lease, `class/<name>`, with client-go's
+timings, on a store all members reach: S3 with conditional writes, or a
+shared directory. The owner runs its taskscaler, and every `Increase`,
+`Decrease` and `Update` first checks that the lease was renewed within the
+renew deadline, so an owner stopped with SIGSTOP refuses to scale when it
+resumes. A new owner adopts the VMs as in phase 0, with taskscaler's state
+in the same store. Other members don't use the class: a job of it goes to
+the owner by the ranking. Without the lease, give each site its own class.
+
+#### Steps
+
+1. **Membership and room.** memberlist, `[federation]`, gossip of room, and
+   `fleetci federation status`: the members, their versions and their free
+   room, as this machine sees them.
+2. **GitHub dispatch by rank,** with the `started` events and the grace.
+3. **Polling split,** the slow safety poll, and webhook jobs gossiped.
+4. **The rest of phase 0,** alongside: the GitLab drain, then fleetingd
+   adoption.
+5. **The shared cloud class lease,** if a setup asks for it.
 
 ## Tests
 
-- Each phase:
-  - **kill -9:** of the active mid-job.
-  - **SIGSTOP:** of the active for longer than the lease, then SIGCONT; it
-    must refuse to scale, the case client-go's design is for.
-  - **Partition:** the active cut off from the store but not from the
-    cloud, which is the dangerous one.
-  - **Lost VM:** the VM unreachable during adoption.
-  - **Restart loops:** restarts every few seconds under load.
-- **Invariants after each run,** from the event history:
-  - no VM with a running job removed;
-  - no job started twice;
-  - no two holders of a lease at once (tokens only grow);
-  - no host over its budget.
-- **Where they run:** in-process on the `dir` store and a fake plugin, in
-  `internal/chaos` with the existing fault schedules; then against real
-  AWS and S3, as the reclaim tests did.
+- **In one process:** N members on memberlist's in-memory transport,
+  wrapped in one that drops, delays and partitions messages from a seeded
+  schedule (`internal/chaos`), each with a fake GitHub and fake plugins.
+  After each run:
+  - no job stayed queued past N × grace while a member had room for it;
+  - runners per job: one when the views agree; never more than the members
+    that had room;
+  - no member ran past its budget;
+  - every repo had a poller whenever it had a live member.
+- **The demo:** three to five Cloud Hypervisor microVMs from the local kit,
+  each a "site" running fleetci with a dockervm class, joined over
+  headscale (BSD-3), so the kit needs no tailnet account.
+- **Chaos:** kill -9 and SIGSTOP of members; partitions with nftables,
+  latency and loss with netem; a site cut off for minutes; Tailscale
+  falling back to its DERP relays; rolling upgrades with two versions
+  side by side.
 
 ## To decide
 
-1. **Order:** this ahead of the Raft cluster, Raft becoming a store backend.
-   Recommended: it delivers #23 and most of multi-host.md's problem 3
-   without consensus.
-2. **First backend:** `dir` and `s3`. DynamoDB is the alternative, but
-   it's one more service to set up for the same thing.
-3. **SIGTERM:** with `state_dir`, it hands running GitHub jobs over instead
-   of removing everything, and `-remove-all` does what it did. Without
-   `state_dir`, nothing changes; nor does the plugin.
-4. **fleetingd adoption:** do it in phase 0, or leave on-host VMs lost on a
-   restart for now.
+1. **`grace`:** 10 s is a VM boot on the slowest class. Shorter means more
+   duplicate runners when views differ; longer means a slower takeover.
+2. **Members with different `[github]` tables:** allowed, ranking only among
+   members that serve the repo, or required to match.
+3. **Version skew:** members ignore events they don't know, and the status
+   shows versions; a minimum version for joining is possible but not
+   planned.
+4. **fleetingd adoption:** in the next round, or left, with on-host VMs
+   lost on a restart for now.
