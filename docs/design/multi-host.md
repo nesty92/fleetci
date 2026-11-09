@@ -7,8 +7,8 @@ Status: plan. The first step, the embedded GitLab runner, is a spike on
 
 fleetci becomes one program that runs anywhere and takes jobs from GitLab
 and GitHub itself, with no gitlab-runner beside it. Several machines,
-joined over a VPN, run it together as a federation: they share the
-work, and the others keep going when one of them fails.
+run it together as a federation, with or without a network between them:
+they share the work, and the others keep going when one of them fails.
 
 Today a GitLab install is gitlab-runner plus fleetci's fleeting plugin, and
 GitHub jobs need `fleetci serve`, a second process with classes of its own
@@ -209,10 +209,12 @@ it holds. Plugin mode's GitHub dispatcher uses the same Capacity.
 ## Step 2: the federation
 
 Replaced by [ha.md](ha.md): machines at several sites, each with its own
-budget, behind NAT on one VPN, gain little from consensus and lose a site
+budget and often behind NAT, gain little from consensus and lose a site
 that is cut off, which Raft stops as the minority. They share the GitHub
-queue by gossip instead, each ranking the machines with room the same way,
-and a wrong view costs a runner too many, never a job. A cloud class shared
+queue through GitHub instead: a job's runner is named after the job, and
+GitHub refuses a second runner of that name, so the machines need no
+network between them. Membership, by gossip or a shared store, is
+optional and only splits the polling. A cloud class shared
 by machines keeps the lease with a fencing token, after client-go
 `leaderelection`, as an option.
 
@@ -222,12 +224,14 @@ jobs it has room for, so neither is needed.
 
 ## Step 3: tests of several machines in one process
 
-N members in one test, on memberlist's in-memory transport wrapped in one
-that drops, delays and partitions messages. Faults come from a seeded
+N members in one test, on one fake GitHub, with membership on memberlist's
+in-memory transport wrapped in one that drops, delays and partitions
+messages. Faults come from a seeded
 schedule, so a failure replays exactly. After each run:
 
 - no host ran past its budget;
 - no cloud class had two owners at once (fencing tokens only grow);
+- no job got runners from two hosts at once;
 - no job waited while a member had room for it past the grace periods;
 - every job taken started, or failed with its reason.
 

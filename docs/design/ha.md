@@ -7,9 +7,9 @@ The federation is planned. It answers #23 and replaces
 ## The setup this is for
 
 Several machines, at several sites, each with its own CPUs and memory, and
-perhaps a cloud class for spikes. They reach each other over one VPN
-(WireGuard, Tailscale, headscale), since most sit behind NAT or on private
-networks. Each machine's VMs run on that machine and die with it.
+perhaps a cloud class for spikes. Many sit behind NAT or on private
+networks, so they may not see each other at all; all of them reach GitHub
+(or GitLab). Each machine's VMs run on that machine and die with it.
 
 So the high availability that matters is:
 - **A restart of one machine's fleetci keeps its jobs** (phase 0).
@@ -18,8 +18,9 @@ So the high availability that matters is:
   cut-off site itself, keep serving what they can.
 
 A standby on another machine can't save a machine's on-host VMs, and
-consensus would do harm here: Raft stops the minority side of a cut, so a
-site whose VPN link drops would stop taking jobs it has the machines for.
+consensus would do harm here: Raft needs the machines to reach each other,
+and stops the minority side of a cut, so a site whose link drops would stop
+taking jobs it has the machines for.
 
 ## Where things stood
 
@@ -48,9 +49,10 @@ couldn't share work:
 |---|---|---|
 | taskscaler (MIT) | `WithStorage` saves each instance's slots, acquisition keys and use count; on start, `createInstanceOrRestore` restores them | Phase 0's handover across a restart |
 | gitlab-runner (MIT) | `state_storage` releases every restored acquisition, since its jobs ran in the dead process | Only jobs that live on the VM can be kept; embedded GitLab jobs drain instead |
-| memberlist (MPL-2.0, imported as a library) | SWIM membership: failure detection by indirect probes, gossip of state, push-pull sync, AES-GCM encryption with a rotatable keyring | Membership and the gossip of each machine's room, over the VPN |
+| GitHub's runner API | A runner's name is unique within its repo or org; a second registration of it gets 409 Conflict | The claim on a job, with no network between machines |
+| memberlist (MPL-2.0, imported as a library) | SWIM membership: failure detection by indirect probes, gossip of state, push-pull sync, AES-GCM encryption with a rotatable keyring | Optional membership, where the machines see each other |
 | Serf and Consul (MPL-2.0, ideas) | Events and queries on top of memberlist; members that leave versus fail; reaping failed members after a timeout | Telling a machine that left from one that failed; reaping |
-| Rendezvous hashing (Thaler and Ravishankar, 1996) | Every node ranks the same candidates the same way from a hash, with no coordination, and only the keys of a node that goes move | Who polls each repo, and the order in which machines take a job |
+| Rendezvous hashing (Thaler and Ravishankar, 1996) | Every node ranks the same candidates the same way from a hash, with no coordination, and only the keys of a node that goes move | Who polls each repo, with membership |
 | terraform-aws-github-runner (MIT) | Found GitHub's `busy` flag stale for 25–60 s and even 12+ min | Decide from what the VM and the job say, not `busy` |
 | client-go `leaderelection` (Apache-2.0) | Lease of 15 s, renewed within 10 s, retried every 2 s, expiry measured by the observer | Only for the optional shared cloud class (below) |
 
@@ -112,141 +114,152 @@ The acceptance:
 
 ### The federation
 
-Several `fleetci serve` processes, one per machine, that know of each other
-and share the GitHub queue. Nothing in it needs agreement: each machine
-decides for itself from what it has heard, the same way the others do, and
-a machine that hears wrong costs a runner too many, never a job.
+Several `fleetci serve` processes, one per machine, sharing the GitHub
+queue. They need no network between them: GitHub is the one thing every
+machine already reaches, and it settles who runs a job. A network between
+the machines, when there is one, only saves rate limit and shows status.
 
 #### What needs sharing
 
 | | Shared how |
 |---|---|
 | On-host VMs (fleetingd) | Not at all: each machine's budget is its own |
-| GitLab jobs | Not at all: GitLab gives each job to one runner, and each machine asks only while it has room. One `serve` per machine, with its own runners, or the same runner token on each, works today |
-| Which machine starts a runner for a GitHub job | Each machine ranks the machines with room the same way (below) |
-| Polling GitHub | Each repo is polled by one live machine, chosen by rendezvous hashing; what it finds is gossiped |
+| GitLab jobs | Not at all: GitLab gives each job to one runner, and each machine asks only while it has room. One `serve` per machine, with its own runners or the same runner token, works today |
+| Which machine starts a runner for a GitHub job | GitHub: the runner's name is the claim (below) |
+| Polling GitHub | Each machine polls alone; with membership, each repo is polled by one machine |
 | Cloud classes | Not at all: each site has its own fleeting group and `max_instances`. A class shared by machines needs one owner; see the optional lease |
 
-#### Membership
+#### The claim is the runner's name
 
-- **memberlist over the VPN,** with its WAN settings (probes every 5 s,
-  3 s timeouts), since sites are tens of milliseconds apart. It needs one
-  TCP and UDP port.
-- **Config:**
+GitHub keeps a runner's name unique within its scope, a repo or an org,
+and refuses a second registration of a name with 409 Conflict. So a
+runner started for a job is named after the job:
+
+```
+fleetci-<class>-j<job id>-<try>
+```
+
+- **Registering is claiming.** A machine registers the runner first, and
+  takes a VM only once GitHub said yes. Another machine that tries the same
+  name gets 409, gives back the room it had reserved, and leaves the job.
+  Reserving room is instant, so this costs one GitHub call, about half a
+  second, before the VM is taken; today the registration runs alongside
+  taking the VM.
+- **Machines with room try first.** A machine waits `grace × used ÷ slots`
+  of the job's class, plus a little jitter, before it tries: an empty
+  machine at once, a fuller one later, a full one not at all. Without
+  knowing of each other, the machines with the most room win. `grace`
+  defaults to 2 s.
+- **The claim lasts as long as the runner.** The machine that holds it
+  unregisters the runner when the runner fails, and starts the next try
+  itself under `<try>+1`, as it does today. One whose runner took another
+  job, which GitHub may do, knows from the runner's log and retries the
+  job the same way.
+- **A machine that dies holding a claim** leaves a registered runner
+  nobody will start. The others see the job still queued after
+  `claim_timeout` (3 minutes, beyond the slowest boot) and try the next
+  `<try>`.
+- **Before registering,** a machine checks the job is still queued when
+  its list is older than a few seconds, as `takenElsewhere` does, so a
+  name GitHub freed when the job ended isn't claimed again.
+- **Every machine must use the same scope** for a repo: all of them list it
+  under `repos`, or all under `orgs`. Names are unique per scope, so a repo
+  runner and an org runner of the same name don't collide. `fleetci check`
+  can't see the other machines' configs; the runbook says so.
+
+Two machines never start runners for the same job, whatever the network
+does, because GitHub decides. A cut-off site serves the jobs it can, as
+long as it reaches GitHub.
+
+#### Membership, optional
+
+Without it, each machine polls every repo it serves, so N machines use the
+token's rate limit N times. A GitHub App gets 5,000 requests an hour, up
+to 12,500 with many repos, and an idle poll costs about a call per repo,
+so a few machines with tens of repos at the default `poll_interval` run
+out. Either raise `poll_interval` (a webhook makes that free), or let the
+machines know of each other:
+
+- **Gossip, where the machines see each other** over any network: a LAN,
+  a VPN, public addresses. memberlist (SWIM) with its WAN settings, one
+  TCP and UDP port, encrypted with a shared key:
 
   ```toml
   [federation]
   id = "wroclaw-1"                         # default: the hostname
-  listen = "100.64.0.11:9481"              # an address on the VPN
-  join = ["100.64.0.12:9481"]              # any member or two; more are found
+  listen = "10.1.0.11:9481"
+  join = ["10.2.0.12:9481"]                # any member or two; more are found
   key_file = "/etc/fleetci/federation.key" # 32 random bytes, base64
   ```
 
-  A new machine joins with one known address and the key: no list of every
-  peer, no certificates, no minimum count. One machine alone works as
-  today. `key_file` may hold several keys, the first used to send, so the
-  key can be rotated without stopping the federation, as memberlist's
-  keyring allows.
-- **What is gossiped:** each member's id, fleetci version, the repos and
-  orgs it serves, and per class its free slots and whether it is on the
-  host. Then, as events: jobs found queued, and runners started for them.
-  No tokens, no JIT configs, no SSH details: those never leave the machine.
-  memberlist's node metadata holds 512 bytes, too few for many classes, so
-  the room travels in its broadcasts and push-pull state instead.
-- **Left versus failed.** A member that stops says so and is dropped at
-  once; one that fails is marked suspect and then dead by SWIM, and reaped
-  after an hour.
-- **Trust.** Everyone with the key is a member, and a member can claim room
-  it doesn't have: the key is a secret like the GitHub token. The VPN is
-  the first fence; the key's encryption is the second.
+  memberlist expects every member to reach every other one. A member that
+  reaches only the one it joined is soon taken for dead by the rest.
+- **Through a shared store, where they don't:** each machine writes a
+  heartbeat object to S3 (or a shared directory) every 10 s, and reads
+  the others'. Only the store needs to be reachable, from anywhere.
+- **What membership gives:** each repo is polled by one live member, chosen
+  by rendezvous hashing, with the jobs it finds passed to the others
+  (gossip, or a queue object in the store). Every member still polls every
+  repo every 5 minutes, so a lost message or a stuck poller costs minutes,
+  not the job. `fleetci federation status` shows the members, their
+  versions and their room.
+- **Webhooks** reach whichever member has a public address, or a relay;
+  with membership, it passes the jobs on as the poller does.
 
-#### Dispatching a GitHub job
-
-For a queued job of class `c` in repo `r`, every machine computes the same
-list: the live members that serve `r` and have a free slot of `c`, ranked
-by the hash of the job's id with each member's id (rendezvous), the free
-room weighing in so that fuller machines rank lower.
-
-- **Rank 0 starts a runner at once** and gossips `started job <id>`.
-- **Rank k waits k × `federation.grace`** (10 s by default), then starts one
-  if it hasn't heard a start and the job is still queued, which it checks
-  with GitHub first.
-- **A machine that finds no room for the job** waits, as today, and ranks
-  again when the room changes.
-- **Views differ for a few seconds** after a member joins, fails or fills
-  up. Two machines may then both take rank 0 and both start a runner: one
-  takes the job, and the idle watch removes the other, as it already does
-  for a runner GitHub gives another job. That is the price of no
-  consensus, and it is bounded by the grace period.
-- **A cut-off site** sees only its own members, so it serves every job it
-  can, and the other side does the same. The price is again runners too
-  many, never a job that waits while some machine has room.
-
-#### Polling and webhooks
-
-- **Each repo and org is polled by one live member** that serves it,
-  chosen by rendezvous hashing, so N machines use the rate limit once.
-  When that member goes, the repo moves to the next in rank within one
-  failure detection. Jobs found are gossiped to the members that serve the
-  repo.
-- **Every member still polls every repo slowly** (every 5 minutes, as with
-  a webhook today), so a lost broadcast, or a poller that is alive but
-  stuck, costs minutes, not the job. The poller itself polls at
-  `poll_interval` (10 s by default).
-- **Webhooks** reach whichever member has a public address, or a relay in
-  front of one; it gossips the jobs as a poll would. Machines behind NAT
-  need none.
+Membership is never needed for correctness: with none, or a broken one,
+each machine falls back to polling alone.
 
 #### Optional: a cloud class shared by machines
 
 Only for setups that want one cloud class with one `max_instances` across
 machines. Its owner holds a lease, `class/<name>`, with client-go's
-timings, on a store all members reach: S3 with conditional writes, or a
+timings, in a store all members reach: S3 with conditional writes, or a
 shared directory. The owner runs its taskscaler, and every `Increase`,
 `Decrease` and `Update` first checks that the lease was renewed within the
 renew deadline, so an owner stopped with SIGSTOP refuses to scale when it
 resumes. A new owner adopts the VMs as in phase 0, with taskscaler's state
-in the same store. Other members don't use the class: a job of it goes to
-the owner by the ranking. Without the lease, give each site its own class.
+in the same store. Other members don't serve the class. Without the lease,
+give each site its own class.
 
 #### Steps
 
-1. **Membership and room.** memberlist, `[federation]`, gossip of room, and
-   `fleetci federation status`: the members, their versions and their free
-   room, as this machine sees them.
-2. **GitHub dispatch by rank,** with the `started` events and the grace.
-3. **Polling split,** the slow safety poll, and webhook jobs gossiped.
+1. **Verify GitHub's 409** on a real repo and an org: the same name twice,
+   at the same moment from two clients, and again after the first runner
+   ended.
+2. **Claims by name,** with the room-weighted wait and `claim_timeout`. This
+   alone makes several machines on the same repos safe.
+3. **Membership through the store, then gossip,** with the polling split
+   and `fleetci federation status`.
 4. **The rest of phase 0,** alongside: the GitLab drain, then fleetingd
    adoption.
 5. **The shared cloud class lease,** if a setup asks for it.
 
 ## Tests
 
-- **In one process:** N members on memberlist's in-memory transport,
-  wrapped in one that drops, delays and partitions messages from a seeded
-  schedule (`internal/chaos`), each with a fake GitHub and fake plugins.
-  After each run:
-  - no job stayed queued past N × grace while a member had room for it;
-  - runners per job: one when the views agree; never more than the members
-    that had room;
-  - no member ran past its budget;
-  - every repo had a poller whenever it had a live member.
+- **In one process:** N dispatchers on one fake GitHub (`forge_test.go`
+  already keeps names unique), each with fake plugins, under `internal/chaos`
+  fault schedules: GitHub slow or erring, machines killed and stopped. After
+  each run:
+  - no job got runners from two machines at once;
+  - no job stayed queued past grace plus `claim_timeout` while a machine
+    had room for it;
+  - no machine ran past its budget;
+  - with membership, every repo had a poller whenever it had a live member.
 - **The demo:** three to five Cloud Hypervisor microVMs from the local kit,
-  each a "site" running fleetci with a dockervm class, joined over
-  headscale (BSD-3), so the kit needs no tailnet account.
-- **Chaos:** kill -9 and SIGSTOP of members; partitions with nftables,
-  latency and loss with netem; a site cut off for minutes; Tailscale
-  falling back to its DERP relays; rolling upgrades with two versions
-  side by side.
+  each a "site" running fleetci with a dockervm class, on networks that
+  can't see each other, all on the same GitHub repos.
+- **Chaos:** kill -9 and SIGSTOP of members; a site cut off from the
+  others but not from GitHub, and from GitHub too; rolling upgrades with
+  two versions side by side.
 
 ## To decide
 
-1. **`grace`:** 10 s is a VM boot on the slowest class. Shorter means more
-   duplicate runners when views differ; longer means a slower takeover.
-2. **Members with different `[github]` tables:** allowed, ranking only among
-   members that serve the repo, or required to match.
-3. **Version skew:** members ignore events they don't know, and the status
-   shows versions; a minimum version for joining is possible but not
-   planned.
+1. **`grace` and `claim_timeout`:** 2 s and 3 minutes. A shorter grace
+   favours an empty machine less; a shorter timeout takes over a dead
+   machine's job sooner, at the risk of a second runner for a slow boot.
+2. **Which membership first:** the store (works anywhere, needs S3 or a
+   shared disk) or gossip (no store, needs the machines to see each other).
+3. **Members with different `[github]` tables:** allowed, as long as each
+   repo's scope matches.
 4. **fleetingd adoption:** in the next round, or left, with on-host VMs
    lost on a restart for now.
