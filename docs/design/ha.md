@@ -338,6 +338,29 @@ as `docs/grafana/fleetci-fleet.json` does.
 | `fleetci_fleet_job_duration_seconds{forge,class}`, `fleetci_fleet_vm_boot_seconds{class}` | how long they ran, and their VMs took to boot |
 | `fleetci_fleet_vms_total{class,outcome}` | VMs by what came of them: `job`, `unused`, `boot_failed`, `no_room` |
 
+#### Signed releases
+
+A machine runs what it downloads as root, so a checksum from the same
+place as the binary is not enough: each release carries `versions.json`,
+signed with fleetci's release key, whose public half is built into
+fleetci (`internal/release.PublicKey`). It names, per platform, the
+fleetci, fleetingd and cloud-hypervisor binaries the release was tested
+with, their URLs, sizes and SHA-256, and the fleet protocol range, so one
+update moves all three together. fleetingd is re-hosted on fleetci's
+release as a plain binary; cloud-hypervisor stays on its own, pinned by
+its checksum. The versions are in `hack/release/deps.json`.
+
+The signature is minisign's, so anyone can check a release with the stock
+tool:
+
+```
+minisign -Vm versions.json -P RWTgbngGzFGS8xCuzg+JIhe87MYOqwyUNqye94EFX+ZJ2sWPDfWFGgYS
+```
+
+The release workflow signs with the `FLEETCI_RELEASE_KEY` secret, an
+unencrypted minisign key (`go run ./hack/release keygen`); a release made
+without it has no manifest, and no machine updates to it.
+
 #### Classes: defined once, on the controllers
 
 The classes live in the controllers' `fleetci.toml` and nowhere else. A

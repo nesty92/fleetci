@@ -2,7 +2,8 @@ name: Release
 
 # release-please keeps a release PR open from conventional commits on main
 # (feat:, fix:, …). Merging it tags the version and creates the GitHub
-# release; GoReleaser then attaches the binaries and checksums.txt.
+# release; GoReleaser then attaches the binaries and checksums.txt, and
+# hack/release the signed versions.json.
 on:
   push:
     branches: [main]
@@ -49,3 +50,18 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # versions.json: the binaries a machine installs, signed with the
+      # release key, which fleetci checks before it updates itself. Without
+      # the key the release has none, and machines don't update to it.
+      - name: Signed manifest
+        env:
+          FLEETCI_RELEASE_KEY: ${{ secrets.FLEETCI_RELEASE_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.release-please.outputs.tag || inputs.tag }}
+        run: |
+          if [ -z "$FLEETCI_RELEASE_KEY" ]; then
+            echo "::warning::no FLEETCI_RELEASE_KEY secret: $TAG has no versions.json, and machines won't update to it"
+            exit 0
+          fi
+          go run ./hack/release manifest -version "$TAG" -dist dist -out dist/release
+          gh release upload "$TAG" dist/release/* --clobber
