@@ -59,6 +59,12 @@ func refused(err error) bool {
 	return errors.As(err, &s) && s.status >= 400 && s.status < 500 && !errors.As(err, new(rateLimited))
 }
 
+// conflict is GitHub refusing a runner name it has already.
+func conflict(err error) bool {
+	var s statusError
+	return errors.As(err, &s) && s.status == http.StatusConflict
+}
+
 // rateLimited is GitHub saying to send nothing until a time.
 type rateLimited struct{ until time.Time }
 
