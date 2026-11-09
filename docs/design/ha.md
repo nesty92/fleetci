@@ -361,6 +361,46 @@ The release workflow signs with the `FLEETCI_RELEASE_KEY` secret, an
 unencrypted minisign key (`go run ./hack/release keygen`); a release made
 without it has no manifest, and no machine updates to it.
 
+#### Self-update
+
+A worker with `[update] auto = true` updates itself from these releases, as
+far as the controllers let it:
+
+```toml
+# worker.toml
+[update]
+auto = true
+# source = "https://api.github.com/repos/nesty92/fleetci/releases"
+# check_every = "24h"   # jittered by a quarter
+# trial = "3m"
+
+# controller.toml
+[controller]
+worker_update = "minor"  # off (default), patch, minor, latest, or a version to pin
+update_parallel = 1      # how many workers update at once
+```
+
+The worker looks for the newest release the controllers' policy allows (the
+strictest any live controller gives, so a half-upgraded set of controllers
+cannot loosen it), checks its `versions.json` signature, and downloads and
+checks its binaries into `<state>/update/<version>/`. It then reports
+`ready`, and waits for a slot: only the leader hands them out,
+`update_parallel` at a time, and none for a release whose protocol the
+controllers do not speak. With its slot the worker drains, lets its running
+jobs finish, keeps its binaries in `update/previous/`, swaps the new ones in
+and re-execs itself.
+
+The new version starts on trial. It commits once it has reached a
+controller, every class the old version had passed its microVM check for has
+passed again, and `trial` has gone by. It rolls back to the old binaries if
+a check fails, if it gets nowhere within 15 minutes, or if it stops during
+its trial and is started again. The version it rolled back from is recorded
+in `update/failed.json` and never tried again; the worker reports it,
+`fleetci fleet status` shows it, and the leader gives no other worker a
+slot for it: the rollout stops there. A newer release goes on as usual; to
+try the same one again, remove that worker's `failed.json`. `fleetci fleet update-check` asks every
+worker to look now instead of at its next check.
+
 #### Classes: defined once, on the controllers
 
 The classes live in the controllers' `fleetci.toml` and nowhere else. A

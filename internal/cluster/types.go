@@ -64,6 +64,7 @@ type Report struct {
 	// Assignments are the assignments it has, and those it finished
 	// lately.
 	Assignments []AssignmentStatus `json:"assignments,omitempty"`
+	Update      *UpdateStatus      `json:"update,omitempty"`
 }
 
 // VMInfo is one of a worker's VMs.
@@ -91,6 +92,41 @@ type StatusUpdate struct {
 type StatusResponse struct {
 	Fit      Fit  `json:"fit"`
 	Draining bool `json:"draining,omitempty"`
+	// Update is how far the worker may update itself; UpdateCheck, when
+	// later than its last check, asks it to check now; UpdateGo is the
+	// version the leader lets it install now, its update slot.
+	Update      string    `json:"update,omitempty"`
+	UpdateCheck time.Time `json:"update_check,omitzero"`
+	UpdateGo    string    `json:"update_go,omitempty"`
+}
+
+// The update policies: how far a worker may update itself, set on the
+// controllers. A version, "v0.7.0", pins it.
+const (
+	UpdateOff    = "off"
+	UpdatePatch  = "patch"
+	UpdateMinor  = "minor"
+	UpdateLatest = "latest"
+)
+
+// The states of a worker's self-update.
+const (
+	UpdateIdle     = ""
+	UpdateStaging  = "downloading"
+	UpdateReady    = "ready"    // downloaded; waits for its slot
+	UpdateDraining = "draining" // has its slot; waits for its jobs to end
+	UpdateTrial    = "trial"    // runs the new version, on trial
+	UpdateFailed   = "failed"   // the last try failed, and rolled back
+)
+
+// UpdateStatus is a worker's self-update, in its reports.
+type UpdateStatus struct {
+	State  string `json:"state,omitempty"`
+	Target string `json:"target,omitempty"`
+	// Protocol is the target's, which the leader checks before it gives
+	// the slot: a worker must not outrun its controllers.
+	Protocol int    `json:"protocol,omitempty"`
+	Err      string `json:"err,omitempty"`
 }
 
 // Assignment is a VM the leader wants on a worker, and later the job to run

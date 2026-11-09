@@ -54,6 +54,9 @@ type Controller struct {
 
 	metrics *metrics
 	history *history
+
+	updateCheck time.Time            // when fleetci fleet update-check asked
+	granted     map[string]time.Time // worker → when it got its update slot
 }
 
 type peerState struct {
@@ -114,7 +117,7 @@ func NewController(cfg *ControllerConfig, version string, log hclog.Logger) (*Co
 	c := &Controller{cfg: cfg, pki: p, log: log, version: version,
 		workers: map[string]*workerConn{}, peers: map[string]peerState{},
 		tokens: map[string]TokenRecord{}, revoked: map[string]Revoked{}, drains: map[string]DrainRecord{},
-		wakeCh: make(chan struct{}), epoch: fmt.Sprintf("%x", time.Now().UnixNano())}
+		wakeCh: make(chan struct{}), granted: map[string]time.Time{}, epoch: fmt.Sprintf("%x", time.Now().UnixNano())}
 	if err := os.MkdirAll(cfg.Controller.StateDir, 0o700); err != nil {
 		return nil, err
 	}

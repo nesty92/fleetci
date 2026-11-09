@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"golang.org/x/mod/semver"
 
 	"github.com/nesty92/fleetci/internal/fleet"
 	"github.com/nesty92/fleetci/internal/github"
@@ -59,6 +60,12 @@ type ControllerTable struct {
 	// Metrics is an address to serve Prometheus metrics on, plain HTTP at
 	// /metrics, e.g. "127.0.0.1:9482". Default none.
 	Metrics string `toml:"metrics"`
+	// WorkerUpdate is how far workers with [update] auto may update
+	// themselves: "off" (default), "patch", "minor", "latest", or a
+	// version, "v0.7.0", to pin them to.
+	WorkerUpdate string `toml:"worker_update"`
+	// UpdateParallel is how many workers may update at once. Default 1.
+	UpdateParallel int `toml:"update_parallel"`
 }
 
 // ClassSpec is a class as the controllers define it, once for the fleet:
@@ -107,6 +114,15 @@ func LoadController(path string) (*ControllerConfig, error) {
 	if t.Placement != fleet.Pack && t.Placement != fleet.Spread {
 		return nil, fmt.Errorf("%s: placement %q: pack or spread", path, t.Placement)
 	}
+	t.WorkerUpdate = cmp.Or(t.WorkerUpdate, UpdateOff)
+	switch t.WorkerUpdate {
+	case UpdateOff, UpdatePatch, UpdateMinor, UpdateLatest:
+	default:
+		if !semver.IsValid(t.WorkerUpdate) || t.WorkerUpdate != semver.Canonical(t.WorkerUpdate) {
+			return nil, fmt.Errorf("%s: worker_update %q: off, patch, minor, latest or a version as v0.7.0", path, t.WorkerUpdate)
+		}
+	}
+	t.UpdateParallel = cmp.Or(t.UpdateParallel, 1)
 	if len(c.Classes) == 0 {
 		return nil, fmt.Errorf("%s: no [classes]", path)
 	}
@@ -153,6 +169,8 @@ type WorkerConfig struct {
 	Host *fleet.HostConfig `toml:"host"`
 	// FleetingdPlugin is fleeting-plugin-fleetingd. Default on the PATH.
 	FleetingdPlugin string `toml:"fleetingd_plugin"`
+	// Update is how the worker updates itself; off by default.
+	Update UpdateConfig `toml:"update"`
 
 	File string `toml:"-"`
 }

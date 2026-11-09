@@ -59,6 +59,9 @@ type Worker struct {
 	clients  map[string]*client // controller address → its client
 	tasks    map[string]*task   // assignment id → what this worker made of it
 	changed  chan struct{}
+	update   *updater
+	stop     context.CancelFunc // ends Run
+	exitErr  error              // what Run returns: ErrRestart for an update
 }
 
 // task is an assignment as this worker carries it out.
@@ -117,6 +120,9 @@ func NewWorker(cfg *WorkerConfig, version string, log hclog.Logger) (*Worker, er
 	}
 	w.facts = f
 	w.budget = fleet.Resources{CPUs: f.CPUs, MemoryMB: f.MemoryMB}
+	if w.update, err = newUpdater(cfg.Update); err != nil {
+		return nil, err
+	}
 	return w, nil
 }
 
@@ -177,7 +183,13 @@ func (w *Worker) Run(ctx context.Context) error {
 	for _, addr := range w.cfg.Controllers {
 		w.clients[addr] = newClient(addr, tlsCfg)
 	}
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
+	w.mu.Lock()
+	w.stop = stop
+	w.mu.Unlock()
 	var wg sync.WaitGroup
+	wg.Go(func() { w.updateLoop(ctx) })
 	for _, cl := range w.clients {
 		wg.Go(func() { w.watchLoop(ctx, cl) })
 	}
@@ -198,7 +210,9 @@ func (w *Worker) Run(ctx context.Context) error {
 		w.log.Info("stopping: removing this worker's VMs")
 		_ = b.Shutdown(sctx)
 	}
-	return nil
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.exitErr
 }
 
 // watchLoop watches this worker's assignments on one controller and
@@ -409,12 +423,17 @@ func defaultInterface() (string, error) {
 	return "", errors.New("no default route: set egress_interface in worker.toml")
 }
 
+// drainedLocked: the controllers drain it, or it drains for an update.
+func (w *Worker) drainedLocked() bool {
+	return w.draining || (w.update != nil && w.update.status.State == UpdateDraining)
+}
+
 // room is how many more VMs of each class fit now.
 func (w *Worker) roomLocked() map[string]int {
 	room := map[string]int{}
 	for name := range w.classes {
 		room[name] = 0
-		if w.passed[name] && !w.draining {
+		if w.passed[name] && !w.drainedLocked() {
 			room[name] = w.fitsLocked(name)
 		}
 	}
@@ -455,9 +474,12 @@ func (w *Worker) report() Report {
 	for _, ok := range w.passed {
 		anyPassed = anyPassed || ok
 	}
+	r.Update = w.updateReportLocked()
 	switch {
 	case w.draining:
 		r.State = Draining
+	case w.drainedLocked():
+		r.State, r.Reason = Draining, "updating to "+w.update.status.Target
 	case w.backend == nil:
 		r.State, r.Reason = NotReady, "starting its classes"
 		if len(w.classes) == 0 {
@@ -488,6 +510,7 @@ func (w *Worker) reportLoop(ctx context.Context) {
 				var resp StatusResponse
 				if err := cl.do(rctx, http.MethodPut, workerPath(w.cfg.ID, "/status"), up, &resp); err != nil {
 					w.setDrain(addr, nil) // what it said no longer counts
+					w.takeUpdateOrders(addr, nil)
 					var se *StatusError
 					if errors.As(err, &se) && se.Code == http.StatusConflict {
 						if _, logged := turnedAway.LoadOrStore(addr, true); !logged {
@@ -501,6 +524,8 @@ func (w *Worker) reportLoop(ctx context.Context) {
 				}
 				w.configure(ctx, resp.Fit)
 				w.setDrain(addr, &resp.Draining)
+				w.takeUpdateOrders(addr, &resp)
+				w.reached()
 			})
 		}
 		wg.Wait()

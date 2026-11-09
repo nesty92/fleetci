@@ -20,6 +20,12 @@ func (c *Controller) handler() http.Handler {
 	}))
 	mux.HandleFunc("POST /v1/tokens", c.auth(RoleController, c.handleToken))
 	mux.HandleFunc("GET /v1/jobs", c.auth(RoleController, c.handleJobs))
+	mux.HandleFunc("POST /v1/update-check", c.auth(RoleController, func(w http.ResponseWriter, _ *http.Request, _ Identity) {
+		c.mu.Lock()
+		c.updateCheck = time.Now()
+		c.mu.Unlock()
+		writeJSON(w, http.StatusOK, struct{}{})
+	}))
 	for _, op := range []string{"drain", "undrain", "revoke"} {
 		mux.HandleFunc("POST /v1/workers/{id}/"+op, c.auth(RoleController, func(w http.ResponseWriter, r *http.Request, _ Identity) {
 			if err := c.workerOp(op, r.PathValue("id")); err != nil {
@@ -150,7 +156,8 @@ func (c *Controller) handleWorkerStatus(w http.ResponseWriter, r *http.Request, 
 	back := wc.state() == Unreachable
 	wc.serial, wc.facts, wc.fit, wc.report, wc.seen = id.Serial, up.Facts, fit, up.Report, time.Now()
 	c.observeLocked(wc)
-	resp := StatusResponse{Fit: fit, Draining: wc.draining}
+	resp := StatusResponse{Fit: fit, Draining: wc.draining, Update: c.cfg.Controller.WorkerUpdate, UpdateCheck: c.updateCheck}
+	resp.UpdateGo = c.updateSlotLocked(wc)
 	c.mu.Unlock()
 	c.history.observe(id.ID, up.Report.Assignments)
 	if back {

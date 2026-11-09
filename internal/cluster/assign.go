@@ -139,3 +139,44 @@ func (w *workerConn) pendingLocked(class string) int {
 	}
 	return n
 }
+
+// updateSlotLocked gives a worker that has an update ready its slot, the
+// leader's to give: update_parallel workers at a time, only to a version
+// whose protocol the controllers speak, and to none that another worker
+// tried and rolled back from. It answers the version the worker may install
+// now, or "".
+func (c *Controller) updateSlotLocked(w *workerConn) string {
+	u := w.report.Update
+	if c.leader != c.ID() || c.cfg.Controller.WorkerUpdate == UpdateOff || u == nil || u.State != UpdateReady {
+		if u == nil || (u.State != UpdateReady && u.State != UpdateDraining) {
+			delete(c.granted, w.id)
+		}
+		return ""
+	}
+	if protocolErr(u.Protocol) != nil {
+		return ""
+	}
+	if _, ok := c.granted[w.id]; ok {
+		return u.Target
+	}
+	busy := 0
+	for id, o := range c.workers {
+		if id == w.id || time.Since(o.seen) > 10*time.Minute {
+			continue
+		}
+		ou := o.report.Update
+		if ou != nil && ou.State == UpdateFailed && ou.Target == u.Target {
+			return "" // the rollout stops where it failed
+		}
+		_, got := c.granted[id]
+		if got || (ou != nil && (ou.State == UpdateDraining || ou.State == UpdateTrial)) {
+			busy++
+		}
+	}
+	if busy >= c.cfg.Controller.UpdateParallel {
+		return ""
+	}
+	c.granted[w.id] = time.Now()
+	c.log.Info("update slot given", "worker", w.id, "to", u.Target)
+	return u.Target
+}

@@ -100,6 +100,7 @@ A fleet of machines, run from controllers:
   fleetci join [flags] <ctl>      join this machine to the fleet and install it
   fleetci worker [flags]          run this machine as a worker
   fleetci fleet status|jobs       the fleet, and the jobs that ended
+  fleetci fleet update-check      ask the workers to look for an update now
   fleetci fleet drain|undrain|revoke <worker>
 
 Run "fleetci <command> -h" for its flags. Both read fleetci.toml from -config,

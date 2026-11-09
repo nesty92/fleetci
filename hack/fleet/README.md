@@ -52,3 +52,19 @@ fleet undrain w1
 GitLab, with `FLEETCI_FLEET_GITLAB=1`: run a pipeline on
 gitlab.com/Nesty92/fleetci-playground. The leader takes the job with the
 runner token and the worker runs it with the job's own token.
+
+## Self-update
+
+```sh
+hack/fleet/update-test.sh
+```
+
+It builds v0.1.0, v0.1.1 and a v0.1.2 whose cloud-hypervisor does not
+start, signs their manifests with a test key the workers are told to trust,
+and serves them as a release list at `http://releases` on the workers'
+networks. The workers update to v0.1.1 one at a time and commit it; the
+first to take v0.1.2 fails its microVM check on trial (about 10 minutes),
+rolls back to v0.1.1, and the leader gives v0.1.2 to no other worker. It
+sets the controllers' `worker_update = "latest"` and leaves the workers on
+v0.1.1, running from `/var/lib/fleetci/bin`; `up.sh` puts the kit back.
+`down.sh` removes the release server too.

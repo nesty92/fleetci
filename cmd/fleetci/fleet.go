@@ -248,13 +248,27 @@ func runWorker(ctx context.Context, wc *cluster.WorkerConfig) error {
 	w.GitLab = func(ctx context.Context, vm fleet.VM, job cluster.GitLabJob) error {
 		return gitlab.RunJob(ctx, source.VM{ID: vm.ID, Class: vm.Class, Instance: vm.Instance}, vm.Conn, job.Job, job.Runner, log.Named("gitlab"))
 	}
-	return w.Run(ctx)
+	self, err := os.Executable() // before an update replaces it
+	if err != nil {
+		return err
+	}
+	err = w.StartTrial()
+	if err == nil {
+		err = w.Run(ctx)
+	}
+	if errors.Is(err, cluster.ErrRestart) && ctx.Err() == nil {
+		// An update, or a rollback: start the binary now installed, as a
+		// worker.
+		log.Info("starting fleetci again", "path", self)
+		return syscall.Exec(self, []string{self, "worker", "-config", wc.File}, os.Environ())
+	}
+	return err
 }
 
 // fleetCmd is fleetci fleet status|jobs|drain|undrain|revoke.
 func fleetCmd(args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: fleetci fleet status|jobs|drain|undrain|revoke [worker]")
+		return errors.New("usage: fleetci fleet status|jobs|update-check|drain|undrain|revoke [worker]")
 	}
 	op := args[0]
 	fs := flag.NewFlagSet("fleet "+op, flag.ExitOnError)
@@ -300,6 +314,12 @@ func fleetCmd(args []string, out io.Writer) error {
 		}
 		printJobs(out, jobs)
 		return nil
+	case "update-check":
+		if err := cluster.Admin(ctx, *pki, *addr, cluster.AdminRequest(op, "", "", 0), nil); err != nil {
+			return err
+		}
+		fmt.Fprintln(out, "ok    the workers check for an update at their next report")
+		return nil
 	case "drain", "undrain", "revoke":
 		if fs.NArg() != 1 {
 			return fmt.Errorf("usage: fleetci fleet %s <worker>", op)
@@ -344,18 +364,24 @@ func printStatus(out io.Writer, st cluster.Status) {
 			}
 			jobs = append(jobs, strings.TrimSpace(v.Class+" "+j))
 		}
-		note := w.Report.Reason
+		var notes []string
 		if v := st.Versions[st.Controller]; v != "" && w.Facts.Version != "" && w.Facts.Version != v {
-			note = strings.TrimSpace("not on the controller's " + v + "; " + note)
-			note = strings.TrimSuffix(note, ";")
+			notes = append(notes, "not on the controller's "+v)
 		}
-		if len(w.Fit.Refused) > 0 {
-			var r []string
-			for _, n := range slices.Sorted(maps.Keys(w.Fit.Refused)) {
-				r = append(r, "no "+n+": "+w.Fit.Refused[n])
+		if w.Report.Reason != "" {
+			notes = append(notes, w.Report.Reason)
+		}
+		if u := w.Report.Update; u != nil {
+			s := "update " + strings.TrimSpace(u.State+" "+u.Target)
+			if u.Err != "" {
+				s += ": " + u.Err
 			}
-			note = strings.TrimSpace(note + " " + strings.Join(r, "; "))
+			notes = append(notes, s)
 		}
+		for _, n := range slices.Sorted(maps.Keys(w.Fit.Refused)) {
+			notes = append(notes, "no "+n+": "+w.Fit.Refused[n])
+		}
+		note := strings.Join(notes, "; ")
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%d cpu %s\t%d cpu %s\t%s\t%s\t%s\n", w.ID, w.Facts.Version, w.State,
 			w.Facts.CPUs, fleet.Size(w.Facts.MemoryMB), w.Report.UsedCPUs, fleet.Size(w.Report.UsedMemory),
 			strings.Join(cls, " "), strings.Join(jobs, ", "), note)

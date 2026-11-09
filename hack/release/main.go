@@ -5,6 +5,11 @@
 //	go run ./hack/release manifest -version v0.7.0 -dist dist -out dist/release
 //	go run ./hack/release verify -base https://github.com/nesty92/fleetci/releases/download/v0.7.0
 //
+// local signs a manifest of binaries in a directory, with any key, for a
+// mirror or a test whose workers trust that key ([update] public_key):
+//
+//	go run ./hack/release local -version v0.7.0 -dir mirror/v0.7.0 -url http://mirror/v0.7.0 -key test.key
+//
 // manifest reads the secret key from $FLEETCI_RELEASE_KEY. It puts in
 // fleetci from GoReleaser's dist, fleetingd from our fork's release
 // (re-hosted on fleetci's, as a plain binary) and cloud-hypervisor from its
@@ -41,7 +46,7 @@ var arches = []string{"amd64", "arm64"}
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: release keygen|manifest|verify [flags]")
+		fmt.Fprintln(os.Stderr, "usage: release keygen|manifest|verify|local [flags]")
 		os.Exit(2)
 	}
 	var err error
@@ -52,6 +57,8 @@ func main() {
 		err = manifest(os.Args[2:])
 	case "verify":
 		err = verify(os.Args[2:])
+	case "local":
+		err = local(os.Args[2:])
 	default:
 		err = fmt.Errorf("unknown command %q", os.Args[1])
 	}
@@ -169,6 +176,45 @@ func manifest(args []string) error {
 	}
 	fmt.Printf("%s signed with key %s:\n%s", release.ManifestName, sk.Public().IDString(), data)
 	return nil
+}
+
+func local(args []string) error {
+	fs := flag.NewFlagSet("local", flag.ExitOnError)
+	version := fs.String("version", "", "the release's version, e.g. v0.7.0")
+	dir := fs.String("dir", "", "the binaries: fleetci, fleeting-plugin-fleetingd, cloud-hypervisor; the manifest goes here too")
+	url := fs.String("url", "", "where -dir is served")
+	keyFile := fs.String("key", "", "the secret key to sign with")
+	arch := fs.String("arch", "amd64", "the binaries' GOARCH")
+	_ = fs.Parse(args)
+	if *version == "" || *dir == "" || *url == "" || *keyFile == "" {
+		return errors.New("-version, -dir, -url and -key are needed")
+	}
+	b, err := os.ReadFile(*keyFile)
+	if err != nil {
+		return err
+	}
+	sk, err := release.ParseSecretKey(string(b))
+	if err != nil {
+		return fmt.Errorf("%s: %w", *keyFile, err)
+	}
+	bins := map[string]release.Binary{}
+	for _, name := range []string{"fleetci", "fleeting-plugin-fleetingd", "cloud-hypervisor"} {
+		sum, size, err := release.SHA256File(filepath.Join(*dir, name))
+		if err != nil {
+			return err
+		}
+		bins[name] = release.Binary{Version: *version, URL: strings.TrimSuffix(*url, "/") + "/" + name, SHA256: sum, Size: size}
+	}
+	m := release.Manifest{Version: *version, Protocol: cluster.Protocol, MinProtocol: cluster.MinProtocol,
+		Platforms: map[string]map[string]release.Binary{"linux/" + *arch: bins}}
+	data, sig, err := release.SignManifest(sk, m)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(*dir, release.ManifestName), data, 0o644); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(*dir, release.ManifestName+".minisig"), sig, 0o644)
 }
 
 func verify(args []string) error {
