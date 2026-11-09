@@ -551,7 +551,7 @@ func (w *Worker) reconcile(ctx context.Context, list []Assignment) {
 				w.mu.Unlock()
 				continue
 			}
-			t = &task{a: a, status: AssignmentStatus{ID: a.ID, Class: a.Class, Phase: PhasePending, Since: time.Now()}, listed: time.Now()}
+			t = &task{a: a, status: AssignmentStatus{ID: a.ID, Class: a.Class, Phase: PhasePending, Since: time.Now(), Created: a.Created}, listed: time.Now()}
 			w.tasks[a.ID] = t
 			w.mu.Unlock()
 			w.poke()
@@ -583,6 +583,7 @@ func (w *Worker) boot(ctx context.Context, t *task) {
 		v.assignment = t.a.ID
 	}
 	t.status.Phase, t.status.VM, t.status.Instance, t.status.Class, t.status.Since = PhaseReady, vm.VM, vm.Instance, vm.Class, time.Now()
+	t.status.Booted = t.status.Since
 	w.mu.Unlock()
 	w.poke()
 	w.advance(ctx, t)
@@ -623,6 +624,7 @@ func (w *Worker) finish(t *task, reason string, err error) {
 		return
 	}
 	t.status.Phase, t.status.Since, t.done = PhaseSucceeded, time.Now(), time.Now()
+	t.status.Ended = t.status.Since
 	if err != nil {
 		t.status.Phase, t.status.Reason, t.status.Err = PhaseFailed, reason, err.Error()
 	}
@@ -645,6 +647,13 @@ func (w *Worker) run(ctx context.Context, t *task) {
 	run := *t.a.Run
 	v.cancel, t.cancel = cancel, cancel
 	t.status.Phase, t.status.Since = PhaseRunning, time.Now()
+	t.status.Started = t.status.Since
+	switch {
+	case run.GitHub != nil:
+		t.status.Job = "github"
+	case run.GitLab != nil:
+		t.status.Job = "gitlab"
+	}
 	w.mu.Unlock()
 	w.poke()
 	log := w.log.With("vm", v.vm.ID, "assignment", t.a.ID)

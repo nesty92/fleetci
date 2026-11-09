@@ -251,15 +251,23 @@ func runWorker(ctx context.Context, wc *cluster.WorkerConfig) error {
 	return w.Run(ctx)
 }
 
-// fleetCmd is fleetci fleet status|drain|undrain|revoke.
+// fleetCmd is fleetci fleet status|jobs|drain|undrain|revoke.
 func fleetCmd(args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: fleetci fleet status|drain|undrain|revoke [worker]")
+		return errors.New("usage: fleetci fleet status|jobs|drain|undrain|revoke [worker]")
 	}
 	op := args[0]
 	fs := flag.NewFlagSet("fleet "+op, flag.ExitOnError)
 	pki, addr := adminFlags(fs)
-	asJSON := fs.Bool("json", false, "status as JSON")
+	asJSON := fs.Bool("json", false, "as JSON")
+	var limit *int
+	var worker *string
+	var failed *bool
+	if op == "jobs" {
+		limit = fs.Int("n", 30, "how many jobs")
+		worker = fs.String("worker", "", "only this worker's")
+		failed = fs.Bool("failed", false, "only those that failed")
+	}
 	_ = fs.Parse(args[1:])
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -275,6 +283,22 @@ func fleetCmd(args []string, out io.Writer) error {
 			return e.Encode(st)
 		}
 		printStatus(out, st)
+		return nil
+	case "jobs":
+		result := ""
+		if *failed {
+			result = cluster.PhaseFailed
+		}
+		jobs, err := cluster.Jobs(ctx, *pki, *addr, *limit, *worker, result)
+		if err != nil {
+			return err
+		}
+		if *asJSON {
+			e := json.NewEncoder(out)
+			e.SetIndent("", "  ")
+			return e.Encode(jobs)
+		}
+		printJobs(out, jobs)
 		return nil
 	case "drain", "undrain", "revoke":
 		if fs.NArg() != 1 {
@@ -335,6 +359,35 @@ func printStatus(out io.Writer, st cluster.Status) {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%d cpu %s\t%d cpu %s\t%s\t%s\t%s\n", w.ID, w.Facts.Version, w.State,
 			w.Facts.CPUs, fleet.Size(w.Facts.MemoryMB), w.Report.UsedCPUs, fleet.Size(w.Report.UsedMemory),
 			strings.Join(cls, " "), strings.Join(jobs, ", "), note)
+	}
+	tw.Flush()
+}
+
+// printJobs prints jobs as fleetci fleet jobs does, newest first.
+func printJobs(out io.Writer, jobs []cluster.JobRecord) {
+	if len(jobs) == 0 {
+		fmt.Fprintln(out, "no jobs yet")
+		return
+	}
+	dur := func(d time.Duration) string {
+		if d == 0 {
+			return "-"
+		}
+		return d.Round(time.Second).String()
+	}
+	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "ENDED\tWORKER\tCLASS\tFORGE\tJOB\tRESULT\tBOOT\tRAN\tERROR")
+	for _, j := range jobs {
+		took := j.Took
+		if took == "" {
+			took = "-"
+		}
+		e := j.Err
+		if len(e) > 60 {
+			e = e[:57] + "..."
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", j.Ended.Local().Format("01-02 15:04:05"),
+			j.Worker, j.Class, j.Forge, took, j.Result, dur(j.Boot()), dur(j.Duration()), e)
 	}
 	tw.Flush()
 }

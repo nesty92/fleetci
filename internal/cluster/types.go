@@ -151,6 +151,14 @@ type AssignmentStatus struct {
 	Instance string    `json:"instance,omitempty"`
 	Took     string    `json:"took,omitempty"` // the GitHub job its runner took
 	Since    time.Time `json:"since"`
+	// Job is the forge of the job it ran, "github" or "gitlab"; the times
+	// are when the leader wrote it, its VM was up, its job started, and it
+	// ended. Every controller keeps its history from these.
+	Job     string    `json:"job,omitempty"`
+	Created time.Time `json:"created,omitzero"`
+	Booted  time.Time `json:"booted,omitzero"`
+	Started time.Time `json:"started,omitzero"`
+	Ended   time.Time `json:"ended,omitzero"`
 }
 
 func (s AssignmentStatus) terminal() bool {

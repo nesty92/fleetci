@@ -51,6 +51,9 @@ type Controller struct {
 	artifacts []Artifact
 	epoch     string // this run's, in assignment revisions
 	nextID    uint64
+
+	metrics *metrics
+	history *history
 }
 
 type peerState struct {
@@ -116,6 +119,8 @@ func NewController(cfg *ControllerConfig, version string, log hclog.Logger) (*Co
 		return nil, err
 	}
 	c.load()
+	c.metrics = newMetrics(c)
+	c.history = newHistory(cfg.Controller.StateDir, c.metrics)
 	if c.artifacts, err = c.listArtifacts(); err != nil {
 		return nil, err
 	}
@@ -241,6 +246,20 @@ func (c *Controller) Run(ctx context.Context) error {
 		_ = srv.Close() // watches would hold a graceful shutdown for 30 s
 	}()
 	var wg sync.WaitGroup
+	if addr := c.cfg.Controller.Metrics; addr != "" {
+		mlis, err := net.Listen("tcp", addr)
+		if err != nil {
+			_ = lis.Close()
+			return fmt.Errorf("metrics: %w", err)
+		}
+		msrv := &http.Server{Handler: c.metricsHandler(), ReadHeaderTimeout: 10 * time.Second}
+		go func() {
+			<-ctx.Done()
+			_ = msrv.Close()
+		}()
+		wg.Go(func() { _ = msrv.Serve(mlis) })
+		c.log.Info("serving metrics", "addr", "http://"+mlis.Addr().String()+"/metrics")
+	}
 	wg.Go(func() { c.pingLoop(ctx) })
 	wg.Go(func() { c.leadLoop(ctx) })
 	c.log.Info("controller serving", "id", c.ID(), "listen", c.cfg.Controller.Listen, "peers", c.cfg.Controller.Peers, "classes", slices.Sorted(maps.Keys(c.cfg.Classes)))

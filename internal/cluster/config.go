@@ -56,6 +56,9 @@ type ControllerTable struct {
 	// cloud-hypervisor and fleeting-plugin-fleetingd. fleetci itself is
 	// this controller's own binary.
 	Artifacts string `toml:"artifacts"`
+	// Metrics is an address to serve Prometheus metrics on, plain HTTP at
+	// /metrics, e.g. "127.0.0.1:9482". Default none.
+	Metrics string `toml:"metrics"`
 }
 
 // ClassSpec is a class as the controllers define it, once for the fleet:

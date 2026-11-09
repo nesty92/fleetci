@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -56,12 +57,10 @@ func Init(cfg *ControllerConfig, out io.Writer) error {
 // Admin runs one of fleetci's commands on the controller at addr, with this
 // controller's certificate.
 func Admin(ctx context.Context, pkiDir, addr string, req adminReq, out any) error {
-	p := PKI{Dir: pkiDir}
-	pool, err := p.Pool()
+	cl, err := adminClient(pkiDir, addr)
 	if err != nil {
 		return err
 	}
-	cl := newClient(addr, clientTLS(p, pool))
 	defer cl.close()
 	switch req.Op {
 	case "token":
@@ -72,6 +71,34 @@ func Admin(ctx context.Context, pkiDir, addr string, req adminReq, out any) erro
 		return cl.do(ctx, http.MethodPost, workerPath(req.Worker, "/"+req.Op), struct{}{}, out)
 	}
 	return fmt.Errorf("unknown command %q", req.Op)
+}
+
+func adminClient(pkiDir, addr string) (*client, error) {
+	p := PKI{Dir: pkiDir}
+	pool, err := p.Pool()
+	if err != nil {
+		return nil, err
+	}
+	return newClient(addr, clientTLS(p, pool)), nil
+}
+
+// Jobs lists the last jobs the controller at addr saw end, newest first:
+// limit of them, of the worker and with the result if given.
+func Jobs(ctx context.Context, pkiDir, addr string, limit int, worker, result string) ([]JobRecord, error) {
+	cl, err := adminClient(pkiDir, addr)
+	if err != nil {
+		return nil, err
+	}
+	defer cl.close()
+	q := url.Values{"limit": {strconv.Itoa(limit)}}
+	if worker != "" {
+		q.Set("worker", worker)
+	}
+	if result != "" {
+		q.Set("result", result)
+	}
+	var out []JobRecord
+	return out, cl.do(ctx, http.MethodGet, "/v1/jobs?"+q.Encode(), nil, &out)
 }
 
 // AdminRequest is a command for Admin.

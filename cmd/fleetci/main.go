@@ -99,7 +99,8 @@ A fleet of machines, run from controllers:
   fleetci token create [flags]    print a join token for a new machine
   fleetci join [flags] <ctl>      join this machine to the fleet and install it
   fleetci worker [flags]          run this machine as a worker
-  fleetci fleet status|drain|undrain|revoke [worker]
+  fleetci fleet status|jobs       the fleet, and the jobs that ended
+  fleetci fleet drain|undrain|revoke <worker>
 
 Run "fleetci <command> -h" for its flags. Both read fleetci.toml from -config,
 $FLEETCI_CONFIG or `+defaultConfig+`.

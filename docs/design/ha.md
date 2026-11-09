@@ -298,6 +298,46 @@ GitLab builds may still be running and reaching the forge.
   it stops hearing from it, and a retry is placed elsewhere.
 - A worker that comes back reports its jobs, and the leader takes them in.
 
+#### Versions, metrics and job history
+
+A fleet runs mixed fleetci versions while it upgrades, so the versions
+say nothing of whether two machines get along. A fleet protocol number
+does: each build speaks `Protocol` and serves back to `MinProtocol`. A
+controller turns away, with 409, a worker or controller outside that
+range, at its join, its status reports and its pings. Such a worker shows
+as `Unreachable` and logs why once; a controller is not a peer, so it
+takes no part in the election. Upgrade the controllers first, then the
+workers. `fleetci fleet status` shows each machine's version.
+
+Every controller keeps the jobs that ended, from the workers' reports,
+which go to all of them: the history is whole whichever controller placed
+a job, even one that stepped down. Each keeps the last 1000 in
+`jobs.jsonl` in its state directory. `fleetci fleet jobs` lists them, with
+the VM's boot time and how long the job ran:
+
+```
+$ fleetci fleet jobs -n 2
+ENDED           WORKER  CLASS      FORGE   JOB       RESULT     BOOT  RAN  ERROR
+11-09 17:46:19  w2      1vcpu-2gb  github  many (3)  Succeeded  1s    15s
+11-09 17:46:19  w1      1vcpu-2gb  github  many (2)  Succeeded  1s    15s
+```
+
+With `[controller] metrics = "127.0.0.1:9482"`, a controller serves
+Prometheus metrics at `/metrics`, plain HTTP, so keep it on a private
+address. Every controller has the whole fleet's, so scrape any or all;
+with more than one, take the max over instances by the labels you keep,
+as `docs/grafana/fleetci-fleet.json` does.
+
+| Metric | What |
+|---|---|
+| `fleetci_fleet_leader`, `fleetci_fleet_controllers_live`, `fleetci_fleet_controller_info{controller,version}` | the controllers |
+| `fleetci_fleet_worker_state{worker,state}`, `fleetci_fleet_worker_info{worker,version}` | each worker's state and version |
+| `fleetci_fleet_worker_budget_cpus`, `…_budget_memory_bytes`, `…_used_cpus`, `…_used_memory_bytes` | its budget and what its VMs have |
+| `fleetci_fleet_worker_room{worker,class}`, `fleetci_fleet_worker_vms{worker,class,job}` | its room and VMs |
+| `fleetci_fleet_jobs_total{forge,class,worker,result}` | the jobs that ended |
+| `fleetci_fleet_job_duration_seconds{forge,class}`, `fleetci_fleet_vm_boot_seconds{class}` | how long they ran, and their VMs took to boot |
+| `fleetci_fleet_vms_total{class,outcome}` | VMs by what came of them: `job`, `unused`, `boot_failed`, `no_room` |
+
 #### Classes: defined once, on the controllers
 
 The classes live in the controllers' `fleetci.toml` and nowhere else. A

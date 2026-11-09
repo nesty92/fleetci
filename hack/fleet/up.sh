@@ -79,6 +79,7 @@ id = "$1"
 advertise = ["$1"]
 peers = ["$2"]
 artifacts = "/opt/fleetci/artifacts"
+metrics = "0.0.0.0:9482"
 
 # The fleet's classes, defined here only; each worker runs those its
 # resources fit, as many as its budget holds.

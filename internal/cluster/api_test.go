@@ -3,13 +3,16 @@ package cluster
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/hashicorp/go-hclog"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // testFleet is a controller served over mutual TLS, and a worker's client
@@ -283,5 +286,67 @@ func TestProtocol(t *testing.T) {
 	f.report(t, Report{State: Ready})
 	if st := f.c.Status(); st.Versions["ctl-1"] != "test" {
 		t.Fatalf("versions %v", st.Versions)
+	}
+}
+
+// TestJobHistory: a job a worker reports done is recorded once, however
+// often it reports it, counted, kept across a restart, and listed.
+func TestJobHistory(t *testing.T) {
+	f := newTestFleet(t)
+	now := time.Now()
+	done := AssignmentStatus{ID: "a-1", Class: "small", Phase: PhaseSucceeded, Job: "github", Took: "job-1",
+		Created: now.Add(-90 * time.Second), Booted: now.Add(-80 * time.Second), Started: now.Add(-70 * time.Second), Ended: now}
+	unused := AssignmentStatus{ID: "a-2", Class: "small", Phase: PhaseFailed, Err: "cancelled", Booted: now}
+	running := AssignmentStatus{ID: "a-3", Class: "small", Phase: PhaseRunning, Job: "gitlab"}
+	r := Report{State: Ready, Assignments: []AssignmentStatus{done, unused, running}}
+	f.report(t, r)
+	f.report(t, r)
+	jobs := f.c.history.list(10, nil)
+	if len(jobs) != 1 || jobs[0].Worker != "w1" || jobs[0].Took != "job-1" || jobs[0].Boot() != 10*time.Second || jobs[0].Duration() != 70*time.Second {
+		t.Fatalf("history %+v", jobs)
+	}
+	if n := testutil.ToFloat64(f.c.metrics.jobs.WithLabelValues("github", "small", "w1", PhaseSucceeded)); n != 1 {
+		t.Fatalf("jobs_total %v", n)
+	}
+	if n := testutil.ToFloat64(f.c.metrics.vms.WithLabelValues("small", "unused")); n != 1 {
+		t.Fatalf("vms_total unused %v", n)
+	}
+
+	// Over the API, and after a restart, which does not record it again.
+	var listed []JobRecord
+	if err := f.worker.do(context.Background(), http.MethodGet, "/v1/jobs", nil, &listed); err == nil {
+		t.Fatal("a worker listed the jobs")
+	}
+	h := newHistory(f.c.cfg.Controller.StateDir, newMetrics(f.c))
+	h.observe("w1", r.Assignments)
+	if jobs := h.list(10, nil); len(jobs) != 1 || jobs[0].Assignment != "a-1" {
+		t.Fatalf("after a restart %+v", jobs)
+	}
+	if jobs := h.list(10, func(j JobRecord) bool { return j.Result == PhaseFailed }); len(jobs) != 0 {
+		t.Fatalf("failed %+v", jobs)
+	}
+}
+
+// TestMetrics: the fleet's gauges come out of a scrape.
+func TestMetrics(t *testing.T) {
+	f := newTestFleet(t)
+	f.report(t, Report{State: Ready, Room: map[string]int{"small": 3}, VMs: []VMInfo{{ID: "v", Class: "small", Job: "github"}}})
+	srv := httptest.NewServer(f.c.metricsHandler())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	for _, want := range []string{
+		`fleetci_fleet_worker_room{class="small",worker="w1"} 3`,
+		`fleetci_fleet_worker_state{state="Ready",worker="w1"} 1`,
+		`fleetci_fleet_worker_vms{class="small",job="github",worker="w1"} 1`,
+		`fleetci_fleet_controller_info{controller="ctl-1",version="test"} 1`,
+	} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("no %s", want)
+		}
 	}
 }

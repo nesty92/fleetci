@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"strconv"
 	"time"
 )
 
@@ -18,6 +19,7 @@ func (c *Controller) handler() http.Handler {
 		writeJSON(w, http.StatusOK, c.Status())
 	}))
 	mux.HandleFunc("POST /v1/tokens", c.auth(RoleController, c.handleToken))
+	mux.HandleFunc("GET /v1/jobs", c.auth(RoleController, c.handleJobs))
 	for _, op := range []string{"drain", "undrain", "revoke"} {
 		mux.HandleFunc("POST /v1/workers/{id}/"+op, c.auth(RoleController, func(w http.ResponseWriter, r *http.Request, _ Identity) {
 			if err := c.workerOp(op, r.PathValue("id")); err != nil {
@@ -150,6 +152,7 @@ func (c *Controller) handleWorkerStatus(w http.ResponseWriter, r *http.Request, 
 	c.observeLocked(wc)
 	resp := StatusResponse{Fit: fit, Draining: wc.draining}
 	c.mu.Unlock()
+	c.history.observe(id.ID, up.Report.Assignments)
 	if back {
 		c.log.Info("worker reporting", "worker", id.ID, "version", up.Facts.Version, "state", up.Report.State, "classes", classNames(fit.Classes), "refused", fit.Refused)
 	}
@@ -185,6 +188,24 @@ func (c *Controller) handleAssignments(w http.ResponseWriter, r *http.Request, i
 			return
 		}
 	}
+}
+
+// handleJobs lists the jobs that ended, newest first: ?limit= of them
+// (default 50), ?worker= and ?result= to narrow it.
+func (c *Controller) handleJobs(w http.ResponseWriter, r *http.Request, _ Identity) {
+	q := r.URL.Query()
+	n := 50
+	if s := q.Get("limit"); s != "" {
+		var err error
+		if n, err = strconv.Atoi(s); err != nil || n < 1 {
+			writeErr(w, http.StatusBadRequest, fmt.Errorf("limit %q", s))
+			return
+		}
+	}
+	worker, result := q.Get("worker"), q.Get("result")
+	writeJSON(w, http.StatusOK, c.history.list(n, func(j JobRecord) bool {
+		return (worker == "" || j.Worker == worker) && (result == "" || j.Result == result)
+	}))
 }
 
 func (c *Controller) handleRenew(w http.ResponseWriter, r *http.Request, id Identity) {
