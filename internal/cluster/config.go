@@ -170,7 +170,7 @@ type WorkerConfig struct {
 	// FleetingdPlugin is fleeting-plugin-fleetingd. Default on the PATH.
 	FleetingdPlugin string `toml:"fleetingd_plugin"`
 	// Update is how the worker updates itself; off by default.
-	Update UpdateConfig `toml:"update"`
+	Update UpdateConfig `toml:"update,omitempty"`
 
 	File string `toml:"-"`
 }

@@ -331,6 +331,17 @@ func TestJobHistory(t *testing.T) {
 func TestMetrics(t *testing.T) {
 	f := newTestFleet(t)
 	f.report(t, Report{State: Ready, Room: map[string]int{"small": 3}, VMs: []VMInfo{{ID: "v", Class: "small", Job: "github"}}})
+	// GitHub's API, through the transport the dispatcher is given.
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-RateLimit-Remaining", "4999")
+		w.Header().Set("X-RateLimit-Resource", "core")
+	}))
+	defer gh.Close()
+	tr, wait := f.c.GitHubMetrics()
+	if resp, err := (&http.Client{Transport: tr}).Get(gh.URL); err == nil {
+		resp.Body.Close()
+	}
+	wait("small", 42*time.Second)
 	srv := httptest.NewServer(f.c.metricsHandler())
 	defer srv.Close()
 	resp, err := http.Get(srv.URL + "/metrics")
@@ -344,6 +355,10 @@ func TestMetrics(t *testing.T) {
 		`fleetci_fleet_worker_state{state="Ready",worker="w1"} 1`,
 		`fleetci_fleet_worker_vms{class="small",job="github",worker="w1"} 1`,
 		`fleetci_fleet_controller_info{controller="ctl-1",version="test"} 1`,
+		`fleetci_github_api_requests_total{code="200"} 1`,
+		`fleetci_github_api_ratelimit_remaining{resource="core"} 4999`,
+		`fleetci_fleet_queue_wait_seconds_sum{class="small",forge="github"} 42`,
+		`fleetci_fleet_leader_changes_total 0`,
 	} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("no %s", want)

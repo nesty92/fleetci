@@ -26,7 +26,13 @@ func (c *Controller) handler() http.Handler {
 		c.mu.Unlock()
 		writeJSON(w, http.StatusOK, struct{}{})
 	}))
-	for _, op := range []string{"drain", "undrain", "revoke"} {
+	mux.HandleFunc("POST /v1/verify", c.auth(RoleController, func(w http.ResponseWriter, _ *http.Request, _ Identity) {
+		c.mu.Lock()
+		c.verify = time.Now()
+		c.mu.Unlock()
+		writeJSON(w, http.StatusOK, struct{}{})
+	}))
+	for _, op := range []string{"drain", "undrain", "revoke", "verify"} {
 		mux.HandleFunc("POST /v1/workers/{id}/"+op, c.auth(RoleController, func(w http.ResponseWriter, r *http.Request, _ Identity) {
 			if err := c.workerOp(op, r.PathValue("id")); err != nil {
 				writeErr(w, http.StatusNotFound, err)
@@ -113,7 +119,7 @@ func (c *Controller) handleToken(w http.ResponseWriter, r *http.Request, _ Ident
 	writeJSON(w, http.StatusOK, tokenResp{Token: t, Controllers: c.controllers()})
 }
 
-// workerOp drains, undrains or revokes a worker.
+// workerOp drains, undrains, revokes or verifies a worker.
 func (c *Controller) workerOp(op, id string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -132,6 +138,8 @@ func (c *Controller) workerOp(op, id string) error {
 		w.seen = time.Time{}
 		c.saveLocked()
 		c.log.Warn("worker certificate revoked", "worker", id)
+	case "verify":
+		w.verify = time.Now()
 	}
 	return nil
 }
@@ -158,6 +166,11 @@ func (c *Controller) handleWorkerStatus(w http.ResponseWriter, r *http.Request, 
 	c.observeLocked(wc)
 	resp := StatusResponse{Fit: fit, Draining: wc.draining, Update: c.cfg.Controller.WorkerUpdate, UpdateCheck: c.updateCheck}
 	resp.UpdateGo = c.updateSlotLocked(wc)
+	resp.Version, resp.Protocol, resp.Artifacts = c.version, Protocol, c.artifacts
+	resp.Verify = c.verify
+	if wc.verify.After(resp.Verify) {
+		resp.Verify = wc.verify
+	}
 	c.mu.Unlock()
 	c.history.observe(id.ID, up.Report.Assignments)
 	if back {

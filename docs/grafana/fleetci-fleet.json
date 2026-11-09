@@ -643,6 +643,164 @@
       },
       "options": {},
       "id": 16
+    },
+    {
+      "type": "row",
+      "title": "Queue, leader and GitHub's API",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 44,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "id": 17
+    },
+    {
+      "type": "timeseries",
+      "title": "Queue wait (GitHub)",
+      "description": "From GitHub queuing a job to its VM being up. Only the leader observes it, so the sum over controllers is the fleet's.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 45,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by (le, class) (rate(fleetci_fleet_queue_wait_seconds_bucket{forge=\"github\"}[$__rate_interval])))",
+          "legendFormat": "p50 {{class}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le, class) (rate(fleetci_fleet_queue_wait_seconds_bucket{forge=\"github\"}[$__rate_interval])))",
+          "legendFormat": "p95 {{class}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {},
+      "id": 18
+    },
+    {
+      "type": "timeseries",
+      "title": "Leader changes",
+      "description": "Hand-overs of the lead, seen by every controller, averaged over them.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 45,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(fleetci_fleet_leader_changes_total[1h])) / clamp_min(count(fleetci_fleet_controller_info), 1)",
+          "legendFormat": "per hour",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {},
+      "id": 19
+    },
+    {
+      "type": "timeseries",
+      "title": "GitHub API calls",
+      "description": "By HTTP status; 0 is a call that got no answer. Only the leader calls GitHub.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 53,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (code) (rate(fleetci_github_api_requests_total[$__rate_interval]))",
+          "legendFormat": "{{code}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "options": {},
+      "id": 20
+    },
+    {
+      "type": "timeseries",
+      "title": "GitHub rate limit left",
+      "description": "Calls left in the current rate-limit window, as GitHub's last answer said.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 53,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "min by (resource) (fleetci_github_api_ratelimit_remaining)",
+          "legendFormat": "{{resource}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {},
+      "id": 21
     }
   ]
 }

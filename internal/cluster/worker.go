@@ -60,6 +60,9 @@ type Worker struct {
 	tasks    map[string]*task   // assignment id → what this worker made of it
 	changed  chan struct{}
 	update   *updater
+	started  time.Time          // when this process started
+	verified time.Time          // the latest fleetci fleet verify it ran the checks for
+	checking bool               // the microVM checks run
 	stop     context.CancelFunc // ends Run
 	exitErr  error              // what Run returns: ErrRestart for an update
 }
@@ -113,7 +116,7 @@ func NewWorker(cfg *WorkerConfig, version string, log hclog.Logger) (*Worker, er
 	w := &Worker{cfg: cfg, pki: p, log: log, version: version,
 		checks: map[string]string{}, passed: map[string]bool{}, count: map[string]int{},
 		vms: map[string]*workerVM{}, drainBy: map[string]bool{}, clients: map[string]*client{},
-		tasks: map[string]*task{}, changed: make(chan struct{}, 1)}
+		tasks: map[string]*task{}, changed: make(chan struct{}, 1), started: time.Now()}
 	f, err := GatherFacts(cfg, version)
 	if err != nil {
 		return nil, err
@@ -525,6 +528,7 @@ func (w *Worker) reportLoop(ctx context.Context) {
 				w.configure(ctx, resp.Fit)
 				w.setDrain(addr, &resp.Draining)
 				w.takeUpdateOrders(addr, &resp)
+				w.takeVerify(ctx, resp.Verify)
 				w.reached()
 			})
 		}

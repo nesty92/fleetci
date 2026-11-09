@@ -96,6 +96,13 @@ type Config struct {
 	// that has: a fleet worker follows it, and stops it when it stays
 	// idle. The next leader leaves the job to it, by its name.
 	HandOverIdle bool `json:"-" toml:"-"`
+
+	// Transport, set by fleetci's controller, carries the API calls, which
+	// its metrics count.
+	Transport http.RoundTripper `json:"-" toml:"-"`
+	// QueueWait, set by fleetci's controller, is told how long each job
+	// waited, from GitHub queuing it to its VM being up.
+	QueueWait func(class string, wait time.Duration) `json:"-" toml:"-"`
 }
 
 // claimTimeout is how long a job whose runner's name GitHub already has,
@@ -225,7 +232,7 @@ func New(ctx context.Context, cfg Config, capacity source.Capacity, start StartF
 	if cfg.APIURL == "" {
 		cfg.APIURL = "https://api.github.com"
 	}
-	hc := &http.Client{Timeout: 30 * time.Second}
+	hc := &http.Client{Timeout: 30 * time.Second, Transport: cfg.Transport}
 	tokens, err := cfg.auth(hc)
 	if err != nil {
 		return nil, err
@@ -892,6 +899,9 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 	log = log.With("vm", created.ID, "instance", created.Instance)
 	if d.takenElsewhere(ctx, repo, j, start, log) {
 		return
+	}
+	if d.cfg.QueueWait != nil && !j.CreatedAt.IsZero() {
+		d.cfg.QueueWait(class, max(time.Since(j.CreatedAt), 0))
 	}
 	conn, err := d.capacity.Conn(created.ID)
 	if err != nil {

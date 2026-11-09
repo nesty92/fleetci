@@ -69,6 +69,11 @@ func Admin(ctx context.Context, pkiDir, addr string, req adminReq, out any) erro
 		return cl.do(ctx, http.MethodGet, "/v1/status", nil, out)
 	case "update-check":
 		return cl.do(ctx, http.MethodPost, "/v1/update-check", struct{}{}, out)
+	case "verify":
+		if req.Worker == "" {
+			return cl.do(ctx, http.MethodPost, "/v1/verify", struct{}{}, out)
+		}
+		return cl.do(ctx, http.MethodPost, workerPath(req.Worker, "/verify"), struct{}{}, out)
 	case "drain", "undrain", "revoke":
 		return cl.do(ctx, http.MethodPost, workerPath(req.Worker, "/"+req.Op), struct{}{}, out)
 	}

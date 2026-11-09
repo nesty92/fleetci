@@ -257,3 +257,91 @@ func httpServeJSON(t *testing.T, v any) string {
 }
 
 func netListen() (net.Listener, error) { return net.Listen("tcp", "127.0.0.1:0") }
+
+// TestVerifyAsked: fleetci fleet verify, of one worker or all, reaches the
+// worker in its status answer, and the worker runs its checks once per ask.
+func TestVerifyAsked(t *testing.T) {
+	f := newTestFleet(t)
+	if r := f.report(t, Report{State: Ready}); !r.Verify.IsZero() {
+		t.Fatalf("a verify nobody asked for: %v", r.Verify)
+	}
+	if err := f.c.workerOp("verify", "w1"); err != nil {
+		t.Fatal(err)
+	}
+	one := f.report(t, Report{State: Ready}).Verify
+	if one.IsZero() {
+		t.Fatal("the worker's verify did not reach it")
+	}
+	f.c.mu.Lock()
+	f.c.verify = time.Now()
+	f.c.mu.Unlock()
+	if all := f.report(t, Report{State: Ready}).Verify; !all.After(one) {
+		t.Fatalf("the fleet's verify did not reach it: %v", all)
+	}
+
+	w, _ := testWorker(t, "v1.0.0")
+	w.started = time.Now()
+	w.takeVerify(context.Background(), w.started.Add(-time.Minute))
+	if !w.verified.IsZero() {
+		t.Fatal("took a verify from before it started")
+	}
+	asked := time.Now()
+	w.takeVerify(context.Background(), asked) // no classes yet: recorded, nothing run
+	if !w.verified.Equal(asked) {
+		t.Fatal("did not record the verify")
+	}
+}
+
+// TestControllersSource: with [update] source = "controllers", a worker
+// takes the newest version a controller serves that the policy allows, and
+// fetches its binaries from it, checked by their sums.
+func TestControllersSource(t *testing.T) {
+	f := newTestFleet(t)
+	arts := t.TempDir()
+	if err := os.WriteFile(filepath.Join(arts, "cloud-hypervisor"), []byte("ch v2"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f.c.cfg.Controller.Artifacts = arts
+	var err error
+	if f.c.artifacts, err = f.c.listArtifacts(); err != nil {
+		t.Fatal(err)
+	}
+	f.c.version = "v1.1.0"
+	resp := f.report(t, Report{State: Ready})
+	if resp.Version != "v1.1.0" || resp.Protocol != Protocol || len(resp.Artifacts) != 2 {
+		t.Fatalf("the controller's offer: %q %d %v", resp.Version, resp.Protocol, resp.Artifacts)
+	}
+
+	w, _ := testWorker(t, "v1.0.0")
+	w.update.cfg.Source = SourceControllers
+	w.clients = map[string]*client{"ctl-1": f.worker}
+	w.takeUpdateOrders("ctl-1", &resp)
+	if v, _ := w.pickOffer(UpdatePatch); v != "" {
+		t.Fatalf("patch took a minor: %q", v)
+	}
+	v, addr := w.pickOffer(UpdateMinor)
+	if v != "v1.1.0" || addr != "ctl-1" {
+		t.Fatalf("minor: %q %q", v, addr)
+	}
+	w.recordFailed("v1.1.0", "boom")
+	if v, _ := w.pickOffer(UpdateMinor); v != "" {
+		t.Fatalf("a failed version again: %q", v)
+	}
+	_ = os.Remove(w.failedPath())
+	// Only the small one: fleetci, here the test binary, is left out.
+	w.update.offers["ctl-1"] = offer{Version: v, Protocol: Protocol, Artifacts: resp.Artifacts[:1]}
+	if resp.Artifacts[0].Name != "cloud-hypervisor" {
+		t.Fatalf("artifacts %v", resp.Artifacts)
+	}
+	m, err := w.stageOffer(context.Background(), addr, v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := read(t, filepath.Join(w.updateDir(), v, "cloud-hypervisor")); got != "ch v2" || m.Protocol != Protocol {
+		t.Fatalf("staged %q, protocol %d", got, m.Protocol)
+	}
+	w.takeUpdateOrders("ctl-1", nil)
+	if len(w.update.offers) != 0 {
+		t.Fatal("an unreachable controller's offer kept")
+	}
+}

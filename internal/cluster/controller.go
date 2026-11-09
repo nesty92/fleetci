@@ -56,6 +56,7 @@ type Controller struct {
 	history *history
 
 	updateCheck time.Time            // when fleetci fleet update-check asked
+	verify      time.Time            // when fleetci fleet verify asked of every worker
 	granted     map[string]time.Time // worker → when it got its update slot
 }
 
@@ -74,6 +75,7 @@ type workerConn struct {
 	report   Report
 	seen     time.Time
 	draining bool
+	verify   time.Time // when fleetci fleet verify asked of this worker
 	// assigns are the assignments this controller wrote for the worker;
 	// rev counts their changes, and revWake is closed on each.
 	assigns map[string]*assignment
@@ -405,11 +407,14 @@ func (c *Controller) leadLoop(ctx context.Context) {
 	for {
 		c.mu.Lock()
 		leader := elect(c.ID(), c.leader, c.peers, started, time.Now())
-		changed := leader != c.leader
+		changed, prev := leader != c.leader, c.leader
 		c.leader = leader
 		c.mu.Unlock()
 		if changed && leader != "" {
 			c.log.Info("leader", "leader", leader, "self", leader == c.ID())
+			if prev != "" {
+				c.metrics.leaderChanges.Inc()
+			}
 		}
 		switch {
 		case leader == c.ID() && stop == nil && c.Sources != nil:

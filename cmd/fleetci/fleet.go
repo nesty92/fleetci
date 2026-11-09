@@ -99,6 +99,7 @@ func fleetSources(ctx context.Context, c *cluster.Controller) error {
 		gcfg := *cfg.GitHub
 		gcfg.NameByJob = true    // one runner per job across leaders: GitHub refuses the second
 		gcfg.HandOverIdle = true // a leader stepping down leaves its runners to their workers
+		gcfg.Transport, gcfg.QueueWait = c.GitHubMetrics()
 		d, err := github.New(ctx, gcfg, capacity, c.GitHubStart(gcfg), log.Named("github"))
 		if err != nil {
 			return err
@@ -265,10 +266,10 @@ func runWorker(ctx context.Context, wc *cluster.WorkerConfig) error {
 	return err
 }
 
-// fleetCmd is fleetci fleet status|jobs|drain|undrain|revoke.
+// fleetCmd is fleetci fleet status|jobs|update-check|verify|drain|undrain|revoke.
 func fleetCmd(args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: fleetci fleet status|jobs|update-check|drain|undrain|revoke [worker]")
+		return errors.New("usage: fleetci fleet status|jobs|update-check|verify|drain|undrain|revoke [worker]")
 	}
 	op := args[0]
 	fs := flag.NewFlagSet("fleet "+op, flag.ExitOnError)
@@ -276,7 +277,10 @@ func fleetCmd(args []string, out io.Writer) error {
 	asJSON := fs.Bool("json", false, "as JSON")
 	var limit *int
 	var worker *string
-	var failed *bool
+	var failed, checks *bool
+	if op == "status" {
+		checks = fs.Bool("checks", false, "and each worker's microVM checks")
+	}
 	if op == "jobs" {
 		limit = fs.Int("n", 30, "how many jobs")
 		worker = fs.String("worker", "", "only this worker's")
@@ -297,6 +301,9 @@ func fleetCmd(args []string, out io.Writer) error {
 			return e.Encode(st)
 		}
 		printStatus(out, st)
+		if *checks {
+			printChecks(out, st)
+		}
 		return nil
 	case "jobs":
 		result := ""
@@ -319,6 +326,19 @@ func fleetCmd(args []string, out io.Writer) error {
 			return err
 		}
 		fmt.Fprintln(out, "ok    the workers check for an update at their next report")
+		return nil
+	case "verify":
+		if fs.NArg() > 1 {
+			return errors.New("usage: fleetci fleet verify [worker]")
+		}
+		if err := cluster.Admin(ctx, *pki, *addr, cluster.AdminRequest(op, fs.Arg(0), "", 0), nil); err != nil {
+			return err
+		}
+		who := "the workers run"
+		if fs.NArg() == 1 {
+			who = fs.Arg(0) + " runs"
+		}
+		fmt.Fprintf(out, "ok    %s the microVM checks again at their next report; fleetci fleet status -checks shows them\n", who)
 		return nil
 	case "drain", "undrain", "revoke":
 		if fs.NArg() != 1 {
@@ -385,6 +405,19 @@ func printStatus(out io.Writer, st cluster.Status) {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%d cpu %s\t%d cpu %s\t%s\t%s\t%s\n", w.ID, w.Facts.Version, w.State,
 			w.Facts.CPUs, fleet.Size(w.Facts.MemoryMB), w.Report.UsedCPUs, fleet.Size(w.Report.UsedMemory),
 			strings.Join(cls, " "), strings.Join(jobs, ", "), note)
+	}
+	tw.Flush()
+}
+
+// printChecks prints each worker's microVM checks, as it last reported them.
+func printChecks(out io.Writer, st cluster.Status) {
+	fmt.Fprintln(out)
+	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "WORKER\tCLASS\tCHECK")
+	for _, w := range st.Workers {
+		for _, c := range slices.Sorted(maps.Keys(w.Report.Checks)) {
+			fmt.Fprintf(tw, "%s\t%s\t%s\n", w.ID, c, w.Report.Checks[c])
+		}
 	}
 	tw.Flush()
 }

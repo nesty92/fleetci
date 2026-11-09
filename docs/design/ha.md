@@ -337,6 +337,18 @@ as `docs/grafana/fleetci-fleet.json` does.
 | `fleetci_fleet_jobs_total{forge,class,worker,result}` | the jobs that ended |
 | `fleetci_fleet_job_duration_seconds{forge,class}`, `fleetci_fleet_vm_boot_seconds{class}` | how long they ran, and their VMs took to boot |
 | `fleetci_fleet_vms_total{class,outcome}` | VMs by what came of them: `job`, `unused`, `boot_failed`, `no_room` |
+| `fleetci_fleet_leader_changes_total` | hand-overs of the lead this controller saw |
+| `fleetci_fleet_queue_wait_seconds{forge,class}` | from GitHub queuing a job to its VM being up; GitLab's runner API gives no queue time |
+| `fleetci_github_api_requests_total{code}`, `fleetci_github_api_request_seconds` | the calls to GitHub's API, `code` 0 for no answer |
+| `fleetci_github_api_ratelimit_remaining{resource}` | what GitHub's rate limit had left at its last answer |
+
+The last three rows, queue wait and GitHub's API, are the leader's alone: only
+it takes jobs. Sum those over the controllers, rather than take the max.
+
+`fleetci fleet verify [worker]` has the workers, or one, run their
+microVM checks again, at their next report; `fleetci fleet status -checks`
+shows each worker's results. A worker too busy to boot a check VM keeps
+what it passed before.
 
 #### Signed releases
 
@@ -370,7 +382,7 @@ far as the controllers let it:
 # worker.toml
 [update]
 auto = true
-# source = "https://api.github.com/repos/nesty92/fleetci/releases"
+# source = "https://api.github.com/repos/nesty92/fleetci/releases"  # or "controllers"
 # check_every = "24h"   # jittered by a quarter
 # trial = "3m"
 
@@ -398,8 +410,15 @@ its trial and is started again. The version it rolled back from is recorded
 in `update/failed.json` and never tried again; the worker reports it,
 `fleetci fleet status` shows it, and the leader gives no other worker a
 slot for it: the rollout stops there. A newer release goes on as usual; to
-try the same one again, remove that worker's `failed.json`. `fleetci fleet update-check` asks every
-worker to look now instead of at its next check.
+try the same one again, remove that worker's `failed.json`.
+`fleetci fleet update-check` asks every worker to look now instead of at
+its next check.
+
+With `source = "controllers"` the worker takes its binaries from the
+controllers instead of from GitHub: whatever version they run, over the
+connection it already has to them, so no `public_key` is needed and a
+fleet with no way out to the internet updates too. Upgrade the controllers
+and the workers follow them, under the same policy, slots and trial.
 
 #### Classes: defined once, on the controllers
 

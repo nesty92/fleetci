@@ -98,6 +98,15 @@ type StatusResponse struct {
 	Update      string    `json:"update,omitempty"`
 	UpdateCheck time.Time `json:"update_check,omitzero"`
 	UpdateGo    string    `json:"update_go,omitempty"`
+	// Version and Protocol are the controller's, and Artifacts the binaries
+	// it serves: a worker whose [update] source is "controllers" takes them
+	// as its release.
+	Version   string     `json:"version,omitempty"`
+	Protocol  int        `json:"protocol,omitempty"`
+	Artifacts []Artifact `json:"artifacts,omitempty"`
+	// Verify, when later than the worker's last request, asks it to run
+	// its microVM checks again: fleetci fleet verify.
+	Verify time.Time `json:"verify,omitzero"`
 }
 
 // The update policies: how far a worker may update itself, set on the

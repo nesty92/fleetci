@@ -45,14 +45,18 @@ type UpdateConfig struct {
 	// worker_update allows. Default false.
 	Auto bool `toml:"auto"`
 	// Source lists the releases, as GitHub's API does. Default fleetci's.
+	// "controllers" takes the controllers' version and the binaries they
+	// serve to joining workers instead, over the fleet's own TLS: for a
+	// fleet that does not reach GitHub, whose controllers are updated by
+	// hand.
 	Source string `toml:"source,omitempty"`
 	// PublicKey is the key releases are signed with. Default fleetci's.
 	PublicKey string `toml:"public_key,omitempty"`
 	// CheckEvery is how often it looks for a release, give or take a
 	// quarter. Default 24h.
-	CheckEvery time.Duration `toml:"check_every,omitempty"`
+	CheckEvery time.Duration `toml:"check_every,omitzero"`
 	// Trial is how long a new version must stay up. Default 3m.
-	Trial time.Duration `toml:"trial,omitempty"`
+	Trial time.Duration `toml:"trial,omitzero"`
 }
 
 const (
@@ -94,6 +98,7 @@ type updater struct {
 	// Under the worker's mu:
 	status    UpdateStatus
 	policies  map[string]string // each reachable controller's policy, by address
+	offers    map[string]offer  // each reachable controller's version and binaries, by address
 	checked   time.Time         // the last check
 	asked     time.Time         // the latest check the controllers asked for
 	staged    *release.Manifest
@@ -218,12 +223,14 @@ func (w *Worker) takeUpdateOrders(addr string, resp *StatusResponse) {
 	defer w.mu.Unlock()
 	if resp == nil { // unreachable: what it said no longer counts
 		delete(u.policies, addr)
+		delete(u.offers, addr)
 		return
 	}
 	if u.policies == nil {
-		u.policies = map[string]string{}
+		u.policies, u.offers = map[string]string{}, map[string]offer{}
 	}
 	u.policies[addr] = resp.Update
+	u.offers[addr] = offer{Version: resp.Version, Protocol: resp.Protocol, Artifacts: resp.Artifacts}
 	if resp.UpdateGo != "" && u.staged != nil && resp.UpdateGo == u.staged.Version && u.goAhead == "" {
 		u.goAhead = resp.UpdateGo
 		w.log.Info("update: the leader gave this worker its slot; draining", "to", u.goAhead)
@@ -269,7 +276,13 @@ func (w *Worker) checkUpdate(ctx context.Context) {
 	if !u.cfg.Auto || policy == "" || policy == UpdateOff || state == UpdateTrial || state == UpdateDraining {
 		return
 	}
-	target, base, err := w.pickRelease(ctx, policy)
+	var target, base string
+	var err error
+	if u.cfg.Source == SourceControllers {
+		target, base = w.pickOffer(policy)
+	} else {
+		target, base, err = w.pickRelease(ctx, policy)
+	}
 	if err != nil || target == "" {
 		w.setUpdate(func(s *UpdateStatus) {
 			if err != nil {
@@ -289,7 +302,12 @@ func (w *Worker) checkUpdate(ctx context.Context) {
 	}
 	w.setUpdate(func(s *UpdateStatus) { *s = UpdateStatus{State: UpdateStaging, Target: target} })
 	w.log.Info("update: downloading", "to", target)
-	m, err := w.stage(ctx, base, target)
+	var m release.Manifest
+	if u.cfg.Source == SourceControllers {
+		m, err = w.stageOffer(ctx, base, target)
+	} else {
+		m, err = w.stage(ctx, base, target)
+	}
 	if err != nil {
 		w.log.Error("update: downloading", "to", target, "err", err)
 		w.setUpdate(func(s *UpdateStatus) { *s = UpdateStatus{Err: fmt.Sprintf("downloading %s: %v", target, err)} })
@@ -308,6 +326,63 @@ func (w *Worker) setUpdate(f func(*UpdateStatus)) {
 	f(&w.update.status)
 	w.mu.Unlock()
 	w.poke()
+}
+
+// SourceControllers, as [update] source, updates a worker to the
+// controllers' version, with the binaries they serve.
+const SourceControllers = "controllers"
+
+// offer is what a controller serves: its version, protocol and binaries.
+type offer struct {
+	Version   string
+	Protocol  int
+	Artifacts []Artifact
+}
+
+// pickOffer is the newest controller version the policy allows past this
+// one and not failed here before, and the controller to fetch it from.
+func (w *Worker) pickOffer(policy string) (version, addr string) {
+	failed := w.failedVersions()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, a := range slices.Sorted(maps.Keys(w.update.offers)) {
+		o := w.update.offers[a]
+		if failed[o.Version] != "" || !allowed(policy, w.version, o.Version) || !slices.ContainsFunc(o.Artifacts, func(x Artifact) bool { return x.Name == "fleetci" }) {
+			continue
+		}
+		if version == "" || semver.Compare(o.Version, version) > 0 {
+			version, addr = o.Version, a
+		}
+	}
+	return version, addr
+}
+
+// stageOffer downloads a controller's binaries, each checked against the
+// sum it gave, into the version's update directory.
+func (w *Worker) stageOffer(ctx context.Context, addr, version string) (release.Manifest, error) {
+	w.mu.Lock()
+	o, cl := w.update.offers[addr], w.clients[addr]
+	w.mu.Unlock()
+	m := release.Manifest{Version: version, Protocol: o.Protocol, MinProtocol: o.Protocol, Platforms: map[string]map[string]release.Binary{}}
+	if o.Version != version || cl == nil {
+		return m, fmt.Errorf("controller %s no longer serves %s", addr, version)
+	}
+	dir := filepath.Join(w.updateDir(), version)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return m, err
+	}
+	bins := map[string]release.Binary{}
+	for _, a := range o.Artifacts {
+		path := filepath.Join(dir, a.Name)
+		if sum, _, err := release.SHA256File(path); err != nil || sum != a.SHA256 {
+			if err := fetchArtifact(ctx, cl, a, path); err != nil {
+				return m, fmt.Errorf("%s: %w", a.Name, err)
+			}
+		}
+		bins[a.Name] = release.Binary{Version: version, SHA256: a.SHA256, Size: a.Size}
+	}
+	m.Platforms["linux/"+runtime.GOARCH] = bins
+	return m, nil
 }
 
 // ghRelease is a release as GitHub's API lists it.

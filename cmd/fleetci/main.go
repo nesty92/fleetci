@@ -101,6 +101,7 @@ A fleet of machines, run from controllers:
   fleetci worker [flags]          run this machine as a worker
   fleetci fleet status|jobs       the fleet, and the jobs that ended
   fleetci fleet update-check      ask the workers to look for an update now
+  fleetci fleet verify [worker]   run the workers' microVM checks again
   fleetci fleet drain|undrain|revoke <worker>
 
 Run "fleetci <command> -h" for its flags. Both read fleetci.toml from -config,
