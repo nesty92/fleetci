@@ -172,6 +172,41 @@ A worker decides `Run` itself: it reserves room and answers yes, or says
 no room. So a leader working from stale room, or two leaders at once,
 can't overbook a worker: they get "no room" and try another.
 
+#### Trust: mutual TLS, from the fleet's own CA
+
+Every connection, worker to controller and controller to controller, is
+mutual TLS 1.3, and nothing on port 9481 answers without a client
+certificate except the join (below). Both sides check the other's
+certificate against the fleet's CA, never the system's.
+
+- **The CA** is made by `fleetci init`: an Ed25519 key in
+  `/etc/fleetci/pki/ca.key`, readable by root only, on the controllers
+  alone. Workers hold only the CA's certificate.
+- **Identity is in the certificate.** A worker's carries `CN=<worker id>`
+  and `O=fleetci:worker`; a controller's, `O=fleetci:controller`, plus its
+  addresses as SANs, which workers check. The role decides what the
+  stream allows: only a controller may send `Run`, and a worker may only
+  report about itself, under the id in its certificate, whatever the
+  message says.
+- **Keys never move.** Each machine makes its own key at join and sends a
+  CSR; the controller signs it. The bootstrap token only authorises that
+  one signing, as kubeadm's does: it is single-use per machine, expires
+  (1 h by default), and is the only thing the join port accepts without a
+  certificate.
+- **Short certificates, renewed on the stream.** A worker's certificate
+  lasts 30 days, and the worker asks for a new one over its mTLS stream
+  after two thirds of that, with a new key. A worker off for longer joins
+  again with a new token.
+- **Revocation is a denylist** the controllers share and check on every
+  handshake and on open streams: `fleetci leave` and
+  `fleetci revoke <worker>` add the certificate's serial, and its streams
+  close at once. Short lifetimes keep the list small; an entry goes when
+  its certificate would have expired.
+- **The CA rotates** by overlap: `fleetci ca rotate` adds a new CA, the
+  controllers trust both and sign with the new one, workers pick up the
+  new chain on renewal, and the old CA is dropped once no live
+  certificate uses it.
+
 #### GitHub
 
 1. The leader finds a queued job, by polling or from the webhook, which
@@ -316,7 +351,9 @@ After that:
   and is `NotReady` until it passes, whenever its versions or its image
   change, such as after an upgrade.
 - `fleetci drain <worker>` stops placing jobs on it and waits for its jobs;
-  `fleetci leave` on the worker drains it and revokes its certificate.
+  `fleetci leave` on the worker drains it and revokes its certificate, and
+  `fleetci revoke <worker>` on a controller does it for a machine that is
+  gone.
 - A further controller joins with a token made with `--controller`. The
   forge credentials reach it from the leader over the stream, so they are
   set up once; they are written readable by root only.
