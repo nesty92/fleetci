@@ -1,13 +1,11 @@
 package github
 
 import (
-	"bufio"
 	"context"
 	"crypto/ed25519"
 	"encoding/pem"
-	"net"
+	"os"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -19,92 +17,12 @@ import (
 
 	"github.com/nesty92/fleetci/internal/proxy"
 	"github.com/nesty92/fleetci/internal/source"
+	"github.com/nesty92/fleetci/internal/vmjob/vmjobtest"
 )
 
-// runnerVM is a VM's SSH server whose exec requests run job: it gets the
-// session's stdin and stdout and returns the exit status, or -1 to hang
-// until the session goes.
-type runnerVM struct {
-	addr     string
-	accepted atomic.Int32
-	ended    chan struct{} // a session closed by fleetci
-	mu       sync.Mutex
-	conns    []net.Conn
-}
-
-func newRunnerVM(t *testing.T, job func(stdin *bufio.Reader, stdout ssh.Channel) int) *runnerVM {
-	t.Helper()
-	_, hostKey, _ := ed25519.GenerateKey(nil)
-	signer, _ := ssh.NewSignerFromKey(hostKey)
-	cfg := &ssh.ServerConfig{PublicKeyCallback: func(ssh.ConnMetadata, ssh.PublicKey) (*ssh.Permissions, error) { return nil, nil }}
-	cfg.AddHostKey(signer)
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	v := &runnerVM{addr: ln.Addr().String(), ended: make(chan struct{}, 10)}
-	t.Cleanup(func() { ln.Close(); v.drop() })
-	go func() {
-		for {
-			c, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			v.accepted.Add(1)
-			v.mu.Lock()
-			v.conns = append(v.conns, c)
-			v.mu.Unlock()
-			go v.serve(c, cfg, job)
-		}
-	}()
-	return v
-}
-
-func (v *runnerVM) serve(c net.Conn, cfg *ssh.ServerConfig, job func(*bufio.Reader, ssh.Channel) int) {
-	_, chans, reqs, err := ssh.NewServerConn(c, cfg)
-	if err != nil {
-		return
-	}
-	go ssh.DiscardRequests(reqs)
-	for nc := range chans {
-		ch, reqs, err := nc.Accept()
-		if err != nil {
-			continue
-		}
-		go func() {
-			for r := range reqs {
-				if r.Type != "exec" {
-					_ = r.Reply(false, nil)
-					continue
-				}
-				_ = r.Reply(true, nil)
-				go func() {
-					status := job(bufio.NewReader(ch), ch)
-					if status < 0 {
-						// Hang: the session ends when fleetci closes it.
-						for range reqs {
-						}
-						v.ended <- struct{}{}
-						return
-					}
-					_, _ = ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{uint32(status)}))
-					_ = ch.Close()
-				}()
-			}
-		}()
-	}
-}
-
-// drop cuts every connection, as a VM the cloud took does.
-func (v *runnerVM) drop() {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	for _, c := range v.conns {
-		c.Close()
-	}
-}
-
-func (v *runnerVM) conn(t *testing.T) *proxy.Conn {
+// vmConn is a connection to vm as fleetci's: keepalives fast enough for a
+// test.
+func vmConn(t *testing.T, addr string) *proxy.Conn {
 	t.Helper()
 	_, key, _ := ed25519.GenerateKey(nil)
 	block, err := ssh.MarshalPrivateKey(key, "")
@@ -112,10 +30,11 @@ func (v *runnerVM) conn(t *testing.T) *proxy.Conn {
 		t.Fatal(err)
 	}
 	c := proxy.NewConn(func(context.Context) (proxy.Target, error) {
-		return proxy.Target{Info: provider.ConnectInfo{InternalAddr: v.addr, ConnectorConfig: provider.ConnectorConfig{
-			Username: "u", Key: pem.EncodeToMemory(block), Timeout: 5 * time.Second,
+		return proxy.Target{Info: provider.ConnectInfo{InternalAddr: addr, ConnectorConfig: provider.ConnectorConfig{
+			Username: "u", Key: pem.EncodeToMemory(block), Timeout: time.Second,
 		}}}, nil
 	}, hclog.NewNullLogger())
+	c.SetKeepAlive(50*time.Millisecond, 200*time.Millisecond)
 	t.Cleanup(func() { c.Close() })
 	return c
 }
@@ -137,52 +56,62 @@ func stillUp(t *testing.T, conn *proxy.Conn, before *ssh.Client) {
 	}
 }
 
-// started waits for the job to run on the vm, or fails with why it did not.
-func started(t *testing.T, running <-chan struct{}, done <-chan error) {
+// exists waits for a file on the vm.
+func exists(t *testing.T, path string, done <-chan error) {
 	t.Helper()
-	select {
-	case <-running:
-	case err := <-done:
-		t.Fatalf("the job never ran: %v", err)
-	case <-time.After(5 * time.Second):
-		t.Fatal("the job never ran")
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("the job ended before %s: %v", path, err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no %s", path)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
+func vmFor(conn *proxy.Conn) VM { return VM{VM: source.VM{ID: "fleetci-c-1"}, Conn: conn} }
+
+// waitRunner is a runner that has started and goes on once the test
+// writes $HOME/go.
+const waitRunner = `read -r jit; : > "$HOME/running"; while [ ! -e "$HOME/go" ]; do sleep 0.1; done; echo "Running job: build"`
+
 func TestTheRunnerRunsOverTheVMsConnection(t *testing.T) {
-	jit := make(chan string, 1)
-	vm := newRunnerVM(t, func(stdin *bufio.Reader, stdout ssh.Channel) int {
-		line, _ := stdin.ReadString('\n')
-		jit <- strings.TrimSpace(line)
-		_, _ = stdout.Write([]byte("2026-11-05 00:49:12Z: Running job: build\n"))
-		return 0
-	})
-	conn := vm.conn(t)
+	vm := vmjobtest.New(t)
+	conn := vmConn(t, vm.Addr)
 	shared, _, err := conn.Client(context.Background()) // the reclaim watch's
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	var took atomic.Value
-	start := SSHStart("2.0.0", "", hclog.NewNullLogger())
-	err = start(context.Background(), VM{VM: source.VM{ID: "vm-1"}, Conn: conn}, "jit-1", func(job string) { took.Store(job) })
-	if err != nil {
+	start := sshStart(`read -r jit; echo "$jit" > "$HOME/jit"; echo "2026-11-05 00:49:12Z: Running job: build"`, hclog.NewNullLogger())
+	if err := start(context.Background(), vmFor(conn), "jit-1", func(job string) { took.Store(job) }); err != nil {
 		t.Fatal(err)
 	}
-	if got := <-jit; got != "jit-1" {
-		t.Errorf("runner got jit %q", got)
+	if b, _ := os.ReadFile(vm.Path("jit")); strings.TrimSpace(string(b)) != "jit-1" {
+		t.Errorf("runner got jit %q", b)
 	}
-	waitFor(t, func() bool { return took.Load() == "build" })
-	if n := vm.accepted.Load(); n != 1 {
+	if took.Load() != "build" {
+		t.Errorf("job taken: %v", took.Load())
+	}
+	if n := vm.Accepted(); n != 1 {
 		t.Fatalf("%d connections to the vm, want the shared one only", n)
 	}
 	stillUp(t, conn, shared)
 }
 
-func TestCancellingAJobEndsOnlyItsSession(t *testing.T) {
-	running := make(chan struct{})
-	vm := newRunnerVM(t, func(*bufio.Reader, ssh.Channel) int { close(running); return -1 })
-	conn := vm.conn(t)
+// fleetci stopping ends its follow of the runner, not the runner: the VM
+// is then removed, or handed over to the next fleetci.
+func TestCancellingAJobLeavesTheRunnerToTheVM(t *testing.T) {
+	vm := vmjobtest.New(t)
+	conn := vmConn(t, vm.Addr)
 	shared, _, err := conn.Client(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -190,49 +119,72 @@ func TestCancellingAJobEndsOnlyItsSession(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() {
-		done <- SSHStart("2.0.0", "", hclog.NewNullLogger())(ctx, VM{VM: source.VM{ID: "vm-1"}, Conn: conn}, "jit", nil)
-	}()
-	started(t, running, done)
+	go func() { done <- sshStart(waitRunner, hclog.NewNullLogger())(ctx, vmFor(conn), "jit", nil) }()
+	exists(t, vm.Path("running"), done)
 	cancel()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("a cancelled job kept running")
+		t.Fatal("a cancelled job kept fleetci waiting")
 	}
-	select {
-	case <-vm.ended:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the cancelled job's session was left open on the vm")
+	waitFor(t, func() bool { return vm.Sessions() == 0 })
+	if err := os.WriteFile(vm.Path("go"), nil, 0o600); err != nil {
+		t.Fatal(err)
 	}
+	exit := vm.Path(".fleetci", "jobs", "fleetci-c-1", "exit")
+	exists(t, exit, nil)
 	stillUp(t, conn, shared)
 }
 
-func TestAVMThatGoesMidJobIsReportedLost(t *testing.T) {
-	running := make(chan struct{})
-	vm := newRunnerVM(t, func(*bufio.Reader, ssh.Channel) int { close(running); return -1 })
-	conn := vm.conn(t)
-
+func TestTheRunnerOutlivesALostConnection(t *testing.T) {
+	vm := vmjobtest.New(t)
+	conn := vmConn(t, vm.Addr)
+	var took atomic.Value
 	done := make(chan error, 1)
 	go func() {
-		done <- SSHStart("2.0.0", "", hclog.NewNullLogger())(context.Background(), VM{VM: source.VM{ID: "vm-1"}, Conn: conn}, "jit", nil)
+		done <- sshStart(waitRunner, hclog.NewNullLogger())(context.Background(), vmFor(conn), "jit", func(job string) { took.Store(job) })
 	}()
-	started(t, running, done)
-	vm.drop()
+	exists(t, vm.Path("running"), done)
+	vm.Drop()
+	if err := os.WriteFile(vm.Path("go"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("a runner whose connection went: %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("never followed again")
+	}
+	if took.Load() != "build" || vm.Accepted() < 2 {
+		t.Fatalf("job %v, %d connections", took.Load(), vm.Accepted())
+	}
+}
+
+func TestAVMThatGoesMidJobIsReportedLost(t *testing.T) {
+	vm := vmjobtest.New(t)
+	conn := vmConn(t, vm.Addr)
+	done := make(chan error, 1)
+	go func() {
+		done <- sshStart(waitRunner, hclog.NewNullLogger())(context.Background(), vmFor(conn), "jit", nil)
+	}()
+	exists(t, vm.Path("running"), done)
+	vm.Gone()
 	select {
 	case err := <-done:
 		if err == nil || !strings.Contains(err.Error(), "lost the vm") {
 			t.Fatalf("a vm that went mid-job: %v, want lost the vm", err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("a job on a vm that went never ended")
 	}
 }
 
 func TestARunnerThatFailsIsReported(t *testing.T) {
-	vm := newRunnerVM(t, func(*bufio.Reader, ssh.Channel) int { return 3 })
-	err := SSHStart("2.0.0", "", hclog.NewNullLogger())(context.Background(), VM{VM: source.VM{ID: "vm-1"}, Conn: vm.conn(t)}, "jit", nil)
-	if err == nil || !strings.Contains(err.Error(), "runner exited") {
+	vm := vmjobtest.New(t)
+	err := sshStart("exit 3", hclog.NewNullLogger())(context.Background(), vmFor(vmConn(t, vm.Addr)), "jit", nil)
+	if err == nil || !strings.Contains(err.Error(), "runner exited: status 3") {
 		t.Fatalf("a runner that exited 3: %v", err)
 	}
 }

@@ -1,12 +1,11 @@
 package github
 
 import (
-	"bufio"
 	"context"
 	"crypto/ed25519"
 	"encoding/pem"
 	"fmt"
-	"strings"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -20,6 +19,7 @@ import (
 	"github.com/nesty92/fleetci/internal/chaos"
 	"github.com/nesty92/fleetci/internal/proxy"
 	"github.com/nesty92/fleetci/internal/source"
+	"github.com/nesty92/fleetci/internal/vmjob/vmjobtest"
 )
 
 // FuzzRunnersUnderChaos starts runners on a VM, several at once on its one
@@ -39,34 +39,19 @@ func FuzzRunnersUnderChaos(f *testing.F) {
 	f.Fuzz(func(t *testing.T, plan []byte) {
 		p := chaos.NewPlan(plan)
 		p.Report(t)
-		var mu sync.Mutex
-		got := map[string]bool{} // jit configs the vm received whole
-		vm := newRunnerVM(t, func(stdin *bufio.Reader, stdout ssh.Channel) int {
-			line, err := stdin.ReadString('\n')
-			if err != nil {
-				return 1
-			}
-			jit := strings.TrimSpace(line)
-			mu.Lock()
-			got[jit] = true
-			mu.Unlock()
-			_, _ = fmt.Fprintf(stdout, "2026-11-05 00:49:12Z: Running job: job-for-%s\n", jit)
-			return 0
-		})
-		x := chaos.NewProxy(t, p, vm.addr)
+		vm := vmjobtest.New(t)
+		x := chaos.NewProxy(t, p, vm.Addr)
 		conn := chaosConn(t, x.Addr)
-		start := SSHStart("2.0.0", "", hclog.NewNullLogger())
+		// The runner records the jit config it read whole: a line.
+		start := sshStart(`read -r jit; : > "$HOME/got-$jit"; echo "2026-11-05 00:49:12Z: Running job: job-for-$jit"`, hclog.NewNullLogger())
 
 		run := func(ctx context.Context, jit string) error {
 			var took atomic.Value
-			err := start(ctx, VM{VM: source.VM{ID: "vm-1"}, Conn: conn}, jit, func(job string) { took.Store(job) })
+			err := start(ctx, VM{VM: source.VM{ID: "fleetci-" + jit}, Conn: conn}, jit, func(job string) { took.Store(job) })
 			if err != nil {
 				return err
 			}
-			mu.Lock()
-			whole := got[jit]
-			mu.Unlock()
-			if !whole {
+			if _, err := os.Stat(vm.Path("got-" + jit)); err != nil {
 				t.Errorf("runner %s started without its jit config", jit)
 			}
 			for deadline := time.Now().Add(time.Second); took.Load() != "job-for-"+jit; time.Sleep(5 * time.Millisecond) {

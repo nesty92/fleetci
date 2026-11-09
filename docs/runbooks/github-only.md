@@ -44,6 +44,7 @@ For a whole organization, `orgs` and a GitHub App instead: see
 ```toml
 # /etc/fleetci/github.toml
 default_class = "2vcpu-4gb"
+state_dir = "/var/lib/fleetci"  # a restart keeps the jobs running on the VMs
 
 [classes.2vcpu-4gb]
 plugin = "fleeting-plugin-aws"
@@ -84,6 +85,8 @@ Wants=network-online.target
 
 [Service]
 ExecStart=/usr/local/bin/fleetci serve -config /etc/fleetci/github.toml
+StateDirectory=fleetci
+StateDirectoryMode=0700
 Restart=always
 RestartSec=2
 
@@ -96,8 +99,13 @@ systemctl daemon-reload && systemctl enable --now fleetci-serve
 journalctl -u fleetci-serve -f
 ```
 
-When `serve` stops, it removes its VMs. No watchdog is needed: systemd
-restarts it, and a class's plugin that dies is started again by fleetci.
+When `serve` stops, it removes its idle VMs and leaves those running a job
+to the next `serve`, which follows each job to its end and then removes
+its VM. `fleetci serve -remove-all` removes them all, for tearing a setup
+down; so does a config without `state_dir`. The state directory holds the
+VMs' SSH details, so keep it private. VMs on this host (fleetingd) end
+with fleetci all the same. No watchdog is needed: systemd restarts it, and
+a class's plugin that dies is started again by fleetci.
 
 ## 5. Check it
 
@@ -116,9 +124,9 @@ runner done          …
 | What | How |
 | --- | --- |
 | A job never starts | the log says why: an unknown class, an extra label, or no VM yet. It stays queued and is tried again. |
-| `serve` crashes | systemd starts it within 2 s; jobs on its VMs fail, queued ones are picked up again. |
+| `serve` crashes | systemd starts it within 2 s. With `state_dir`, it adopts the VMs and follows the jobs running on them; without, those jobs fail. Queued jobs are picked up again. |
 | A VM is lost mid-job | GitHub shows the job "in progress" for about 4 minutes, then fails it; re-run it. |
 | Token expires | `fleetci check` fails on the GitHub line and the log shows 401s. Replace the file and restart: the token is read at start. A GitHub App's tokens don't expire this way. |
 | Webhook deliveries fail | the webhook's *Recent Deliveries* on GitHub shows the answer: 401 is a secret that differs from `secret_file`. Jobs are still served by the 5-minute poll; redeliver from there to serve them now. |
-| Upgrade | replace the binary, `fleetci check`, `systemctl restart fleetci-serve`. Running jobs fail, so do it while quiet. |
+| Upgrade | replace the binary, `fleetci check`, `systemctl restart fleetci-serve`. With `state_dir`, running jobs carry on; without, they fail, so do it while quiet. |
 | Two `serve`s on the same repos | don't: each starts a runner for the same queued job, and one VM is wasted. One `serve` per set of repos. |

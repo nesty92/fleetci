@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"iter"
 	"maps"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -22,8 +23,10 @@ import (
 	"gitlab.com/gitlab-org/fleeting/fleeting"
 	"gitlab.com/gitlab-org/fleeting/fleeting/provider"
 	"gitlab.com/gitlab-org/fleeting/taskscaler"
+	"gitlab.com/gitlab-org/fleeting/taskscaler/storage"
 
 	"github.com/nesty92/fleetci/internal/proxy"
+	"github.com/nesty92/fleetci/internal/vmjob"
 )
 
 // VM is a VM acquired for one job.
@@ -46,6 +49,10 @@ type pool struct {
 	conns   *vmConns      // one shared connection per instance
 	ts      taskscaler.Taskscaler
 	timeout time.Duration
+	// stored: the class's taskscaler state is kept on disk, so its VMs
+	// can be handed over to the next fleetci. ready closes once ts is set.
+	stored bool
+	ready  chan struct{}
 
 	// host is the host this pool's VMs run on and count against, or nil: a
 	// class has a pool on each host it runs on. queue is the hosts' queue. A dynamic class takes size from its host
@@ -147,6 +154,17 @@ type Backend struct {
 
 	mu  sync.Mutex
 	vms map[string]*pool // VM id (= acquisition key) → its pool
+	// instance, by VM id: the machine each VM is on. handed and adopted
+	// are VMs left to the next fleetci: handed over by a job source, and
+	// taken from an earlier fleetci and still running their job.
+	instance map[string]string
+	handed   map[string]string
+	adopted  map[string]string
+
+	stateDir string
+	// ctx ends when the backend stops, and with it adopted jobs' follows.
+	ctx    context.Context
+	cancel context.CancelFunc
 
 	// wake is closed, and replaced, when a job ends, so jobs waiting for
 	// room look again at once.
@@ -172,10 +190,24 @@ func (b *Backend) notify() {
 	b.wake = make(chan struct{})
 }
 
+// Option configures New.
+type Option func(*Backend)
+
+// WithStateDir keeps the taskscaler state of each class whose VMs aren't
+// on this host in dir. A fleetci started on it later adopts the VMs this
+// one left running jobs, and follows the jobs to their end (see Stop).
+func WithStateDir(dir string) Option {
+	return func(b *Backend) { b.stateDir = dir }
+}
+
 // New starts every class's plugin and taskscaler. host is fleetci.toml's
 // [host], or nil for its defaults.
-func New(ctx context.Context, classes map[string]Class, host *HostConfig, log hclog.Logger) (*Backend, error) {
+func New(ctx context.Context, classes map[string]Class, host *HostConfig, log hclog.Logger, opts ...Option) (*Backend, error) {
 	b := &Backend{log: log, pools: map[string][]*pool{}, vms: map[string]*pool{}}
+	for _, o := range opts {
+		o(b)
+	}
+	b.ctx, b.cancel = context.WithCancel(context.WithoutCancel(ctx))
 	hq, err := newHostQueue(host, classes)
 	if err != nil {
 		return nil, err
@@ -192,7 +224,12 @@ func New(ctx context.Context, classes map[string]Class, host *HostConfig, log hc
 			_ = b.Shutdown(ctx)
 			return nil, err
 		}
-		p, err := startPool(ctx, name, c, groups, log.Named("class."+name))
+		st, err := b.storage(name, c)
+		if err != nil {
+			_ = b.Shutdown(ctx)
+			return nil, fmt.Errorf("class %q: %w", name, err)
+		}
+		p, err := startPool(ctx, name, c, groups, st, b.adopt, log.Named("class."+name))
 		if err != nil {
 			_ = b.Shutdown(ctx)
 			return nil, fmt.Errorf("class %q: %w", name, err)
@@ -210,6 +247,19 @@ func New(ctx context.Context, classes map[string]Class, host *HostConfig, log hc
 		}
 	}
 	return b, nil
+}
+
+// storage is where a class's taskscaler state is kept, or nil. A class on
+// this host has none: its VMs end with fleetci's plugin.
+func (b *Backend) storage(name string, c Class) (storage.Storage, error) {
+	if b.stateDir == "" {
+		return nil, nil
+	}
+	if c.OnHost() {
+		b.log.Info("class runs on this host: its VMs, and their jobs, end with fleetci", "class", name)
+		return nil, nil
+	}
+	return storage.NewFileStorage(filepath.Join(b.stateDir, "classes", name))
 }
 
 // localHost is the name of the machine fleetci runs on, the one host there
@@ -278,7 +328,10 @@ func checkOverflow(name string, classes map[string]Class) error {
 // initialised first, so a class whose group another class already uses is
 // refused before a second taskscaler can see the group: each would remove
 // the other's VMs as unknown.
-func startPool(ctx context.Context, name string, c Class, groups map[string]string, log hclog.Logger) (*pool, error) {
+//
+// With st, the class's state is kept there, and adopt is called for each
+// job an earlier fleetci left running on one of its VMs.
+func startPool(ctx context.Context, name string, c Class, groups map[string]string, st storage.Storage, adopt func(p *pool, key, instance string), log hclog.Logger) (*pool, error) {
 	settings, err := c.Connector.settings()
 	if err != nil {
 		return nil, err
@@ -311,8 +364,13 @@ func startPool(ctx context.Context, name string, c Class, groups map[string]stri
 	groups[info.ID] = name
 
 	conns := newVMConns(group, c.Connector.UseExternalAddr, log.Named("conn"))
-	scaled, up, reclaim := withReclaim(c, group, conns, dockerReady(group, c.Connector.UseExternalAddr, log),
-		sshTunnel(conns), log)
+	p := &pool{name: name, class: c, group: group, conns: conns, timeout: c.acquireTimeout(), stored: st != nil, ready: make(chan struct{})}
+	ready := dockerReady(group, c.Connector.UseExternalAddr, log)
+	if st != nil {
+		ready = adoptUp(dockerUp(group, c.Connector.UseExternalAddr, log), func(key, instance string) { adopt(p, key, instance) })
+	}
+	scaled, up, reclaim := withReclaim(c, group, conns, ready, sshTunnel(conns), log)
+	p.reclaim = reclaim
 	stop := func() {
 		if reclaim != nil {
 			reclaim.close()
@@ -321,7 +379,7 @@ func startPool(ctx context.Context, name string, c Class, groups map[string]stri
 		group.Close()
 	}
 
-	ts, err := taskscaler.New(ctx, initialised{scaled, info}, scalerOptions(c, settings, up, log)...)
+	ts, err := taskscaler.New(ctx, initialised{scaled, info}, scalerOptions(c, settings, up, st, log)...)
 	if err != nil {
 		stop()
 		return nil, fmt.Errorf("starting taskscaler: %w", err)
@@ -333,9 +391,10 @@ func startPool(ctx context.Context, name string, c Class, groups map[string]stri
 		return nil, err
 	}
 
-	timeout := c.acquireTimeout()
-	log.Info("class ready", "group", info.ID, "plugin", c.Plugin, "max_instances", c.MaxInstances, "policies", len(c.schedules()))
-	return &pool{name: name, class: c, group: group, reclaim: reclaim, conns: conns, ts: ts, timeout: timeout}, nil
+	p.ts = ts
+	close(p.ready)
+	log.Info("class ready", "group", info.ID, "plugin", c.Plugin, "max_instances", c.MaxInstances, "policies", len(c.schedules()), "state_kept", st != nil)
+	return p, nil
 }
 
 // withReclaim wraps a class's group so a gone instance's connection is
@@ -362,15 +421,21 @@ func watchOnceUp(up taskscaler.UpFunc, w *reclaimWatch) taskscaler.UpFunc {
 }
 
 // scalerOptions configures a class's taskscaler; up readies a new instance.
-func scalerOptions(c Class, settings provider.Settings, up taskscaler.UpFunc, log hclog.Logger) []taskscaler.Option {
+// With st, its state is kept there and its VMs outlive it; without, its
+// shutdown removes them.
+func scalerOptions(c Class, settings provider.Settings, up taskscaler.UpFunc, st storage.Storage, log hclog.Logger) []taskscaler.Option {
+	keep := taskscaler.WithDeleteInstancesOnShutdown()
+	if st != nil {
+		keep = taskscaler.WithStorage(st)
+	}
 	return []taskscaler.Option{
+		keep,
 		taskscaler.WithLogger(log.Named("taskscaler")),
 		taskscaler.WithInstanceGroupSettings(settings),
 		taskscaler.WithCapacityPerInstance(c.capacity()),
 		taskscaler.WithMaxUseCount(c.useCount()),
 		taskscaler.WithMaxInstances(c.MaxInstances),
 		taskscaler.WithInstanceUpFunc(up),
-		taskscaler.WithDeleteInstancesOnShutdown(),
 		// A job is waiting while instances are expected: look often. Each
 		// look is a list call to the plugin: for a class on this host a look
 		// at the plugin's own memory, every quarter second; for a cloud one
@@ -560,6 +625,9 @@ func (b *Backend) acquire(actx context.Context, p *pool, class string, start tim
 
 	b.mu.Lock()
 	b.vms[id] = p
+	if p.stored {
+		set(&b.instance, id, acq.InstanceID())
+	}
 	b.mu.Unlock()
 
 	log := []any{"vm", id, "class", p.name, "instance", acq.InstanceID(), "waited", time.Since(start).Round(time.Millisecond).String()}
@@ -600,6 +668,8 @@ func (b *Backend) Delete(_ context.Context, id string) error {
 	b.mu.Lock()
 	p, ok := b.vms[id]
 	delete(b.vms, id)
+	delete(b.instance, id)
+	delete(b.adopted, id)
 	b.mu.Unlock()
 	if !ok {
 		return nil
@@ -609,6 +679,110 @@ func (b *Backend) Delete(_ context.Context, id string) error {
 	b.notify()
 	b.log.Info("vm released", "vm", id, "class", p.name)
 	return nil
+}
+
+// HandOver leaves the VM, and the job running on it, to the next fleetci:
+// Stop removes neither, the VM's state stays held, and the next fleetci
+// adopts the VM and follows its job to its end. It is false for a class
+// whose state isn't kept; the caller then Deletes the VM as usual.
+func (b *Backend) HandOver(id string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	p, ok := b.vms[id]
+	if !ok || !p.stored {
+		return false
+	}
+	delete(b.vms, id)
+	set(&b.handed, id, b.instance[id])
+	delete(b.instance, id)
+	b.log.Info("vm left to the next fleetci with its job", "vm", id, "class", p.name)
+	return true
+}
+
+// adopt takes a VM an earlier fleetci left running a job, its key restored
+// by taskscaler, and follows the job to its end.
+func (b *Backend) adopt(p *pool, key, instance string) {
+	b.mu.Lock()
+	b.vms[key] = p
+	set(&b.instance, key, instance)
+	set(&b.adopted, key, instance)
+	b.mu.Unlock()
+	p.mu.Lock()
+	p.jobs++
+	p.mu.Unlock()
+	b.log.Info("vm adopted from an earlier fleetci", "vm", key, "class", p.name, "instance", instance)
+	go b.follow(p, key, instance)
+}
+
+// followRetry is how often an adopted job's VM is tried again once the
+// connection to it is lost, and followGiveUp how long until it is taken
+// for gone and removed.
+var (
+	followRetry  = 5 * time.Second
+	followGiveUp = 10 * time.Minute
+)
+
+// follow logs an adopted job's new output until it ends, then removes its
+// VM. A job that isn't on the VM (one that never started, or a GitLab job,
+// whose executor ended with the fleetci that ran it) ends at once. When
+// the backend stops first, the VM is left to the next fleetci in turn.
+func (b *Backend) follow(p *pool, key, instance string) {
+	select {
+	case <-p.ready:
+	case <-b.ctx.Done():
+		return
+	}
+	log := b.log.With("vm", key, "class", p.name, "instance", instance)
+	conn := p.conns.get(instance)
+	next := 0 // the earlier fleetci logged what came before
+	var lost time.Time
+	for {
+		client, _, err := conn.Client(b.ctx)
+		if err == nil {
+			lost = time.Time{}
+			var status int
+			status, next, err = vmjob.Follow(b.ctx, client, key, next, func(l string) { log.Info("job: " + l) })
+			switch {
+			case err == nil:
+				log.Info("adopted job ended", "status", status)
+				_ = b.Delete(context.Background(), key)
+				return
+			case errors.Is(err, vmjob.ErrNoJob):
+				log.Info("adopted vm runs no job of fleetci's; removing it")
+				_ = b.Delete(context.Background(), key)
+				return
+			case errors.Is(err, vmjob.ErrLost):
+				log.Warn("adopted job ended without a status; removing its vm")
+				_ = b.Delete(context.Background(), key)
+				return
+			}
+		}
+		if b.ctx.Err() != nil {
+			return
+		}
+		if lost.IsZero() {
+			lost = time.Now()
+		}
+		if time.Since(lost) > followGiveUp {
+			log.Error("adopted vm unreachable; removing it", "for", followGiveUp.String(), "err", err)
+			_ = b.Delete(context.Background(), key)
+			return
+		}
+		log.Debug("following the adopted job again", "err", err)
+		select {
+		case <-b.ctx.Done():
+			return
+		case <-time.After(followRetry):
+		}
+	}
+}
+
+// set sets m[k], making m if it is nil.
+func set(m *map[string]string, k, v string) {
+	if *m == nil {
+		*m = map[string]string{}
+	}
+	(*m)[k] = v
 }
 
 // allPools yields every class's pools.
@@ -625,43 +799,88 @@ func (b *Backend) allPools() iter.Seq[*pool] {
 }
 
 // Shutdown removes every VM of every class and stops the plugins. Calls
-// after the first do nothing.
+// after the first, or after Stop, do nothing.
 func (b *Backend) Shutdown(ctx context.Context) error {
+	b.stop(ctx, false)
+	return nil
+}
+
+// Stop stops the plugins and removes every VM but those left to the next
+// fleetci: handed over by a job source, or adopted and still running their
+// job. Without a state directory it is Shutdown.
+func (b *Backend) Stop(ctx context.Context) error {
+	b.stop(ctx, true)
+	return nil
+}
+
+// storedShutdown bounds a stored class's taskscaler shutdown, which
+// otherwise waits for every VM to be released, those left to the next
+// fleetci too.
+var storedShutdown = 10 * time.Second
+
+func (b *Backend) stop(ctx context.Context, leave bool) {
 	b.shutdown.Do(func() {
+		if b.cancel != nil {
+			b.cancel()
+		}
+		left := map[string]bool{} // instances
+		if leave {
+			b.mu.Lock()
+			for _, m := range []map[string]string{b.handed, b.adopted} {
+				for _, inst := range m {
+					left[inst] = true
+				}
+			}
+			b.mu.Unlock()
+		}
 		var wg sync.WaitGroup
 		for p := range b.allPools() {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				p.ts.Shutdown(ctx)
+				log := b.log.With("class", p.name)
+				tctx := ctx
+				if p.stored {
+					var cancel context.CancelFunc
+					tctx, cancel = context.WithTimeout(ctx, storedShutdown)
+					defer cancel()
+				}
+				p.ts.Shutdown(tctx)
 				if p.reclaim != nil {
 					p.reclaim.close()
 				}
 				p.conns.close()
-				sweep(ctx, p.group, b.log.With("class", p.name))
+				keep := map[string]bool{}
+				if p.stored {
+					keep = left
+				}
+				if n := len(keep); n > 0 {
+					log.Info("leaving vms that run jobs to the next fleetci", "vms", n)
+				}
+				sweep(ctx, p.group, keep, log)
 				p.group.Close()
 			}()
 		}
 		wg.Wait()
 	})
-	return nil
 }
 
-// sweep removes whatever the plugin still lists once taskscaler has stopped.
-// taskscaler removes only the instances it has seen running, so one that
-// was still booting would be left behind. A class's group belongs to fleetci
-// alone and each VM serves one job, so nothing in it is worth keeping.
+// sweep removes whatever the plugin still lists once taskscaler has stopped,
+// but the instances in keep. taskscaler removes only the instances it has
+// seen running, so one that was still booting would be left behind. A
+// class's group belongs to fleetci alone and each VM serves one job, so
+// nothing else in it is worth keeping.
 //
 // It runs after taskscaler's shutdown has called the plugin's Shutdown; the
 // fleeting plugins fleetci uses (aws, dockervm) keep working after it.
-func sweep(ctx context.Context, group provider.InstanceGroup, log hclog.Logger) {
+func sweep(ctx context.Context, group provider.InstanceGroup, keep map[string]bool, log hclog.Logger) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
 	for {
 		var ids []string
 		err := group.Update(ctx, func(id string, state provider.State) {
-			if state != provider.StateDeleting && state != provider.StateDeleted {
+			if state != provider.StateDeleting && state != provider.StateDeleted && !keep[id] {
 				ids = append(ids, id)
 			}
 		})
@@ -690,18 +909,45 @@ func sweep(ctx context.Context, group provider.InstanceGroup, log hclog.Logger) 
 // dockerReady admits an instance once its setup has finished and Docker
 // answers over SSH. Instances that existed before fleetci started may have
 // run a job already, so they are removed instead.
+func dockerReady(group provider.InstanceGroup, external bool, log hclog.Logger) taskscaler.UpFunc {
+	up := dockerUp(group, external, log)
+	return func(ts taskscaler.Taskscaler, inst taskscaler.UpFuncInstance) error {
+		if inst.Cause == fleeting.CausePreexisted {
+			return errors.New("instance existed before fleetci started; removing it")
+		}
+		return up(ts, inst)
+	}
+}
+
+// adoptUp admits, for a class whose state is kept, the instances an earlier
+// fleetci left: their saved state says what they ran, and adopt follows each
+// job they still hold. One that existed with no saved state is removed, as
+// dockerReady removes it.
+func adoptUp(up taskscaler.UpFunc, adopt func(key, instance string)) taskscaler.UpFunc {
+	return func(ts taskscaler.Taskscaler, inst taskscaler.UpFuncInstance) error {
+		if inst.Cause == fleeting.CausePreexisted && !inst.Restored {
+			return errors.New("instance existed before fleetci started, with no saved state; removing it")
+		}
+		if err := up(ts, inst); err != nil {
+			return err
+		}
+		for _, key := range inst.Acquisitions {
+			adopt(key, inst.ID)
+		}
+		return nil
+	}
+}
+
+// dockerUp admits an instance once its setup has finished and Docker
+// answers over SSH.
 //
 // Every attempt opens a new connection with fresh credentials: a login made
 // while the VM's setup is still running keeps the groups it started with,
 // so it can stay locked out of Docker after setup adds the user to the
 // docker group. Short-lived keys (EC2 Instance Connect's last 60 seconds)
 // need the fresh ConnectInfo anyway.
-func dockerReady(group provider.InstanceGroup, external bool, log hclog.Logger) taskscaler.UpFunc {
+func dockerUp(group provider.InstanceGroup, external bool, log hclog.Logger) taskscaler.UpFunc {
 	return func(_ taskscaler.Taskscaler, inst taskscaler.UpFuncInstance) error {
-		if inst.Cause == fleeting.CausePreexisted {
-			return errors.New("instance existed before fleetci started; removing it")
-		}
-
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
 

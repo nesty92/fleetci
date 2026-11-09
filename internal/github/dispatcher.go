@@ -812,8 +812,15 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 		d.unregister(ctx, scope, reg.id, log)
 		reg = d.register(ctx, scope, class, labels)
 	}
+	// handedOver: fleetci is stopping, and the runner, running its job, is
+	// left on its VM to the next fleetci, which removes both after it.
+	handedOver := false
 	if reg.err == nil {
-		defer d.unregister(ctx, scope, reg.id, log)
+		defer func() {
+			if !handedOver {
+				d.unregister(ctx, scope, reg.id, log)
+			}
+		}()
 	} else if !refused(reg.err) {
 		// GitHub may have registered it all the same.
 		d.orphaned(orphan{scope: scope, name: reg.name})
@@ -832,7 +839,9 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 		return
 	}
 	defer func() {
-		_ = d.capacity.Delete(context.WithoutCancel(ctx), created.ID)
+		if !handedOver {
+			_ = d.capacity.Delete(context.WithoutCancel(ctx), created.ID)
+		}
 	}()
 	log = log.With("vm", created.ID, "instance", created.Instance)
 	if d.takenElsewhere(ctx, repo, j, start, log) {
@@ -870,6 +879,12 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 	}
 	switch {
 	case ctx.Err() != nil:
+		// A runner that took no job yet goes with its VM, and its job
+		// waits for the next fleetci.
+		if took.Load() != nil && d.capacity.HandOver(context.WithoutCancel(ctx), created.ID) {
+			handedOver = true
+			log.Info("fleetci stopping: runner left on its vm with its job, for the next fleetci")
+		}
 	case err != nil || rctx.Err() != nil:
 		// Retried while the job is still queued: a runner that failed or
 		// was stopped idle never took it.

@@ -54,6 +54,10 @@ type Config struct {
 	// Host is the CPUs and memory this machine lends to the VMs of its
 	// classes; detected when unset.
 	Host *fleet.HostConfig `json:"host" toml:"host"`
+	// StateDir, for "fleetci serve" only, keeps what the classes' VMs run,
+	// so a restart of fleetci keeps the GitHub jobs running on the VMs of
+	// classes not on this host, and follows them to their end.
+	StateDir string `json:"state_dir" toml:"state_dir"`
 }
 
 type InstanceGroup struct {
@@ -87,6 +91,10 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 	}
 	if _, ok := g.Classes[g.DefaultClass]; !ok {
 		return provider.ProviderInfo{}, fmt.Errorf("default_class %q is not in classes", g.DefaultClass)
+	}
+	if g.StateDir != "" {
+		// gitlab-runner's own state_storage is for its process.
+		return provider.ProviderInfo{}, errors.New("state_dir is for fleetci serve; gitlab-runner's jobs end with gitlab-runner")
 	}
 	g.log = log
 	g.settings = settings

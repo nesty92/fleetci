@@ -1,16 +1,15 @@
 package github
 
 import (
-	"bufio"
 	"context"
+	"errors"
 	"fmt"
-	"io"
 	"strings"
 	"time"
 
 	"github.com/hashicorp/go-hclog"
 
-	"github.com/nesty92/fleetci/internal/proxy"
+	"github.com/nesty92/fleetci/internal/vmjob"
 )
 
 // runScript runs actions/runner with the just-in-time config read from
@@ -70,60 +69,81 @@ exec ./run.sh --jitconfig "$jit"
 // SSHStart runs the runner on the VM over SSH and logs its output. An
 // empty version is the newest in the image, or DefaultRunnerVersion.
 // With cacheURL set, jobs use that cache server instead of GitHub's.
+//
+// The runner runs on the VM apart from fleetci's sessions (see vmjob):
+// fleetci follows its output, and losing the connection, or fleetci
+// stopping, leaves it running. A VM handed over to the next fleetci is
+// followed by that one to the job's end.
 func SSHStart(version, cacheURL string, log hclog.Logger) StartFunc {
+	return sshStart(fmt.Sprintf(runScript, version, cacheURL, DefaultRunnerVersion), log)
+}
+
+// followTries is how many times in a row following the runner may fail
+// on a VM that still answers before the runner counts as lost.
+const followTries = 5
+
+func sshStart(script string, log hclog.Logger) StartFunc {
 	return func(ctx context.Context, vm VM, jit string, took func(job string)) error {
 		// The machine's connection, shared with its reclaim watch: the job
-		// opens a session on it and leaves it open. A VM that dies mid-job
+		// opens sessions on it and leaves it open. A VM that dies mid-job
 		// closes lost in seconds, not when TCP gives up.
 		client, lost, err := vm.Conn.Client(ctx)
 		if err != nil {
 			return err
 		}
-		s, err := client.NewSession()
-		if err != nil {
+		if err := vmjob.Start(ctx, client, vm.ID, script, []byte(jit+"\n")); err != nil {
 			return err
 		}
-		defer s.Close()
-		stop := context.AfterFunc(ctx, func() { _ = s.Close() })
-		defer stop()
-
-		out := logWriter(log.With("vm", vm.ID), took)
-		defer out.Close()
-		s.Stdin = strings.NewReader(jit + "\n")
-		s.Stdout = out
-		s.Stderr = out
-		if err := s.Run(fmt.Sprintf(runScript, version, cacheURL, DefaultRunnerVersion)); err != nil {
-			select {
-			case <-lost:
-				if ctx.Err() == nil {
-					return fmt.Errorf("lost the vm: no answer for %s: %w", proxy.KeepAliveTimeout, err)
-				}
-			case <-time.After(time.Second):
+		log := log.With("vm", vm.ID)
+		line := func(l string) {
+			l = strings.TrimSpace(l)
+			if l == "" {
+				return
 			}
-			return fmt.Errorf("runner exited: %w", err)
-		}
-		return nil
-	}
-}
-
-// logWriter logs each line the runner prints, and calls took with the job
-// named in its "Running job: <name>" line.
-func logWriter(log hclog.Logger, took func(job string)) io.WriteCloser {
-	r, w := io.Pipe()
-	go func() {
-		sc := bufio.NewScanner(r)
-		for sc.Scan() {
-			line := strings.TrimSpace(sc.Text())
-			if line == "" {
-				continue
-			}
-			log.Info("runner: " + line)
-			if job, ok := runningJob(line); ok && took != nil {
+			log.Info("runner: " + l)
+			if job, ok := runningJob(l); ok && took != nil {
 				took(job)
 			}
 		}
-	}()
-	return w
+		next, failed := 1, 0
+		for {
+			status, n, err := vmjob.Follow(ctx, client, vm.ID, next, line)
+			switch {
+			case err == nil && status == 0:
+				return nil
+			case err == nil:
+				return fmt.Errorf("runner exited: status %d", status)
+			case ctx.Err() != nil:
+				return ctx.Err()
+			case errors.Is(err, vmjob.ErrLost), errors.Is(err, vmjob.ErrNoJob):
+				return fmt.Errorf("runner exited: %w", err)
+			}
+			if n > next {
+				failed = 0
+			}
+			next = n
+			if failed++; failed > followTries {
+				return fmt.Errorf("lost the vm: following the runner failed %d times: %w", failed, err)
+			}
+			// The session went, and perhaps the connection: the runner goes
+			// on on the VM. A connection that is gone closes lost.
+			select {
+			case <-lost:
+			case <-time.After(time.Second):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			c, l, derr := vm.Conn.Client(ctx)
+			if derr != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				return fmt.Errorf("lost the vm: %w (following the runner: %v)", derr, err)
+			}
+			client, lost = c, l
+			log.Warn("following the runner again", "err", err)
+		}
+	}
 }
 
 // runningJob reads the job's name from the runner's line
