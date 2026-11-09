@@ -144,9 +144,10 @@ single machine is both, as `fleetci serve` is today:
   the GitLab runner token. One is the leader; the others are standbys.
   Only the leader talks to the forge to find and take jobs. It has no
   classes of its own, unless it is also a worker.
-- **Workers** hold no forge credentials. Each owns its budget, its
-  fleetingd classes and its VMs, and tells the controllers its room. A
-  worker can also own a cloud class, with that cloud's credentials.
+- **Workers** hold no forge credentials and no class config. Each owns
+  its budget and its VMs, runs the classes the controllers give it, and
+  tells them its room. A worker can also own a cloud class, with that
+  cloud's credentials.
 
 #### The connection: workers dial out
 
@@ -280,6 +281,59 @@ GitLab builds may still be running and reaching the forge.
   it stops hearing from it, and a retry is placed elsewhere.
 - A worker that comes back reports its jobs, and the leader takes them in.
 
+#### Classes: defined once, on the controllers
+
+The classes live in the controllers' `fleetci.toml` and nowhere else. A
+class says what a job gets, not where it runs:
+
+```toml
+[classes.2vcpu-4gb]
+cpus = 2
+memory = "4GB"
+disk = "30GB"
+image = "https://…/fleetci-ubuntu-24.04.qcow2"  # with its checksum in the manifest
+overflow = "2vcpu-4gb-aws"
+
+[classes.16vcpu-64gb]
+cpus = 16
+memory = "64GB"
+disk = "100GB"
+max_instances = 4                    # optional: a ceiling for the whole fleet
+on = { site = "wroclaw" }            # optional: only workers with these labels
+```
+
+What used to be per machine in `plugin_config` (the group name, the egress
+interface, the VM subnet, the disk directories) each worker works out for
+itself, as the join already does.
+
+Each worker reports what it has, when it connects and when it changes:
+its architecture, CPUs, memory and free disk, whether KVM works, its budget
+(detected less the reserve, as today, or its own `[host]`), its labels and
+the cloud credentials it holds. From that the controllers decide which
+classes it runs. A class goes to a worker when:
+
+- the class's VM fits in the worker's budget at least once;
+- the worker has KVM, for a microVM class, and the image is for its
+  architecture;
+- its disk holds the image and a snapshot for each of its classes' sizes;
+- its labels match the class's `on`, if it has one.
+
+How many is never configured. A worker's classes share its budget, as a
+machine's classes share it today, and the host queue decides the mix as
+jobs come: a worker with 7 CPUs and 28 GB to give runs three `2vcpu-4gb`,
+or one `4vcpu-8gb` and one `2vcpu-4gb`, and is never offered
+`16vcpu-64gb`. A class's `max_instances`, if set, caps it across the
+fleet, not per machine. `fleetci fleet status` shows each worker's classes
+and why a class was left off it ("budget 7 cpus < 16", "no KVM", "label
+site").
+
+A change to the classes reaches every worker over its stream. A worker
+given a new class builds its snapshot and runs the microVM check for it,
+and the class is placed there only once it passes; a class taken away
+stops getting jobs, and its running ones finish. The machine's owner can
+still narrow what it runs in `worker.toml`, with a `[host]` reserve or a
+list of classes to refuse; the controllers never give it more than that.
+
 #### Joining a machine
 
 The first controller is set up once:
@@ -294,7 +348,7 @@ systemctl enable --now fleetci
 Each new machine then needs one string, made on a controller:
 
 ```sh
-fleetci token create --ttl 1h --classes 4vcpu-8gb,2vcpu-4gb
+fleetci token create --ttl 1h --label site=wroclaw
 # fleetci join ctl-1.example.org:9481 --token fci1.<CA hash>.<id>.<secret>
 ```
 
@@ -310,26 +364,29 @@ fleetci join ctl-1.example.org:9481 --token fci1.…
 does. It stops at the first failure with the reason, and running it again
 picks up where it stopped:
 
-1. **Preflight.** `/dev/kvm` exists and opens (in a cloud VM: nested
-   virtualisation is on); the CPU and memory the classes need; free disk
-   for the image and a snapshot per class; nftables and `/dev/net/tun`;
-   systemd; the clock within a second of the controller's; and the forge
+1. **Preflight.** What the machine has: its CPUs, memory, free disk and
+   architecture, whether `/dev/kvm` exists and opens (in a cloud VM:
+   whether nested virtualisation is on), nftables and `/dev/net/tun`,
+   systemd, the clock within a second of the controller's, and the forge
    reachable: `github.com` and the GitHub runner's hosts, or the GitLab
-   instance.
+   instance. A missing piece fails only if it leaves the machine no class
+   at all; otherwise it is reported and the classes it rules out are left
+   off.
 2. **Trust.** It fetches the controller's CA, checks it against the hash
    in the token, makes its own key, and gets a certificate signed with the
    token: kubeadm's TLS bootstrap. The token is single-use for a machine
    and expires; the key never leaves the machine.
 3. **The fleet's manifest,** from the controller: the fleetci version, the
    Cloud Hypervisor and fleetingd versions with their checksums, the image
-   and its checksum, and the classes this machine serves.
+   and its checksum, and the classes the controller chose for this machine
+   from what preflight found.
 4. **Install.** The binaries into `/usr/local/bin`, checked;
    `net.ipv4.ip_forward`; `/etc/fleetci/worker.toml` with what only this
    machine knows, found here: the egress interface (`ip route get`), VM
    subnets that clash with no local route, disk directories, and the
    budget detected as today; and `fleetci-worker.service`, with
    `StateDirectory` for phase 0's state.
-5. **The microVM check,** per class: download the image, build the
+5. **The microVM check,** per class given: download the image, build the
    snapshot, boot one microVM from it, and over SSH check that
    - Docker runs, and `docker run` of a small image works, which proves the
      VM's DNS and egress to the registry;
@@ -360,8 +417,11 @@ After that:
 
 #### Cloud classes
 
-A cloud class belongs to one worker, the one with that cloud's credentials
-in its `worker.toml`; a controller that is also a worker can be it. Each
+A cloud class is defined on the controllers like the others, with its
+plugin's settings (the group, the region) but not its credentials, and
+`owner = "<worker id>"`. It goes to that worker only, which keeps the
+cloud's credentials in its `worker.toml` and reports holding them; a
+controller that is also a worker can be it. Each
 cloud group still has exactly one owner, so problem 7 never comes up, and
 phase 0 keeps its jobs across that worker's restarts. Losing that worker
 loses the class until it comes back, or until another worker is given the
@@ -399,6 +459,8 @@ class to another worker by itself is left for later (see To decide).
   run:
   - no job got runners, or builds, on two workers at once;
   - no worker ran past its budget;
+  - no job was placed on a worker its class doesn't fit, or before the
+    class passed its microVM check there;
   - no job waited past `claim_timeout` while a `Ready` worker had room for
     it and a leader was up;
   - every job taken started, or failed with its reason;
@@ -434,5 +496,8 @@ class to another worker by itself is left for later (see To decide).
    stops first.
 6. **Gossip among controllers,** where they share a network, so standbys
    see each other's room and links faster; the election works without it.
-7. **fleetingd adoption:** in the next round, or left, with on-host VMs
+7. **Disk for snapshots:** a snapshot per class size on every worker
+   that runs it, or only the sizes a worker is busiest with, built on
+   demand for the rest at the cost of a slower first job.
+8. **fleetingd adoption:** in the next round, or left, with on-host VMs
    lost on a restart for now.
