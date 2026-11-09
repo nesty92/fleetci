@@ -89,7 +89,7 @@ func (w *Worker) verify(ctx context.Context, class string) (string, error) {
 		return "", fmt.Errorf("the classes did not start")
 	}
 	// Room is taken as for a job, so the check never overbooks.
-	start := time.Now()
+	start, died := time.Now(), b.Died(class)
 	vm, err := w.createVM(ctx, class, true)
 	if err != nil {
 		return "", fmt.Errorf("booting a VM: %w", err)
@@ -120,7 +120,11 @@ func (w *Worker) verify(ctx context.Context, class string) (string, error) {
 		}
 	}
 	msg := fmt.Sprintf("%d cpus %s; booted in %s; docker, egress%s", c.CPUs, c.Memory, boot.Round(10*time.Millisecond), map[bool]string{true: ", actions/runner", false: ""}[gh])
-	if boot > maxBoot {
+	switch lost := b.Died(class) - died; {
+	case lost > 0:
+		// The wait was for a replacement: say so, not that it booted slowly.
+		msg += fmt.Sprintf(" (%d of its VMs died meanwhile and were replaced; the worker's log says why)", lost)
+	case boot > maxBoot:
 		// Slow, not broken: the job still runs, and the time says why.
 		msg += fmt.Sprintf(" (slower than %s: is it booting rather than restoring its snapshot?)", maxBoot)
 	}

@@ -353,6 +353,7 @@ type vmGroup struct {
 	provider.InstanceGroup
 	conns *vmConns
 	w     *reclaimWatch // nil: the class isn't watched
+	died  *deaths       // nil: not counted
 }
 
 func (g vmGroup) Heartbeat(ctx context.Context, id string) error {
@@ -368,12 +369,18 @@ func (g vmGroup) Update(ctx context.Context, fn func(string, provider.State)) er
 	return g.InstanceGroup.Update(ctx, func(id string, state provider.State) {
 		if state == provider.StateDeleted {
 			g.forget(id)
+			if g.died != nil {
+				g.died.deleted(id)
+			}
 		}
 		fn(id, state)
 	})
 }
 
 func (g vmGroup) Decrease(ctx context.Context, ids []string) ([]string, error) {
+	if g.died != nil {
+		g.died.removing(ids)
+	}
 	removed, err := g.InstanceGroup.Decrease(ctx, ids)
 	for _, id := range removed {
 		g.forget(id)
@@ -387,4 +394,55 @@ func (g vmGroup) forget(id string) {
 		g.w.stop(id)
 	}
 	g.conns.drop(id)
+}
+
+// deaths counts a class's instances that the plugin reports deleted
+// without fleetci having removed them: VMs that died, or cloud instances
+// taken away. A Decrease is remembered for a while, as a plugin may report
+// the deletion it asked for an update or two later.
+type deaths struct {
+	mu      sync.Mutex
+	asked   map[string]time.Time
+	n       int64
+	log     hclog.Logger
+	keepFor time.Duration
+	nowFunc func() time.Time
+}
+
+func newDeaths(log hclog.Logger) *deaths {
+	return &deaths{asked: map[string]time.Time{}, log: log, keepFor: 15 * time.Minute, nowFunc: time.Now}
+}
+
+func (d *deaths) removing(ids []string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	now := d.nowFunc()
+	for id, at := range d.asked {
+		if now.Sub(at) > d.keepFor {
+			delete(d.asked, id)
+		}
+	}
+	for _, id := range ids {
+		d.asked[id] = now
+	}
+}
+
+func (d *deaths) deleted(id string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if _, ok := d.asked[id]; ok {
+		delete(d.asked, id)
+		return
+	}
+	d.n++
+	d.log.Warn("instance gone without fleetci removing it", "instance", id)
+}
+
+func (d *deaths) count() int64 {
+	if d == nil {
+		return 0
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.n
 }
