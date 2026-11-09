@@ -43,7 +43,7 @@ gh workflow run burst.yml -R WireZone/fleetci-playground   # 4 jobs: w1 fills, t
 docker logs -f fleetci-fleet-ctl-1                         # "vm placed" per job
 
 docker stop fleetci-fleet-ctl-1      # ctl-2 leads within ~10 s; running jobs go on
-docker start fleetci-fleet-ctl-1     # and ctl-1 takes back the lead
+docker start fleetci-fleet-ctl-1     # ctl-2 keeps the lead; ctl-1 stands by
 
 fleet drain w1                       # no new jobs on w1; its running ones finish
 fleet undrain w1

@@ -98,6 +98,7 @@ func fleetSources(ctx context.Context, c *cluster.Controller) error {
 	if cfg.GitHub != nil {
 		gcfg := *cfg.GitHub
 		gcfg.NameByJob = true // one runner per job across leaders: GitHub refuses the second
+		gcfg.HandOverIdle = true // a leader stepping down leaves its runners to their workers
 		d, err := github.New(ctx, gcfg, capacity, c.GitHubStart(gcfg), log.Named("github"))
 		if err != nil {
 			return err

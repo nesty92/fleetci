@@ -68,6 +68,21 @@ type task struct {
 	started bool
 	cancel  context.CancelFunc // the job's, once it runs
 	done    time.Time
+	listed  time.Time // when a controller last listed it
+}
+
+// reportable says whether a task goes in the reports: until it is over,
+// and then while a controller lists it, which is how the leader says it
+// has seen the end: it drops the assignment then.
+func (t *task) reportable(now time.Time) bool {
+	if !t.status.terminal() {
+		return true
+	}
+	last := t.done
+	if t.listed.After(last) {
+		last = t.listed
+	}
+	return now.Sub(last) < reportDone
 }
 
 // GitLabJob is a GitLab job a controller placed on this worker.
@@ -429,8 +444,9 @@ func (w *Worker) report() Report {
 		r.VMs = append(r.VMs, VMInfo{ID: id, Class: v.vm.Class, Since: v.since, Job: v.job, Took: v.took, Assignment: v.assignment})
 	}
 	slices.SortFunc(r.VMs, func(a, b VMInfo) int { return strings.Compare(a.ID, b.ID) })
+	now := time.Now()
 	for _, t := range w.tasks {
-		if !t.status.terminal() || time.Since(t.done) < reportDone {
+		if t.reportable(now) {
 			r.Assignments = append(r.Assignments, t.status)
 		}
 	}
@@ -470,10 +486,11 @@ func (w *Worker) reportLoop(ctx context.Context) {
 				defer cancel()
 				var resp StatusResponse
 				if err := cl.do(rctx, http.MethodPut, workerPath(w.cfg.ID, "/status"), up, &resp); err != nil {
+					w.setDrain(addr, nil) // what it said no longer counts
 					return
 				}
 				w.configure(ctx, resp.Fit)
-				w.setDrain(addr, resp.Draining)
+				w.setDrain(addr, &resp.Draining)
 			})
 		}
 		wg.Wait()
@@ -486,11 +503,16 @@ func (w *Worker) reportLoop(ctx context.Context) {
 	}
 }
 
-// setDrain records whether a controller drains this worker: it is drained
-// while any does.
-func (w *Worker) setDrain(addr string, d bool) {
+// setDrain records whether a controller drains this worker, nil for one
+// out of reach: it is drained while any does. The controllers share
+// drains, so they disagree only for a ping or two.
+func (w *Worker) setDrain(addr string, d *bool) {
 	w.mu.Lock()
-	w.drainBy[addr] = d
+	if d == nil {
+		delete(w.drainBy, addr)
+	} else {
+		w.drainBy[addr] = *d
+	}
 	was := w.draining
 	w.draining = false
 	for _, x := range w.drainBy {
@@ -511,12 +533,15 @@ func (w *Worker) reconcile(ctx context.Context, list []Assignment) {
 	for _, a := range list {
 		w.mu.Lock()
 		t := w.tasks[a.ID]
+		if t != nil {
+			t.listed = time.Now()
+		}
 		if t == nil {
 			if a.Cancel {
 				w.mu.Unlock()
 				continue
 			}
-			t = &task{a: a, status: AssignmentStatus{ID: a.ID, Class: a.Class, Phase: PhasePending, Since: time.Now()}}
+			t = &task{a: a, status: AssignmentStatus{ID: a.ID, Class: a.Class, Phase: PhasePending, Since: time.Now()}, listed: time.Now()}
 			w.tasks[a.ID] = t
 			w.mu.Unlock()
 			w.poke()
@@ -765,11 +790,12 @@ func (w *Worker) runGitHub(ctx context.Context, cancel context.CancelFunc, v *wo
 // leader made and then lost is removed after it.
 const idleVM = 15 * time.Minute
 
-// A finished assignment stays in the reports for reportDone, for the
-// controllers to see how it ended, and is remembered for forgetDone, so a
-// controller that lists it still is not obeyed twice.
+// A finished assignment stays in the reports while a controller lists it,
+// and for reportDone after, longer than a watch takes to answer; it is
+// remembered for forgetDone, so a controller that lists it again, after a
+// partition, is not obeyed twice but told how it ended.
 const (
-	reportDone = 2 * time.Minute
+	reportDone = 2 * watchTimeout
 	forgetDone = time.Hour
 )
 
@@ -795,7 +821,7 @@ func (w *Worker) sweepLoop(ctx context.Context) {
 			}
 		}
 		for id, t := range w.tasks {
-			if t.status.terminal() && time.Since(t.done) > forgetDone {
+			if t.status.terminal() && !t.reportable(time.Now()) && time.Since(t.done) > forgetDone {
 				delete(w.tasks, id)
 			}
 		}

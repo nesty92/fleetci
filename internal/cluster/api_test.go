@@ -206,3 +206,55 @@ func TestWorkerPaths(t *testing.T) {
 		t.Fatalf("a worker reading the status: %v", err)
 	}
 }
+
+// TestDrainShared: a drain said on one controller reaches another by its
+// pings, and the later of two wins.
+func TestDrainShared(t *testing.T) {
+	a, b := newTestFleet(t), newTestFleet(t)
+	a.report(t, Report{State: Ready})
+	if err := a.c.workerOp("drain", "w1"); err != nil {
+		t.Fatal(err)
+	}
+	from := func(c *Controller, id string) pingMsg { p := c.pingMsg(); p.ID = id; return p }
+	b.c.merge(from(a.c, "ctl-a"))
+	b.report(t, Report{State: Ready})
+	if resp := b.report(t, Report{State: Ready}); !resp.Draining {
+		t.Fatal("the drain did not reach the other controller")
+	}
+	if err := b.c.workerOp("undrain", "w1"); err != nil {
+		t.Fatal(err)
+	}
+	a.c.merge(from(b.c, "ctl-b"))
+	if resp := a.report(t, Report{State: Ready}); resp.Draining {
+		t.Fatal("the later undrain lost")
+	}
+}
+
+// TestMissingAssignment: an assignment the worker had and stops reporting
+// is lost only after forgetMissing, not at the first report without it.
+func TestMissingAssignment(t *testing.T) {
+	f := newTestFleet(t)
+	w := Report{State: Ready, Room: map[string]int{"small": 1}}
+	f.report(t, w)
+	f.c.mu.Lock()
+	wc := f.c.workers["w1"]
+	f.c.mu.Unlock()
+	a := f.c.assign(wc, "small")
+	w.Assignments = []AssignmentStatus{{ID: a.ID, Class: "small", Phase: PhaseRunning}}
+	f.report(t, w)
+	w.Assignments = nil
+	f.report(t, w)
+	f.c.mu.Lock()
+	phase := a.status.Phase
+	a.missing = time.Now().Add(-forgetMissing - time.Second)
+	f.c.mu.Unlock()
+	if phase != PhaseRunning {
+		t.Fatalf("lost at once: %s", phase)
+	}
+	f.report(t, w)
+	f.c.mu.Lock()
+	defer f.c.mu.Unlock()
+	if a.status.Phase != PhaseFailed {
+		t.Fatalf("still %s after forgetMissing", a.status.Phase)
+	}
+}

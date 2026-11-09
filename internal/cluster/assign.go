@@ -5,6 +5,10 @@ import (
 	"time"
 )
 
+// forgetMissing is how long an assignment a worker had may be missing from
+// its reports before it counts as lost: two watches.
+const forgetMissing = 2 * watchTimeout
+
 // assignment is one the controller wrote, with what its worker last
 // reported of it.
 type assignment struct {
@@ -15,13 +19,15 @@ type assignment struct {
 	// followed: someone here waits on it; one nobody follows is dropped
 	// once it is over.
 	followed bool
+	// missing is when the worker's reports stopped having it.
+	missing time.Time
 }
 
 // workerLocked is the worker's record, made on first sight.
 func (c *Controller) workerLocked(id string) *workerConn {
 	w := c.workers[id]
 	if w == nil {
-		w = &workerConn{id: id, assigns: map[string]*assignment{}, revWake: make(chan struct{})}
+		w = &workerConn{id: id, assigns: map[string]*assignment{}, revWake: make(chan struct{}), draining: c.drains[id].Drained}
 		c.workers[id] = w
 	}
 	return w
@@ -82,14 +88,23 @@ func (c *Controller) observeLocked(w *workerConn) {
 	for _, s := range w.report.Assignments {
 		reported[s.ID] = s
 	}
+	now := time.Now()
 	for id, a := range w.assigns {
 		if s, ok := reported[id]; ok {
-			a.status, a.seen = s, true
+			a.status, a.seen, a.missing = s, true, time.Time{}
 			continue
 		}
-		if a.seen && !a.status.terminal() {
-			// It had it and no longer does: it restarted.
-			a.status = AssignmentStatus{ID: id, Class: a.Class, Phase: PhaseFailed, Err: "the worker no longer has it: did it restart?", Since: time.Now()}
+		if !a.seen || a.status.terminal() {
+			continue
+		}
+		// It had it and no longer reports it. After a partition, a report
+		// can come before its watch lists the assignment again, and the
+		// worker reports it again then; one still missing after that, it
+		// forgot: it restarted.
+		if a.missing.IsZero() {
+			a.missing = now
+		} else if now.Sub(a.missing) > forgetMissing {
+			a.status = AssignmentStatus{ID: id, Class: a.Class, Phase: PhaseFailed, Err: "the worker no longer has it: did it restart?", Since: now}
 		}
 	}
 	c.gcLocked(w)

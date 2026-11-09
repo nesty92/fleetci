@@ -211,6 +211,14 @@ type pingMsg struct {
 	Advertise []string               `json:"advertise,omitempty"`
 	Revoked   map[string]Revoked     `json:"revoked,omitempty"`
 	Tokens    map[string]TokenRecord `json:"tokens,omitempty"`
+	Drains    map[string]DrainRecord `json:"drains,omitempty"`
+}
+
+// DrainRecord is whether a worker is drained, as of when that was said:
+// the controllers share them, and the latest wins.
+type DrainRecord struct {
+	Drained bool      `json:"drained"`
+	At      time.Time `json:"at"`
 }
 
 // Revoked is a revoked certificate, until it would have expired.

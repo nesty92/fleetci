@@ -109,7 +109,10 @@ func (c *Controller) workerOp(op, id string) error {
 	}
 	switch op {
 	case "drain", "undrain":
+		// Saved, and shared with the other controllers by the pings.
 		w.draining = op == "drain"
+		c.drains[id] = DrainRecord{Drained: w.draining, At: time.Now()}
+		c.saveLocked()
 	case "revoke":
 		c.revoked[w.serial] = Revoked{ID: w.id, Until: time.Now().Add(certLifetime)}
 		w.seen = time.Time{}

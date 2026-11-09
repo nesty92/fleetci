@@ -90,6 +90,12 @@ type Config struct {
 	// both lead for a while can't start two runners for one job: the one
 	// refused leaves the job for ClaimTimeout.
 	NameByJob bool `json:"-" toml:"-"`
+
+	// HandOverIdle, set by fleetci's controller, hands a runner that has
+	// taken no job yet to its VM's keeper when the dispatcher stops, as one
+	// that has: a fleet worker follows it, and stops it when it stays
+	// idle. The next leader leaves the job to it, by its name.
+	HandOverIdle bool `json:"-" toml:"-"`
 }
 
 // claimTimeout is how long a job whose runner's name GitHub already has,
@@ -920,10 +926,10 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 	switch {
 	case ctx.Err() != nil:
 		// A runner that took no job yet goes with its VM, and its job
-		// waits for the next fleetci.
-		if took.Load() != nil && d.capacity.HandOver(context.WithoutCancel(ctx), created.ID) {
+		// waits for the next fleetci, unless HandOverIdle leaves it.
+		if (took.Load() != nil || d.cfg.HandOverIdle) && d.capacity.HandOver(context.WithoutCancel(ctx), created.ID) {
 			handedOver = true
-			log.Info("fleetci stopping: runner left on its vm with its job, for the next fleetci")
+			log.Info("fleetci stopping: runner left on its vm, for the next fleetci", "took", took.Load() != nil)
 		}
 	case err != nil || rctx.Err() != nil:
 		// Retried while the job is still queued: a runner that failed or

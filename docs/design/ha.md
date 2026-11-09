@@ -256,10 +256,19 @@ needs a crash at that moment.
 
 #### Leader and standbys
 
-The controllers pick the leader with no consensus: the live controller
-with the lowest id leads, where live is a heartbeat seen in the last 10 s.
-That needs no quorum and no third machine, and a site cut off with a
-controller elects its own and keeps working.
+The controllers pick the leader with no consensus, where live is a
+heartbeat seen in the last 10 s. A leader keeps the lead while it is
+live, as a Kubernetes lease holder does, so a controller that comes back
+does not take it back and move the jobs in flight twice. With no live
+leader, the live controller with the lowest id takes it; of two leaders
+after a cut, the lower keeps it. A controller that starts listens to its
+peers for a few seconds before it claims anything. That needs no quorum
+and no third machine, and a site cut off with a controller elects its own
+and keeps working.
+
+A leader that steps down leaves its runners on their workers, even those
+that took no job yet: the worker stops one that stays idle, and the next
+leader leaves the job to it, by its name, for the claim timeout.
 
 Two leaders at once, in a cut or a slow takeover, do no harm, because
 something else already stops each double action:
@@ -417,6 +426,8 @@ After that:
   and is `NotReady` until it passes, whenever its versions or its image
   change, such as after an upgrade.
 - `fleetci drain <worker>` stops placing jobs on it and waits for its jobs;
+  the drain is saved and shared with the other controllers, the later of
+  a drain and an undrain winning;
   `fleetci leave` on the worker drains it and revokes its certificate, and
   `fleetci revoke <worker>` on a controller does it for a machine that is
   gone.

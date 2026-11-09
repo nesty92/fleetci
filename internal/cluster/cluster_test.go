@@ -3,6 +3,7 @@ package cluster
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFitClasses(t *testing.T) {
@@ -72,5 +73,47 @@ func TestGroupName(t *testing.T) {
 	a, b := groupName("w1", "1vcpu-2gb"), groupName("w1", "4vcpu-8gb")
 	if a == b || len(a) > 10 {
 		t.Fatalf("%s %s", a, b)
+	}
+}
+
+func TestElect(t *testing.T) {
+	now := time.Now()
+	started := now.Add(-time.Minute)
+	live := func(leader string) peerState { return peerState{seen: now, leader: leader} }
+	dead := peerState{seen: now.Add(-time.Minute), leader: "ctl-0"}
+	cases := []struct {
+		name, self, current, want string
+		peers                     map[string]peerState
+		started                   time.Time
+	}{
+		{"alone", "ctl-1", "", "ctl-1", nil, started},
+		{"lowest when nobody leads", "ctl-2", "", "ctl-1", map[string]peerState{"ctl-1": live("")}, started},
+		{"a leader keeps it", "ctl-1", "", "ctl-2", map[string]peerState{"ctl-2": live("ctl-2")}, started},
+		{"and keeps it itself", "ctl-2", "ctl-2", "ctl-2", map[string]peerState{"ctl-1": live("ctl-2")}, started},
+		{"two leaders: the lower", "ctl-2", "ctl-2", "ctl-1", map[string]peerState{"ctl-1": live("ctl-1")}, started},
+		{"a dead leader does not count", "ctl-2", "", "ctl-2", map[string]peerState{"ctl-0": dead}, started},
+		{"just started: wait", "ctl-1", "", "", map[string]peerState{"ctl-2": live("")}, now},
+		{"just started: a leader is a leader", "ctl-1", "", "ctl-2", map[string]peerState{"ctl-2": live("ctl-2")}, now},
+	}
+	for _, c := range cases {
+		if got := elect(c.self, c.current, c.peers, c.started, now); got != c.want {
+			t.Errorf("%s: %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+func TestTaskReportable(t *testing.T) {
+	now := time.Now()
+	running := &task{status: AssignmentStatus{Phase: PhaseRunning}}
+	if !running.reportable(now) {
+		t.Error("a running task is not reported")
+	}
+	done := &task{status: AssignmentStatus{Phase: PhaseSucceeded}, done: now.Add(-time.Hour), listed: now.Add(-time.Second)}
+	if !done.reportable(now) {
+		t.Error("a finished task a controller still lists is not reported")
+	}
+	done.listed = now.Add(-time.Hour)
+	if done.reportable(now) {
+		t.Error("a finished task nobody lists is still reported")
 	}
 }

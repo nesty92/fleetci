@@ -45,8 +45,9 @@ type Controller struct {
 	peers     map[string]peerState // controller id → what it last said
 	leader    string
 	tokens    map[string]TokenRecord
-	revoked   map[string]Revoked // serial → the certificate's holder
-	wakeCh    chan struct{}      // closed on every worker status
+	revoked   map[string]Revoked     // serial → the certificate's holder
+	drains    map[string]DrainRecord // worker id → whether it is drained
+	wakeCh    chan struct{}          // closed on every worker status
 	artifacts []Artifact
 	epoch     string // this run's, in assignment revisions
 	nextID    uint64
@@ -108,7 +109,7 @@ func NewController(cfg *ControllerConfig, version string, log hclog.Logger) (*Co
 	}
 	c := &Controller{cfg: cfg, pki: p, log: log, version: version,
 		workers: map[string]*workerConn{}, peers: map[string]peerState{},
-		tokens: map[string]TokenRecord{}, revoked: map[string]Revoked{},
+		tokens: map[string]TokenRecord{}, revoked: map[string]Revoked{}, drains: map[string]DrainRecord{},
 		wakeCh: make(chan struct{}), epoch: fmt.Sprintf("%x", time.Now().UnixNano())}
 	if err := os.MkdirAll(cfg.Controller.StateDir, 0o700); err != nil {
 		return nil, err
@@ -132,6 +133,7 @@ func (c *Controller) Log() hclog.Logger { return c.log }
 type savedState struct {
 	Tokens  map[string]TokenRecord `json:"tokens"`
 	Revoked map[string]Revoked     `json:"revoked"`
+	Drains  map[string]DrainRecord `json:"drains,omitempty"`
 }
 
 func (c *Controller) statePath() string {
@@ -147,6 +149,7 @@ func (c *Controller) load() {
 	if json.Unmarshal(b, &s) == nil {
 		maps.Copy(c.tokens, s.Tokens)
 		maps.Copy(c.revoked, s.Revoked)
+		maps.Copy(c.drains, s.Drains)
 	}
 }
 
@@ -162,7 +165,7 @@ func (c *Controller) saveLocked() {
 			delete(c.revoked, k)
 		}
 	}
-	b, _ := json.Marshal(savedState{Tokens: c.tokens, Revoked: c.revoked})
+	b, _ := json.Marshal(savedState{Tokens: c.tokens, Revoked: c.revoked, Drains: c.drains})
 	tmp := c.statePath() + ".tmp"
 	if os.WriteFile(tmp, b, 0o600) == nil {
 		_ = os.Rename(tmp, c.statePath())
@@ -294,7 +297,7 @@ func (c *Controller) pingMsg() pingMsg {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return pingMsg{ID: c.ID(), Leader: c.leader, Advertise: c.cfg.Controller.Advertise,
-		Revoked: maps.Clone(c.revoked), Tokens: maps.Clone(c.tokens)}
+		Revoked: maps.Clone(c.revoked), Tokens: maps.Clone(c.tokens), Drains: maps.Clone(c.drains)}
 }
 
 // merge takes in what a peer said: it is live, and its tokens and
@@ -320,30 +323,69 @@ func (c *Controller) merge(p pingMsg) {
 			changed = true
 		}
 	}
+	for id, d := range p.Drains {
+		if mine, ok := c.drains[id]; !ok || d.At.After(mine.At) {
+			c.drains[id] = d
+			if w := c.workers[id]; w != nil {
+				w.draining = d.Drained
+			}
+			changed = true
+		}
+	}
 	if changed {
 		c.saveLocked()
 	}
 }
 
-// leadLoop works out who leads: the live controller with the lowest id. It
-// runs the sources while that is this one.
+// electWait is how long a controller that starts listens for a leader
+// before it may claim the lead itself.
+const electWait = pingEvery + time.Second
+
+// elect works out who leads. A leader keeps the lead while it is live, as
+// a Kubernetes lease holder does: a controller that comes back does not
+// take it back, which would move every job in flight twice. With no live
+// leader, the live controller with the lowest id takes it; of two that
+// both lead, after a partition, the lower keeps it. A controller that has
+// just started claims nothing until it has heard its peers.
+func elect(self, current string, peers map[string]peerState, started, now time.Time) string {
+	live := []string{self}
+	claims := []string{}
+	if current == self {
+		claims = append(claims, self)
+	}
+	for id, p := range peers {
+		if now.Sub(p.seen) >= leaderTTL {
+			continue
+		}
+		live = append(live, id)
+		if p.leader == id {
+			claims = append(claims, id)
+		}
+	}
+	if len(claims) > 0 {
+		return slices.Min(claims)
+	}
+	if now.Sub(started) < electWait {
+		return ""
+	}
+	return slices.Min(live)
+}
+
+// leadLoop works out who leads, and runs the sources while that is this
+// controller.
 func (c *Controller) leadLoop(ctx context.Context) {
 	var stop context.CancelFunc
 	var done chan struct{}
+	started := time.Now()
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
 	for {
-		leader := c.ID()
 		c.mu.Lock()
-		for id, p := range c.peers {
-			if time.Since(p.seen) < leaderTTL && id < leader {
-				leader = id
-			}
-		}
+		leader := elect(c.ID(), c.leader, c.peers, started, time.Now())
 		changed := leader != c.leader
 		c.leader = leader
 		c.mu.Unlock()
-		if changed {
+		if changed && leader != "" {
 			c.log.Info("leader", "leader", leader, "self", leader == c.ID())
 		}
 		switch {
