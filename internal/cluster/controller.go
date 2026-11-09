@@ -10,6 +10,7 @@ import (
 	"io"
 	"maps"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -18,7 +19,6 @@ import (
 	"time"
 
 	"github.com/hashicorp/go-hclog"
-	"google.golang.org/grpc"
 )
 
 // The controllers' timings.
@@ -46,9 +46,10 @@ type Controller struct {
 	leader    string
 	tokens    map[string]TokenRecord
 	revoked   map[string]Revoked // serial → the certificate's holder
-	watch     map[string]chan Event
-	roomWake  chan struct{}
+	wakeCh    chan struct{}      // closed on every worker status
 	artifacts []Artifact
+	epoch     string // this run's, in assignment revisions
+	nextID    uint64
 }
 
 type peerState struct {
@@ -58,21 +59,23 @@ type peerState struct {
 }
 
 type workerConn struct {
-	id        string
-	serial    string
-	s         *stream
-	facts     Facts
-	fit       Fit
-	report    Report
-	seen      time.Time
-	connected bool
-	draining  bool
-	asked     map[string]int // creates in flight, by class
+	id       string
+	serial   string
+	facts    Facts
+	fit      Fit
+	report   Report
+	seen     time.Time
+	draining bool
+	// assigns are the assignments this controller wrote for the worker;
+	// rev counts their changes, and revWake is closed on each.
+	assigns map[string]*assignment
+	rev     uint64
+	revWake chan struct{}
 }
 
 func (w *workerConn) state() string {
 	switch {
-	case !w.connected || time.Since(w.seen) > unreachable:
+	case w.seen.IsZero() || time.Since(w.seen) > unreachable:
 		return Unreachable
 	case w.draining:
 		return Draining
@@ -106,7 +109,7 @@ func NewController(cfg *ControllerConfig, version string, log hclog.Logger) (*Co
 	c := &Controller{cfg: cfg, pki: p, log: log, version: version,
 		workers: map[string]*workerConn{}, peers: map[string]peerState{},
 		tokens: map[string]TokenRecord{}, revoked: map[string]Revoked{},
-		watch: map[string]chan Event{}, roomWake: make(chan struct{})}
+		wakeCh: make(chan struct{}), epoch: fmt.Sprintf("%x", time.Now().UnixNano())}
 	if err := os.MkdirAll(cfg.Controller.StateDir, 0o700); err != nil {
 		return nil, err
 	}
@@ -220,18 +223,26 @@ func (c *Controller) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	srv := newServer(tlsCfg, c)
+	srv := &http.Server{
+		Handler:           c.handler(),
+		TLSConfig:         tlsCfg,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		HTTP2:             &http.HTTP2Config{SendPingTimeout: 10 * time.Second, PingTimeout: 5 * time.Second},
+		ErrorLog:          c.log.StandardLogger(&hclog.StandardLoggerOptions{ForceLevel: hclog.Debug}),
+		BaseContext:       func(net.Listener) context.Context { return ctx },
+	}
 	go func() {
 		<-ctx.Done()
-		srv.Stop()
+		_ = srv.Close() // watches would hold a graceful shutdown for 30 s
 	}()
 	var wg sync.WaitGroup
 	wg.Go(func() { c.pingLoop(ctx) })
 	wg.Go(func() { c.leadLoop(ctx) })
 	c.log.Info("controller serving", "id", c.ID(), "listen", c.cfg.Controller.Listen, "peers", c.cfg.Controller.Peers, "classes", slices.Sorted(maps.Keys(c.cfg.Classes)))
-	err = srv.Serve(lis)
+	err = srv.ServeTLS(lis, "", "")
 	wg.Wait()
-	if ctx.Err() != nil {
+	if ctx.Err() != nil || errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
 	return err
@@ -244,31 +255,33 @@ func (c *Controller) pingLoop(ctx context.Context) {
 		c.log.Error("ca", "err", err)
 		return
 	}
-	conns := map[string]*grpc.ClientConn{}
+	tlsCfg := clientTLS(c.pki, pool)
+	conns := map[string]*client{}
 	defer func() {
-		for _, cc := range conns {
-			cc.Close()
+		for _, cl := range conns {
+			cl.close()
 		}
 	}()
 	t := time.NewTicker(pingEvery)
 	defer t.Stop()
 	for {
+		var wg sync.WaitGroup
 		for _, addr := range c.cfg.Controller.Peers {
-			cc := conns[addr]
-			if cc == nil {
-				if cc, err = dial(addr, clientTLS(c.pki, pool)); err != nil {
-					continue
+			cl := conns[addr]
+			if cl == nil {
+				cl = newClient(addr, tlsCfg)
+				conns[addr] = cl
+			}
+			wg.Go(func() {
+				pctx, cancel := context.WithTimeout(ctx, pingEvery)
+				defer cancel()
+				var out pingMsg
+				if err := cl.do(pctx, http.MethodPost, "/v1/ping", c.pingMsg(), &out); err == nil {
+					c.merge(out)
 				}
-				conns[addr] = cc
-			}
-			pctx, cancel := context.WithTimeout(ctx, pingEvery)
-			var out pingMsg
-			err := call(pctx, cc, mPing, "ping", c.pingMsg(), &out)
-			cancel()
-			if err == nil {
-				c.merge(out)
-			}
+			})
 		}
+		wg.Wait()
 		select {
 		case <-ctx.Done():
 			return
@@ -298,11 +311,6 @@ func (c *Controller) merge(p pingMsg) {
 		if _, ok := c.revoked[k]; !ok {
 			c.revoked[k] = r
 			changed = true
-			for _, w := range c.workers {
-				if w.serial == k && w.s != nil {
-					w.connected = false
-				}
-			}
 		}
 	}
 	for k, t := range p.Tokens {
@@ -380,45 +388,6 @@ func (c *Controller) leadLoop(ctx context.Context) {
 }
 
 func (c *Controller) settleTime() time.Duration { return 6 * time.Second }
-
-// unary serves Join, Ping and Admin.
-func (c *Controller) unary(ctx context.Context, method string, in *Msg) (*Msg, error) {
-	id, hasID := peerIdentity(ctx)
-	if hasID && c.isRevoked(id.Serial) {
-		return reply(nil, errors.New("this certificate is revoked"))
-	}
-	switch method {
-	case mJoin:
-		var req JoinRequest
-		if err := in.Decode(&req); err != nil {
-			return nil, err
-		}
-		return reply(c.join(req))
-	case mPing:
-		if !hasID || id.Role != RoleController {
-			return reply(nil, errors.New("ping is for controllers"))
-		}
-		var p pingMsg
-		if err := in.Decode(&p); err != nil {
-			return nil, err
-		}
-		if p.ID != id.ID {
-			return reply(nil, errors.New("ping names another controller"))
-		}
-		c.merge(p)
-		return reply(c.pingMsg(), nil)
-	case mAdmin:
-		if !hasID || id.Role != RoleController {
-			return reply(nil, errors.New("fleetci's commands need a controller's certificate"))
-		}
-		var req adminReq
-		if err := in.Decode(&req); err != nil {
-			return nil, err
-		}
-		return reply(c.admin(ctx, req))
-	}
-	return nil, fmt.Errorf("no method %s", method)
-}
 
 func (c *Controller) isRevoked(serial string) bool {
 	c.mu.Lock()
@@ -546,189 +515,25 @@ func (c *Controller) fit(f Facts) Fit {
 	return fit
 }
 
-// connect serves one worker's stream.
-func (c *Controller) connect(ss grpc.ServerStream) error {
-	id, ok := peerIdentity(ss.Context())
-	if !ok || id.Role != RoleWorker {
-		return errors.New("connect is for workers, with their certificate")
-	}
-	if c.isRevoked(id.Serial) {
-		return errors.New("this certificate is revoked")
-	}
-	s := newStream(ss)
-	first := new(Msg)
-	if err := ss.RecvMsg(first); err != nil {
-		return err
-	}
-	var h Hello
-	if first.Kind != "hello" || first.Decode(&h) != nil {
-		return errors.New("a worker's stream starts with hello")
-	}
-	fit := c.fit(h.Facts)
-	if err := s.tell("fit", fit); err != nil {
-		return err
-	}
-	c.mu.Lock()
-	w := c.workers[id.ID]
-	draining := w != nil && w.draining
-	w = &workerConn{id: id.ID, serial: id.Serial, s: s, facts: h.Facts, fit: fit, report: h.Report,
-		seen: time.Now(), connected: true, draining: draining, asked: map[string]int{}}
-	c.workers[id.ID] = w
-	c.mu.Unlock()
-	if draining {
-		_ = s.tell("drain", true)
-	}
-	c.log.Info("worker connected", "worker", id.ID, "classes", classNames(fit.Classes), "refused", fit.Refused)
-	c.wakeRoom()
-	err := s.serve(func(m *Msg) { c.fromWorker(w, m) })
-	c.mu.Lock()
-	if c.workers[id.ID] == w {
-		w.connected = false
-	}
-	c.mu.Unlock()
-	c.log.Warn("worker stream ended", "worker", id.ID, "err", err)
-	return nil
-}
-
-func (c *Controller) fromWorker(w *workerConn, m *Msg) {
-	switch m.Kind {
-	case "report":
-		var r Report
-		if m.Decode(&r) != nil {
-			return
-		}
-		c.mu.Lock()
-		if c.isRevokedLocked(w.serial) {
-			w.connected = false
-		}
-		w.report, w.seen = r, time.Now()
-		c.mu.Unlock()
-		c.wakeRoom()
-	case "event":
-		var e Event
-		if m.Decode(&e) != nil {
-			return
-		}
-		c.mu.Lock()
-		ch := c.watch[w.id+"/"+e.VM]
-		c.mu.Unlock()
-		if ch != nil {
-			select {
-			case ch <- e:
-			default:
-			}
-		}
-	case "renew":
-		var req renewReq
-		_ = m.Decode(&req)
-		cert, err := c.pki.Sign(req.CSR, RoleWorker, w.id, nil)
-		_ = w.s.answer(m, renewResp{Cert: cert}, err)
-		if err == nil {
-			c.log.Info("worker certificate renewed", "worker", w.id)
-		}
-	default:
-		if m.ID != 0 {
-			_ = w.s.answer(m, nil, fmt.Errorf("unknown request %q", m.Kind))
-		}
-	}
-}
-
 func (c *Controller) isRevokedLocked(serial string) bool {
 	_, ok := c.revoked[serial]
 	return ok
 }
 
-// wakeRoom wakes everything waiting for room.
-func (c *Controller) wakeRoom() {
+// wake wakes everything waiting on the workers: for room, or for an
+// assignment's status.
+func (c *Controller) wake() {
 	c.mu.Lock()
-	close(c.roomWake)
-	c.roomWake = make(chan struct{})
+	close(c.wakeCh)
+	c.wakeCh = make(chan struct{})
 	c.mu.Unlock()
 }
 
-func (c *Controller) roomChanged() <-chan struct{} {
+// changed is closed at the next worker status.
+func (c *Controller) changed() <-chan struct{} {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.roomWake
-}
-
-// fetch streams an artifact to a machine that joined.
-func (c *Controller) fetch(in *Msg, ss grpc.ServerStream) error {
-	if _, ok := peerIdentity(ss.Context()); !ok {
-		return errors.New("fetch needs a certificate: join first")
-	}
-	var name string
-	_ = in.Decode(&name)
-	path, ok := c.artifactPath(name)
-	if !ok {
-		return fmt.Errorf("no artifact %q", name)
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	buf := make([]byte, 1<<20)
-	for {
-		n, err := f.Read(buf)
-		if n > 0 {
-			m, merr := newMsg("data", buf[:n])
-			if merr != nil {
-				return merr
-			}
-			if err := ss.SendMsg(m); err != nil {
-				return err
-			}
-		}
-		if errors.Is(err, io.EOF) {
-			return ss.SendMsg(&Msg{Kind: "eof"})
-		}
-		if err != nil {
-			return err
-		}
-	}
-}
-
-// admin runs one of fleetci's commands.
-func (c *Controller) admin(ctx context.Context, req adminReq) (any, error) {
-	switch req.Op {
-	case "token":
-		t, err := c.CreateToken(req.Role, req.TTL)
-		if err != nil {
-			return nil, err
-		}
-		return map[string]any{"token": t, "controllers": c.controllers()}, nil
-	case "status":
-		return c.Status(), nil
-	case "drain", "undrain":
-		c.mu.Lock()
-		w := c.workers[req.Worker]
-		if w != nil {
-			w.draining = req.Op == "drain"
-		}
-		c.mu.Unlock()
-		if w == nil {
-			return nil, fmt.Errorf("no worker %q", req.Worker)
-		}
-		if w.connected {
-			_ = w.s.tell("drain", req.Op == "drain")
-		}
-		return nil, nil
-	case "revoke":
-		c.mu.Lock()
-		w := c.workers[req.Worker]
-		if w == nil {
-			c.mu.Unlock()
-			return nil, fmt.Errorf("no worker %q", req.Worker)
-		}
-		c.revoked[w.serial] = Revoked{ID: w.id, Until: time.Now().Add(certLifetime)}
-		w.connected = false
-		c.saveLocked()
-		c.mu.Unlock()
-		c.log.Warn("worker certificate revoked", "worker", req.Worker)
-		return nil, nil
-	}
-	return nil, fmt.Errorf("unknown command %q", req.Op)
+	return c.wakeCh
 }
 
 // Status is the fleet as this controller sees it.

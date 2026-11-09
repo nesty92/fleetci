@@ -1,168 +1,67 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sync"
-	"sync/atomic"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
 	"time"
-
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/encoding"
-	"google.golang.org/grpc/keepalive"
-	"google.golang.org/grpc/peer"
 )
+
+// The fleet's API is HTTPS and JSON, as Kubernetes's is: versioned paths
+// under /v1, fields only ever added, mutual TLS with the fleet's CA.
+// Workers and controllers dial controllers; nothing dials a worker, so a
+// worker may sit behind NAT. The leader writes assignments; a worker
+// watches its own with a long poll, makes them so, and reports their
+// status with its own every 5 s.
+//
+//	POST /v1/join                         a new machine's CSR, with a token (no certificate yet)
+//	POST /v1/ping                         a controller's heartbeat to another
+//	GET  /v1/status                       the fleet, for fleetci fleet status
+//	POST /v1/tokens                       a join token
+//	POST /v1/workers/{id}/drain           and undrain, revoke
+//	PUT  /v1/workers/{id}/status          a worker's facts and report: its heartbeat
+//	GET  /v1/workers/{id}/assignments     its assignments; ?rev= waits for a newer revision
+//	POST /v1/workers/{id}/certificate     a worker's certificate renewal
+//	GET  /v1/artifacts/{name}             a binary a worker installs
+const apiVersion = "v1"
 
 // DefaultPort is the controllers' port.
 const DefaultPort = "9481"
 
-// The fleet's messages are JSON over gRPC: one hand-written service, no
-// generated code. Every call carries a Msg.
-type jsonCodec struct{}
-
-func (jsonCodec) Name() string                       { return "json" }
-func (jsonCodec) Marshal(v any) ([]byte, error)      { return json.Marshal(v) }
-func (jsonCodec) Unmarshal(data []byte, v any) error { return json.Unmarshal(data, v) }
-
-func init() { encoding.RegisterCodec(jsonCodec{}) }
-
-// Msg is one message on the fleet's calls. On a stream, a request has an
-// ID and its reply the same ID with Reply set; a message with no ID needs
-// no answer.
-type Msg struct {
-	ID    uint64          `json:"id,omitempty"`
-	Reply bool            `json:"reply,omitempty"`
-	Kind  string          `json:"kind,omitempty"`
-	Err   string          `json:"err,omitempty"`
-	Body  json.RawMessage `json:"body,omitempty"`
-}
-
-func newMsg(kind string, body any) (*Msg, error) {
-	b, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-	return &Msg{Kind: kind, Body: b}, nil
-}
-
-// Decode reads the message's body into v.
-func (m *Msg) Decode(v any) error {
-	if len(m.Body) == 0 {
-		return nil
-	}
-	return json.Unmarshal(m.Body, v)
-}
-
 // ErrNoRoom is a worker's answer when it has no room for a class.
 var ErrNoRoom = errors.New("no room")
 
-func remoteErr(s string) error {
-	if s == ErrNoRoom.Error() {
-		return ErrNoRoom
-	}
-	return errors.New(s)
+// watchTimeout is how long a watch waits for a change before it answers
+// with the list as it is.
+const watchTimeout = 30 * time.Second
+
+func workerPath(id, rest string) string {
+	return "/" + apiVersion + "/workers/" + url.PathEscape(id) + rest
 }
 
-// service is the fleet's gRPC service.
-type service interface {
-	unary(ctx context.Context, method string, in *Msg) (*Msg, error)
-	connect(stream grpc.ServerStream) error
-	fetch(in *Msg, stream grpc.ServerStream) error
+// apiError is the body of every error answer.
+type apiError struct {
+	Error string `json:"error"`
 }
 
-const serviceName = "fleetci.Fleet"
-
-func unaryHandler(method string) grpc.MethodHandler {
-	return func(srv any, ctx context.Context, dec func(any) error, _ grpc.UnaryServerInterceptor) (any, error) {
-		in := new(Msg)
-		if err := dec(in); err != nil {
-			return nil, err
-		}
-		return srv.(service).unary(ctx, method, in)
-	}
+// StatusError is an error a controller answered with.
+type StatusError struct {
+	Code int
+	Msg  string
 }
 
-// The unary methods.
-const (
-	mJoin  = "Join"  // a new machine's CSR, with a token
-	mPing  = "Ping"  // a controller's heartbeat to another
-	mAdmin = "Admin" // fleetci's commands on a controller
-)
-
-var serviceDesc = grpc.ServiceDesc{
-	ServiceName: serviceName,
-	HandlerType: (*service)(nil),
-	Methods: []grpc.MethodDesc{
-		{MethodName: mJoin, Handler: unaryHandler(mJoin)},
-		{MethodName: mPing, Handler: unaryHandler(mPing)},
-		{MethodName: mAdmin, Handler: unaryHandler(mAdmin)},
-	},
-	Streams: []grpc.StreamDesc{
-		{StreamName: "Connect", ServerStreams: true, ClientStreams: true, Handler: func(srv any, stream grpc.ServerStream) error {
-			return srv.(service).connect(stream)
-		}},
-		{StreamName: "Fetch", ServerStreams: true, Handler: func(srv any, stream grpc.ServerStream) error {
-			in := new(Msg)
-			if err := stream.RecvMsg(in); err != nil {
-				return err
-			}
-			return srv.(service).fetch(in, stream)
-		}},
-	},
-}
-
-// call makes a unary call.
-func call(ctx context.Context, cc *grpc.ClientConn, method, kind string, body, out any) error {
-	in, err := newMsg(kind, body)
-	if err != nil {
-		return err
-	}
-	reply := new(Msg)
-	if err := cc.Invoke(ctx, "/"+serviceName+"/"+method, in, reply, grpc.CallContentSubtype("json")); err != nil {
-		return err
-	}
-	if reply.Err != "" {
-		return remoteErr(reply.Err)
-	}
-	if out != nil {
-		return reply.Decode(out)
-	}
-	return nil
-}
-
-func reply(body any, err error) (*Msg, error) {
-	if err != nil {
-		return &Msg{Err: err.Error()}, nil
-	}
-	m, merr := newMsg("", body)
-	if merr != nil {
-		return nil, merr
-	}
-	return m, nil
-}
-
-// peerIdentity is the verified identity of a call's caller, if it showed
-// a certificate.
-func peerIdentity(ctx context.Context) (Identity, bool) {
-	p, ok := peer.FromContext(ctx)
-	if !ok {
-		return Identity{}, false
-	}
-	info, ok := p.AuthInfo.(credentials.TLSInfo)
-	if !ok || len(info.State.VerifiedChains) == 0 || len(info.State.VerifiedChains[0]) == 0 {
-		return Identity{}, false
-	}
-	id, err := IdentityOf(info.State.VerifiedChains[0][0])
-	return id, err == nil
-}
+func (e *StatusError) Error() string { return e.Msg }
 
 // serverTLS is a controller's: its own certificate, and callers' checked
-// against the CA when they show one (Join's callers have none yet).
+// against the CA when they show one (a joining machine has none yet).
 func serverTLS(p PKI) (*tls.Config, error) {
 	pool, err := p.Pool()
 	if err != nil {
@@ -224,15 +123,6 @@ func clientTLS(p PKI, pool *x509.CertPool) *tls.Config {
 	return cfg
 }
 
-// dial opens a connection to a controller.
-func dial(addr string, cfg *tls.Config) (*grpc.ClientConn, error) {
-	return grpc.NewClient(withPort(addr),
-		grpc.WithTransportCredentials(credentials.NewTLS(cfg)),
-		grpc.WithKeepaliveParams(keepalive.ClientParameters{Time: 10 * time.Second, Timeout: 5 * time.Second, PermitWithoutStream: true}),
-		grpc.WithDefaultCallOptions(grpc.CallContentSubtype("json"), grpc.MaxCallRecvMsgSize(64<<20)),
-	)
-}
-
 func withPort(addr string) string {
 	for i := len(addr) - 1; i >= 0; i-- {
 		switch addr[i] {
@@ -245,138 +135,106 @@ func withPort(addr string) string {
 	return addr + ":" + DefaultPort
 }
 
-func newServer(cfg *tls.Config, s service) *grpc.Server {
-	srv := grpc.NewServer(
-		grpc.Creds(credentials.NewTLS(cfg)),
-		grpc.KeepaliveParams(keepalive.ServerParameters{Time: 10 * time.Second, Timeout: 5 * time.Second}),
-		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 5 * time.Second, PermitWithoutStream: true}),
-		grpc.MaxRecvMsgSize(64<<20),
-	)
-	srv.RegisterService(&serviceDesc, s)
-	return srv
+// client is a connection to one controller, over HTTP/2.
+type client struct {
+	addr string
+	base string
+	hc   *http.Client
 }
 
-// stream is one end of a Connect stream: requests either way, with their
-// replies matched by ID, and messages that need none.
-type stream struct {
-	s interface {
-		SendMsg(any) error
-		RecvMsg(any) error
+func newClient(addr string, cfg *tls.Config) *client {
+	tr := &http.Transport{
+		TLSClientConfig:     cfg,
+		ForceAttemptHTTP2:   true,
+		TLSHandshakeTimeout: 10 * time.Second,
+		IdleConnTimeout:     2 * time.Minute,
+		// A connection that stops answering pings is dropped, so a
+		// controller that went away is noticed in seconds, not minutes.
+		HTTP2: &http.HTTP2Config{SendPingTimeout: 10 * time.Second, PingTimeout: 5 * time.Second},
 	}
-	sendMu sync.Mutex
-	next   atomic.Uint64
-
-	mu      sync.Mutex
-	waiting map[uint64]chan *Msg
-	closed  error
+	return &client{addr: addr, base: "https://" + withPort(addr), hc: &http.Client{Transport: tr}}
 }
 
-func newStream(s interface {
-	SendMsg(any) error
-	RecvMsg(any) error
-}) *stream {
-	return &stream{s: s, waiting: map[uint64]chan *Msg{}}
-}
+func (c *client) close() { c.hc.CloseIdleConnections() }
 
-func (s *stream) send(m *Msg) error {
-	s.sendMu.Lock()
-	defer s.sendMu.Unlock()
-	return s.s.SendMsg(m)
-}
-
-// tell sends a message that needs no answer.
-func (s *stream) tell(kind string, body any) error {
-	m, err := newMsg(kind, body)
+// do sends in, as JSON, and reads the answer into out.
+func (c *client) do(ctx context.Context, method, path string, in, out any) error {
+	resp, err := c.send(ctx, method, path, in)
 	if err != nil {
 		return err
 	}
-	return s.send(m)
-}
-
-// ask sends a request and waits for its reply.
-func (s *stream) ask(ctx context.Context, kind string, body, out any) error {
-	m, err := newMsg(kind, body)
-	if err != nil {
-		return err
-	}
-	m.ID = s.next.Add(1)
-	ch := make(chan *Msg, 1)
-	s.mu.Lock()
-	if s.closed != nil {
-		s.mu.Unlock()
-		return s.closed
-	}
-	s.waiting[m.ID] = ch
-	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		delete(s.waiting, m.ID)
-		s.mu.Unlock()
-	}()
-	if err := s.send(m); err != nil {
-		return err
-	}
-	select {
-	case r := <-ch:
-		if r == nil {
-			return s.err()
-		}
-		if r.Err != "" {
-			return remoteErr(r.Err)
-		}
-		if out != nil {
-			return r.Decode(out)
-		}
+	defer resp.Body.Close()
+	if out == nil {
+		_, _ = io.Copy(io.Discard, resp.Body)
 		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+// send makes a request and checks its status; the caller reads and closes
+// the body.
+func (c *client) send(ctx context.Context, method, path string, in any) (*http.Response, error) {
+	var body io.Reader
+	if in != nil {
+		b, err := json.Marshal(in)
+		if err != nil {
+			return nil, err
+		}
+		body = bytes.NewReader(b)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.base+path, body)
+	if err != nil {
+		return nil, err
+	}
+	if in != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode/100 != 2 {
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		var e apiError
+		if json.Unmarshal(b, &e) == nil && e.Error != "" {
+			return nil, &StatusError{Code: resp.StatusCode, Msg: e.Error}
+		}
+		msg := strings.TrimSpace(string(b))
+		if msg == "" {
+			msg = resp.Status
+		}
+		return nil, &StatusError{Code: resp.StatusCode, Msg: msg}
+	}
+	return resp, nil
+}
+
+// The server's side.
+
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	if v != nil {
+		_ = json.NewEncoder(w).Encode(v)
 	}
 }
 
-func (s *stream) err() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.closed
+func writeErr(w http.ResponseWriter, code int, err error) {
+	writeJSON(w, code, apiError{Error: err.Error()})
 }
 
-// answer replies to a request.
-func (s *stream) answer(req *Msg, body any, err error) error {
-	r, merr := reply(body, err)
-	if merr != nil {
-		return merr
-	}
-	r.ID, r.Reply, r.Kind = req.ID, true, req.Kind
-	return s.send(r)
+// readJSON reads a request's body, up to 16 MB.
+func readJSON(r *http.Request, v any) error {
+	return json.NewDecoder(io.LimitReader(r.Body, 16<<20)).Decode(v)
 }
 
-// serve reads the stream until it ends, handing requests and messages to
-// handle, each in its own goroutine for requests.
-func (s *stream) serve(handle func(m *Msg)) error {
-	for {
-		m := new(Msg)
-		if err := s.s.RecvMsg(m); err != nil {
-			s.mu.Lock()
-			s.closed = fmt.Errorf("stream closed: %w", err)
-			for id, ch := range s.waiting {
-				close(ch)
-				delete(s.waiting, id)
-			}
-			s.mu.Unlock()
-			return err
-		}
-		if m.Reply {
-			s.mu.Lock()
-			ch := s.waiting[m.ID]
-			s.mu.Unlock()
-			if ch != nil {
-				ch <- m
-			}
-			continue
-		}
-		if m.ID != 0 {
-			go handle(m)
-		} else {
-			handle(m)
-		}
+// peerIdentity is the verified identity of a request's caller, if it
+// showed a certificate.
+func peerIdentity(r *http.Request) (Identity, bool) {
+	if r.TLS == nil || len(r.TLS.VerifiedChains) == 0 || len(r.TLS.VerifiedChains[0]) == 0 {
+		return Identity{}, false
 	}
+	id, err := IdentityOf(r.TLS.VerifiedChains[0][0])
+	return id, err == nil
 }

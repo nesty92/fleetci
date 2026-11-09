@@ -64,7 +64,7 @@ func (c *Controller) candidates(class string) []*workerConn {
 					n++
 				}
 			}
-			n += w.asked[class]
+			n += w.pendingLocked(class)
 		}
 		if n >= spec.MaxInstances {
 			return nil
@@ -72,7 +72,7 @@ func (c *Controller) candidates(class string) []*workerConn {
 	}
 	var ws []*workerConn
 	for _, w := range c.workers {
-		if w.state() == Ready && w.report.Room[class]-w.asked[class] > 0 {
+		if w.state() == Ready && w.report.Room[class]-w.pendingLocked(class) > 0 {
 			ws = append(ws, w)
 		}
 	}
@@ -130,7 +130,7 @@ func (f fleetCapacity) Create(ctx context.Context, class string) (source.VM, err
 		try = append(try, spec.Overflow)
 	}
 	for {
-		wake := c.roomChanged()
+		wake := c.changed()
 		for _, cl := range try {
 			for _, w := range c.candidates(cl) {
 				vm, err := c.createOn(ctx, w, cl)
@@ -154,150 +154,162 @@ func (f fleetCapacity) Create(ctx context.Context, class string) (source.VM, err
 	}
 }
 
-// createOn asks a worker for a VM. The ask outlives ctx, so a VM the
-// worker boots for a job that went meanwhile is removed, not left.
+// bootWait is how long a worker may take to boot an assignment's VM.
+const bootWait = 10 * time.Minute
+
+// createOn writes an assignment for a VM of class on the worker and waits
+// for it to be Ready. When ctx ends first, the assignment is cancelled, and
+// the worker removes the VM it booted for nothing.
 func (c *Controller) createOn(ctx context.Context, w *workerConn, class string) (source.VM, error) {
-	c.mu.Lock()
-	w.asked[class]++
-	c.mu.Unlock()
-	defer func() {
+	a := c.assign(w, class)
+	deadline := time.NewTimer(bootWait)
+	defer deadline.Stop()
+	for {
+		wake := c.changed()
 		c.mu.Lock()
-		w.asked[class]--
+		st, wst := a.status, w.state()
 		c.mu.Unlock()
-	}()
-	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
-	defer cancel()
-	var resp createResp
-	if err := w.s.ask(actx, "create", createReq{Class: class}, &resp); err != nil {
-		if errors.Is(err, ErrNoRoom) {
-			c.mu.Lock()
-			w.report.Room[class] = 0
-			c.mu.Unlock()
+		switch {
+		case st.Phase == PhaseReady:
+			// Whoever runs the job on it follows it from here, or deletes it.
+			c.unfollow(w, a)
+			c.log.Info("vm placed", "worker", w.id, "class", st.Class, "vm", st.VM, "assignment", a.ID)
+			return source.VM{ID: w.id + "/" + a.ID, Class: st.Class, Instance: st.Instance}, nil
+		case st.Phase == PhaseFailed:
+			c.unfollow(w, a)
+			if st.Reason == ReasonNoRoom {
+				return source.VM{}, ErrNoRoom
+			}
+			return source.VM{}, errors.New(st.Err)
+		case st.terminal(), a.Cancel:
+			c.unfollow(w, a)
+			return source.VM{}, fmt.Errorf("assignment %s ended before its VM was ready", a.ID)
+		case wst == Unreachable:
+			c.cancel(w, a)
+			return source.VM{}, fmt.Errorf("worker %s is unreachable", w.id)
 		}
-		return source.VM{}, err
+		select {
+		case <-ctx.Done():
+			c.cancel(w, a)
+			return source.VM{}, ctx.Err()
+		case <-deadline.C:
+			c.cancel(w, a)
+			return source.VM{}, fmt.Errorf("the VM was not ready in %s", bootWait)
+		case <-wake:
+		case <-time.After(5 * time.Second):
+		}
 	}
-	if ctx.Err() != nil {
-		_ = w.s.ask(context.WithoutCancel(ctx), "delete", vmReq{VM: resp.VM}, nil)
-		return source.VM{}, ctx.Err()
-	}
-	c.log.Info("vm placed", "worker", w.id, "class", resp.Class, "vm", resp.VM)
-	return source.VM{ID: w.id + "/" + resp.VM, Class: resp.Class, Instance: resp.Instance}, nil
 }
 
 // Conn is nil: a fleet VM is reached by its worker, not the controller.
 func (f fleetCapacity) Conn(string) (*proxy.Conn, error) { return nil, nil }
 
-func (f fleetCapacity) Delete(ctx context.Context, id string) error {
-	w, vm, err := f.c.workerOf(id)
+// Delete cancels the VM's assignment: its worker removes it.
+func (f fleetCapacity) Delete(_ context.Context, id string) error {
+	w, a, err := f.c.assignmentOf(id)
 	if err != nil {
 		return err
 	}
-	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
-	defer cancel()
-	return w.s.ask(dctx, "delete", vmReq{VM: vm}, nil)
+	if a != nil {
+		f.c.cancel(w, a)
+	}
+	return nil
 }
 
 // HandOver leaves the VM to its worker, which follows its job to the end
 // and removes it then, as it does for every job.
 func (f fleetCapacity) HandOver(context.Context, string) bool { return true }
 
-func (c *Controller) workerOf(id string) (*workerConn, string, error) {
-	wid, vm, ok := strings.Cut(id, "/")
+// assignmentOf finds a VM's worker and assignment by the VM's id,
+// worker/assignment; the assignment is nil when it is over and gone.
+func (c *Controller) assignmentOf(id string) (*workerConn, *assignment, error) {
+	wid, aid, ok := strings.Cut(id, "/")
 	if !ok {
-		return nil, "", fmt.Errorf("vm %q names no worker", id)
+		return nil, nil, fmt.Errorf("vm %q names no worker", id)
 	}
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	w := c.workers[wid]
-	c.mu.Unlock()
-	if w == nil || !w.connected {
-		return nil, "", fmt.Errorf("worker %s is not connected", wid)
+	if w == nil {
+		return nil, nil, fmt.Errorf("no worker %s", wid)
 	}
-	return w, vm, nil
+	return w, w.assigns[aid], nil
 }
 
 // lostAfter is how long a job's worker may be unreachable before the
-// leader stops waiting for its runner.
+// leader stops waiting for its job.
 const lostAfter = 10 * time.Minute
 
-// GitHubStart starts a GitHub job's runner on its VM's worker and follows
-// it there by the worker's events.
+// GitHubStart puts a GitHub job's runner on its VM's assignment and follows
+// it by the worker's reports.
 func (c *Controller) GitHubStart(cfg github.Config) github.StartFunc {
 	return func(ctx context.Context, vm github.VM, jit string, took func(job string)) error {
-		req := runGitHubReq{JITConfig: jit, RunnerVersion: cfg.RunnerVersion, CacheURL: cfg.CacheURL, IdleTimeout: time.Duration(cfg.IdleTimeout)}
-		return c.runOn(ctx, vm.ID, "run-github", func(id string) any { req.VM = id; return req }, took)
+		run := RunSpec{GitHub: &GitHubRun{JITConfig: jit, RunnerVersion: cfg.RunnerVersion, CacheURL: cfg.CacheURL, IdleTimeout: time.Duration(cfg.IdleTimeout)}}
+		return c.runOn(ctx, vm.ID, run, took)
 	}
 }
 
-// GitLabRemote runs a GitLab job on its VM's worker, with the job's own
-// token, and follows it there.
+// GitLabRemote puts a GitLab job on its VM's assignment, to run with the
+// job's own token, and follows it.
 func (c *Controller) GitLabRemote() func(ctx context.Context, vm source.VM, job, runner []byte) error {
 	return func(ctx context.Context, vm source.VM, job, runner []byte) error {
-		return c.runOn(ctx, vm.ID, "run-gitlab", func(id string) any {
-			return runGitLabReq{VM: id, Job: job, Runner: runner}
-		}, nil)
+		return c.runOn(ctx, vm.ID, RunSpec{GitLab: &GitLabRun{Job: job, Runner: runner}}, nil)
 	}
 }
 
-// runOn asks a VM's worker to run a job on it and waits for the job's end,
-// by the worker's events or, when they are lost with a stream, its reports.
-func (c *Controller) runOn(ctx context.Context, fullID, kind string, req func(id string) any, took func(job string)) error {
-	events := make(chan Event, 8)
-	c.mu.Lock()
-	c.watch[fullID] = events
-	c.mu.Unlock()
-	defer func() {
-		c.mu.Lock()
-		delete(c.watch, fullID)
-		c.mu.Unlock()
-	}()
-	w, id, err := c.workerOf(fullID)
+// runOn sets the job of a VM's assignment and waits for its end. When ctx
+// ends first, the job goes on: its worker sees it through.
+func (c *Controller) runOn(ctx context.Context, id string, run RunSpec, took func(job string)) error {
+	w, a, err := c.assignmentOf(id)
 	if err != nil {
 		return err
 	}
-	if err := w.s.ask(ctx, kind, req(id), nil); err != nil {
-		return err
+	c.mu.Lock()
+	switch {
+	case a == nil, a.Cancel, a.status.terminal():
+		c.mu.Unlock()
+		return fmt.Errorf("vm %s is gone", id)
+	case a.Run != nil:
+		c.mu.Unlock()
+		return fmt.Errorf("vm %s runs a job already", id)
 	}
-	wid := w.id
-	t := time.NewTicker(5 * time.Second)
-	defer t.Stop()
-	missing, lostSince := 0, time.Time{}
+	a.Run, a.followed = &run, true
+	w.bumpLocked()
+	c.mu.Unlock()
+	defer c.unfollow(w, a)
+	lastTook, lostSince := "", time.Time{}
 	for {
-		select {
-		case e := <-events:
-			switch e.Kind {
-			case "took":
-				if took != nil {
-					took(e.Job)
-				}
-			case "exit":
-				if e.Err != "" {
-					return errors.New(e.Err)
-				}
-				return nil
+		wake := c.changed()
+		c.mu.Lock()
+		st, wst := a.status, w.state()
+		c.mu.Unlock()
+		if st.Took != "" && st.Took != lastTook {
+			lastTook = st.Took
+			if took != nil {
+				took(st.Took)
 			}
+		}
+		switch st.Phase {
+		case PhaseSucceeded:
+			return nil
+		case PhaseFailed:
+			return errors.New(st.Err)
+		}
+		if wst == Unreachable {
+			if lostSince.IsZero() {
+				lostSince = time.Now()
+			}
+			if time.Since(lostSince) > lostAfter {
+				return fmt.Errorf("worker %s unreachable for %s", w.id, lostAfter)
+			}
+		} else {
+			lostSince = time.Time{}
+		}
+		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-t.C:
-			c.mu.Lock()
-			w := c.workers[wid]
-			st, has := w.state(), slices.ContainsFunc(w.report.VMs, func(v VMInfo) bool { return v.ID == id })
-			c.mu.Unlock()
-			switch {
-			case st == Unreachable:
-				if lostSince.IsZero() {
-					lostSince = time.Now()
-				}
-				if time.Since(lostSince) > lostAfter {
-					return fmt.Errorf("worker %s unreachable for %s", wid, lostAfter)
-				}
-			case !has:
-				lostSince = time.Time{}
-				if missing++; missing >= 3 {
-					return nil // the job ended and its VM is gone
-				}
-			default:
-				lostSince, missing = time.Time{}, 0
-			}
+		case <-wake:
+		case <-time.After(5 * time.Second):
 		}
 	}
 }

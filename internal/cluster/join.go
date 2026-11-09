@@ -10,14 +10,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"time"
-
-	"google.golang.org/grpc"
 
 	"github.com/nesty92/fleetci/internal/fleet"
 )
@@ -62,12 +61,17 @@ func Admin(ctx context.Context, pkiDir, addr string, req adminReq, out any) erro
 	if err != nil {
 		return err
 	}
-	cc, err := dial(addr, clientTLS(p, pool))
-	if err != nil {
-		return err
+	cl := newClient(addr, clientTLS(p, pool))
+	defer cl.close()
+	switch req.Op {
+	case "token":
+		return cl.do(ctx, http.MethodPost, "/v1/tokens", tokenReq{Role: req.Role, TTL: req.TTL}, out)
+	case "status":
+		return cl.do(ctx, http.MethodGet, "/v1/status", nil, out)
+	case "drain", "undrain", "revoke":
+		return cl.do(ctx, http.MethodPost, workerPath(req.Worker, "/"+req.Op), struct{}{}, out)
 	}
-	defer cc.Close()
-	return call(ctx, cc, mAdmin, "admin", req, out)
+	return fmt.Errorf("unknown command %q", req.Op)
 }
 
 // AdminRequest is a command for Admin.
@@ -138,11 +142,8 @@ func Join(ctx context.Context, o JoinOptions, out io.Writer) (*WorkerConfig, *Ma
 	}
 	cfg := &tls.Config{MinVersion: tls.VersionTLS13, InsecureSkipVerify: true, // checked below
 		VerifyConnection: func(cs tls.ConnectionState) error { return pinned(cs, tok.CAHash) }}
-	cc, err := dial(o.Controller, cfg)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer cc.Close()
+	anon := newClient(o.Controller, cfg)
+	defer anon.close()
 	csr, err := p.NewKey()
 	if err != nil {
 		return nil, nil, err
@@ -150,7 +151,7 @@ func Join(ctx context.Context, o JoinOptions, out io.Writer) (*WorkerConfig, *Ma
 	var resp JoinResponse
 	jctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
-	if err := call(jctx, cc, mJoin, "join", JoinRequest{Token: tok.ID + "." + tok.Secret, ID: o.ID, CSR: csr, Facts: facts}, &resp); err != nil {
+	if err := anon.do(jctx, http.MethodPost, "/v1/join", JoinRequest{Token: tok.ID + "." + tok.Secret, ID: o.ID, CSR: csr, Facts: facts}, &resp); err != nil {
 		return nil, nil, fmt.Errorf("join: %w", err)
 	}
 	if err := p.Install(resp.Cert, resp.CA); err != nil {
@@ -184,11 +185,8 @@ func Join(ctx context.Context, o JoinOptions, out io.Writer) (*WorkerConfig, *Ma
 	if ca, err := p.CA(); err == nil {
 		pool.AddCert(ca)
 	}
-	authed, err := dial(o.Controller, clientTLS(p, pool))
-	if err != nil {
-		return nil, nil, err
-	}
-	defer authed.Close()
+	authed := newClient(o.Controller, clientTLS(p, pool))
+	defer authed.close()
 	if err := os.MkdirAll(o.BinDir, 0o755); err != nil {
 		return nil, nil, err
 	}
@@ -291,23 +289,14 @@ func fileSum(path string) (string, error) {
 }
 
 // fetchArtifact downloads an artifact from the controller and checks it.
-func fetchArtifact(ctx context.Context, cc *grpc.ClientConn, a Artifact, path string) error {
+func fetchArtifact(ctx context.Context, cl *client, a Artifact, path string) error {
 	fctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
-	cs, err := cc.NewStream(fctx, &serviceDesc.Streams[1], "/"+serviceName+"/Fetch")
+	resp, err := cl.send(fctx, http.MethodGet, "/v1/artifacts/"+url.PathEscape(a.Name), nil)
 	if err != nil {
 		return err
 	}
-	req, err := newMsg("fetch", a.Name)
-	if err != nil {
-		return err
-	}
-	if err := cs.SendMsg(req); err != nil {
-		return err
-	}
-	if err := cs.CloseSend(); err != nil {
-		return err
-	}
+	defer resp.Body.Close()
 	tmp := path + ".fetch"
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
 	if err != nil {
@@ -315,25 +304,9 @@ func fetchArtifact(ctx context.Context, cc *grpc.ClientConn, a Artifact, path st
 	}
 	defer os.Remove(tmp)
 	h := sha256.New()
-	w := io.MultiWriter(f, h)
-	for {
-		m := new(Msg)
-		if err := cs.RecvMsg(m); err != nil {
-			f.Close()
-			return err
-		}
-		if m.Kind == "eof" {
-			break
-		}
-		var data []byte
-		if err := m.Decode(&data); err != nil {
-			f.Close()
-			return err
-		}
-		if _, err := w.Write(data); err != nil {
-			f.Close()
-			return err
-		}
+	if _, err := io.Copy(io.MultiWriter(f, h), resp.Body); err != nil {
+		f.Close()
+		return err
 	}
 	if err := f.Close(); err != nil {
 		return err

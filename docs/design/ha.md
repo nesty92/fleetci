@@ -129,8 +129,8 @@ The acceptance:
           ┌────────┴──┐       │
           │ leader    │◄──────┼───── standby (takes over)
           └───▲───▲───┘       │
-   streams    │   │           │
-   opened by  │   │           │
+   watches,   │   │           │
+   reports by │   │           │
    the worker │   │           │
          ┌────┴┐ ┌┴────┐      │
          │ wkr │ │ wkr ├──────┘
@@ -149,29 +149,37 @@ single machine is both, as `fleetci serve` is today:
   tells them its room. A worker can also own a cloud class, with that
   cloud's credentials.
 
-#### The connection: workers dial out
+#### The connection: workers dial out, and watch
 
-Each worker opens one connection to every controller and keeps it: gRPC
-over mutual TLS, on one TCP port (9481), with keepalives. Only the
-controllers need to be reachable; workers can be behind any NAT, as k3s
-agents are. Controllers dial each other on the same port.
+The fleet's API is HTTPS and JSON, as Kubernetes's is between the kubelet
+and the API server: versioned paths under `/v1`, HTTP/2, mutual TLS, one
+TCP port (9481). Workers dial every controller; nothing dials a worker, so
+workers can be behind any NAT. Controllers dial each other on the same
+port. It works through HTTP proxies, and `curl --cert` can read it.
 
-On the stream, the worker sends:
-- **its room,** per class, when it changes and at least every 5 s; that is
-  also its heartbeat;
-- **its jobs,** each with its forge, job id and runner name, so a new
-  leader knows what runs where;
-- **answers** to the leader's requests.
+It is declarative. The leader never calls a worker; it writes
+**assignments**, and each worker makes its own so:
 
-And the leader sends:
-- **`Run`:** a GitHub job, with its class and the runner's JIT config; or a
-  GitLab job, with the job as GitLab gave it and the `[[runners]]` table it
-  runs under.
-- **`Drain`, `Cancel`** and config changes.
+- **An assignment** is a VM of a class, and later the job to run on it: a
+  GitHub job's JIT config, or a GitLab job as GitLab gave it with the
+  `[[runners]]` table it runs under. The leader may also mark it
+  cancelled.
+- **The worker watches** its assignments on every controller with a long
+  poll (`GET /v1/workers/{id}/assignments?rev=…`, answered at the next
+  change or after 30 s), boots the VM, runs the job once it is set, and
+  removes the VM when the job ends or is cancelled.
+- **The worker reports** (`PUT /v1/workers/{id}/status`) to every
+  controller when something changes and at least every 5 s: its facts,
+  its room per class, its VMs, and each assignment's phase (Pending,
+  Ready, Running, Succeeded, Failed). That is also its heartbeat. The
+  answer carries its classes and whether it is drained.
 
-A worker decides `Run` itself: it reserves room and answers yes, or says
-no room. So a leader working from stale room, or two leaders at once,
-can't overbook a worker: they get "no room" and try another.
+A worker decides an assignment itself: it takes room for it or fails it
+with `NoRoom`. So a leader working from stale room, or two leaders at
+once, can't overbook a worker: the leader tries another. An assignment no
+controller lists any more is not cancelled: its controller may have gone,
+and the worker sees the job through. A new leader learns what runs where
+from the workers' reports.
 
 #### Trust: mutual TLS, from the fleet's own CA
 
@@ -186,22 +194,22 @@ certificate against the fleet's CA, never the system's.
 - **Identity is in the certificate.** A worker's carries `CN=<worker id>`
   and `O=fleetci:worker`; a controller's, `O=fleetci:controller`, plus its
   addresses as SANs, which workers check. The role decides what the
-  stream allows: only a controller may send `Run`, and a worker may only
-  report about itself, under the id in its certificate, whatever the
-  message says.
+  API allows: only a controller writes assignments or runs fleetci's
+  commands, and a worker reaches only its own paths, under the id in its
+  certificate.
 - **Keys never move.** Each machine makes its own key at join and sends a
   CSR; the controller signs it. The bootstrap token only authorises that
   one signing, as kubeadm's does: it is single-use per machine, expires
   (1 h by default), and is the only thing the join port accepts without a
   certificate.
-- **Short certificates, renewed on the stream.** A worker's certificate
-  lasts 30 days, and the worker asks for a new one over its mTLS stream
-  after two thirds of that, with a new key. A worker off for longer joins
+- **Short certificates, renewed over mTLS.** A worker's certificate
+  lasts 30 days, and the worker asks for a new one
+  (`POST /v1/workers/{id}/certificate`) after two thirds of that, with a
+  new key. A worker off for longer joins
   again with a new token.
 - **Revocation is a denylist** the controllers share and check on every
-  handshake and on open streams: `fleetci leave` and
-  `fleetci revoke <worker>` add the certificate's serial, and its streams
-  close at once. Short lifetimes keep the list small; an entry goes when
+  request: `fleetci leave` and `fleetci revoke <worker>` add the
+  certificate's serial, and its next request is refused. Short lifetimes keep the list small; an entry goes when
   its certificate would have expired.
 - **The CA rotates** by overlap: `fleetci ca rotate` adds a new CA, the
   controllers trust both and sign with the new one, workers pick up the
@@ -239,7 +247,7 @@ certificate against the fleet's CA, never the system's.
    from the worker to GitLab with the job's token, which is all those
    calls need; the runner token stays on the controllers.
 4. A job's `[[runners]]` table may hold cache credentials. They reach the
-   worker with the job, over the stream, and stay in memory.
+   worker with the job, in its assignment, and stay in memory.
 
 The time a job spends on the leader is one placement, milliseconds. A
 leader that dies in it leaves a job GitLab thinks is running and nobody
@@ -270,7 +278,7 @@ the leader that the workers and the forge don't have.
 
 #### Losing a worker
 
-A worker's stream that misses its heartbeats for 15 s marks it
+A worker whose status reports stop for 15 s is marked
 `Unreachable`. Nothing placed on it is run again yet: its runners and
 GitLab builds may still be running and reaching the forge.
 
@@ -327,7 +335,8 @@ fleet, not per machine. `fleetci fleet status` shows each worker's classes
 and why a class was left off it ("budget 7 cpus < 16", "no KVM", "label
 site").
 
-A change to the classes reaches every worker over its stream. A worker
+A change to the classes reaches every worker in the answer to its next
+status report. A worker
 given a new class builds its snapshot and runs the microVM check for it,
 and the class is placed there only once it passes; a class taken away
 stops getting jobs, and its running ones finish. The machine's owner can
@@ -412,7 +421,7 @@ After that:
   `fleetci revoke <worker>` on a controller does it for a machine that is
   gone.
 - A further controller joins with a token made with `--controller`. The
-  forge credentials reach it from the leader over the stream, so they are
+  forge credentials reach it from the leader over mTLS, so they are
   set up once; they are written readable by root only.
 
 #### Cloud classes
@@ -436,9 +445,9 @@ class to another worker by itself is left for later (see To decide).
    end in another with only the job's token: logs, artifacts, cache,
    cancel.
 2. **The roles in one process.** `serve` split into a controller and a
-   worker over an in-memory stream, with the host queue's hosts being
+   worker in one process, with the host queue's hosts being
    workers. A single machine runs both, unchanged for the user.
-3. **The stream over mTLS,** with `fleetci init`, `token create`, `join`
+3. **The API over mTLS,** with `fleetci init`, `token create`, `join`
    (steps 1, 2 and 6) and `fleet status`. Workers installed by hand from
    the runbook can join from here.
 4. **Install and the microVM check:** the manifest, steps 3 to 5 of the

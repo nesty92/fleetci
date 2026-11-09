@@ -59,6 +59,9 @@ type Report struct {
 	UsedMemory int64             `json:"used_memory_mb"`
 	VMs        []VMInfo          `json:"vms,omitempty"`
 	Checks     map[string]string `json:"checks,omitempty"` // class → "ok …" or the failure
+	// Assignments are the assignments it has, and those it finished
+	// lately.
+	Assignments []AssignmentStatus `json:"assignments,omitempty"`
 }
 
 // VMInfo is one of a worker's VMs.
@@ -66,50 +69,100 @@ type VMInfo struct {
 	ID    string    `json:"id"`
 	Class string    `json:"class"`
 	Since time.Time `json:"since"`
-	// Job is what runs on it: "github <runner>" or "gitlab <job id>".
+	// Job is what runs on it: "github" or "gitlab".
 	Job  string `json:"job,omitempty"`
 	Took string `json:"took,omitempty"` // the GitHub job its runner took
+	// Assignment is the assignment it was made for.
+	Assignment string `json:"assignment,omitempty"`
 }
 
-// Hello is a worker's first message on its stream.
-type Hello struct {
+// StatusUpdate is what a worker sends every controller when something
+// changes and every 5 s: its facts and its report. It is also its
+// heartbeat.
+type StatusUpdate struct {
 	Facts  Facts  `json:"facts"`
 	Report Report `json:"report"`
 }
 
-// Event is something that happened on a worker's VM.
-type Event struct {
-	VM   string `json:"vm"`
-	Kind string `json:"kind"` // "took" or "exit"
-	Job  string `json:"job,omitempty"`
-	Err  string `json:"err,omitempty"`
+// StatusResponse is a controller's answer to a status update: the classes
+// the worker runs, and whether it is drained.
+type StatusResponse struct {
+	Fit      Fit  `json:"fit"`
+	Draining bool `json:"draining,omitempty"`
 }
 
-// The requests a controller sends a worker.
+// Assignment is a VM the leader wants on a worker, and later the job to run
+// on it. The worker watches its assignments, makes them so, and reports
+// each one's status; the leader never calls a worker.
+type Assignment struct {
+	ID      string    `json:"id"`
+	Class   string    `json:"class"`
+	Created time.Time `json:"created"`
+	// Run is the job, set once the VM is Ready.
+	Run *RunSpec `json:"run,omitempty"`
+	// Cancel asks the worker to stop it and remove its VM. An assignment
+	// that is no longer listed is not cancelled: its controller may have
+	// gone, and the worker sees it through.
+	Cancel bool `json:"cancel,omitempty"`
+}
+
+// RunSpec is the job an assignment runs: one of GitHub and GitLab.
+type RunSpec struct {
+	GitHub *GitHubRun `json:"github,omitempty"`
+	GitLab *GitLabRun `json:"gitlab,omitempty"`
+}
+
+// GitHubRun is a just-in-time runner.
+type GitHubRun struct {
+	JITConfig     string        `json:"jit_config"`
+	RunnerVersion string        `json:"runner_version,omitempty"`
+	CacheURL      string        `json:"cache_url,omitempty"`
+	IdleTimeout   time.Duration `json:"idle_timeout"`
+}
+
+// GitLabRun is a GitLab job, run with the job's own token.
+type GitLabRun struct {
+	Job    json.RawMessage `json:"job"`    // the job as GitLab gave it
+	Runner json.RawMessage `json:"runner"` // the [[runners]] table, without its token
+}
+
+// An assignment's phases.
+const (
+	PhasePending   = "Pending" // accepted; the VM is booting
+	PhaseReady     = "Ready"   // the VM is up; waiting for its job
+	PhaseRunning   = "Running"
+	PhaseSucceeded = "Succeeded"
+	PhaseFailed    = "Failed"
+)
+
+// ReasonNoRoom is a failed assignment's reason when the worker had no room.
+const ReasonNoRoom = "NoRoom"
+
+// AssignmentStatus is an assignment as its worker reports it.
+type AssignmentStatus struct {
+	ID       string    `json:"id"`
+	Class    string    `json:"class"`
+	Phase    string    `json:"phase"`
+	Reason   string    `json:"reason,omitempty"`
+	Err      string    `json:"err,omitempty"`
+	VM       string    `json:"vm,omitempty"`
+	Instance string    `json:"instance,omitempty"`
+	Took     string    `json:"took,omitempty"` // the GitHub job its runner took
+	Since    time.Time `json:"since"`
+}
+
+func (s AssignmentStatus) terminal() bool {
+	return s.Phase == PhaseSucceeded || s.Phase == PhaseFailed
+}
+
+// AssignmentList is a worker's assignments on one controller, at a
+// revision: a watch with that revision waits for the next.
+type AssignmentList struct {
+	Rev         string       `json:"rev"`
+	Assignments []Assignment `json:"assignments"`
+}
+
 type (
-	createReq struct {
-		Class string `json:"class"`
-	}
-	createResp struct {
-		VM       string `json:"vm"`
-		Class    string `json:"class"`
-		Instance string `json:"instance"`
-	}
-	vmReq struct {
-		VM string `json:"vm"`
-	}
-	runGitHubReq struct {
-		VM            string        `json:"vm"`
-		JITConfig     string        `json:"jit_config"`
-		RunnerVersion string        `json:"runner_version,omitempty"`
-		CacheURL      string        `json:"cache_url,omitempty"`
-		IdleTimeout   time.Duration `json:"idle_timeout"`
-	}
-	runGitLabReq struct {
-		VM     string          `json:"vm"`
-		Job    json.RawMessage `json:"job"`    // the job as GitLab gave it
-		Runner json.RawMessage `json:"runner"` // the [[runners]] table, without its token
-	}
 	renewReq struct {
 		CSR []byte `json:"csr"`
 	}
@@ -200,3 +253,15 @@ type adminReq struct {
 	TTL    time.Duration `json:"ttl,omitempty"`
 	Role   string        `json:"role,omitempty"`
 }
+
+// tokenReq and tokenResp are POST /v1/tokens's.
+type (
+	tokenReq struct {
+		Role string        `json:"role,omitempty"`
+		TTL  time.Duration `json:"ttl,omitempty"`
+	}
+	tokenResp struct {
+		Token       string   `json:"token"`
+		Controllers []string `json:"controllers"`
+	}
+)

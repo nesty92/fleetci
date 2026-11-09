@@ -2,11 +2,12 @@ package cluster
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,7 +26,9 @@ import (
 )
 
 // Worker runs the VMs the controllers place on this machine. It dials every
-// controller and keeps a stream to each; it holds no forge credentials.
+// controller, watches its assignments there, makes them so and reports
+// their status with its own; it holds no forge credentials, and nothing
+// dials it.
 type Worker struct {
 	cfg     *WorkerConfig
 	pki     PKI
@@ -43,16 +46,28 @@ type Worker struct {
 	fclasses map[string]fleet.Class
 	backend  *fleet.Backend
 	building bool
+	builtAt  time.Time // the last build's start
 	checks   map[string]string
 	passed   map[string]bool
 	used     fleet.Resources
 	count    map[string]int
 	vms      map[string]*workerVM
 	draining bool
+	drainBy  map[string]bool // controller address → whether it drains this worker
 	reach    []string
 	github   bool
-	streams  map[string]*stream // controller address → its stream
+	clients  map[string]*client // controller address → its client
+	tasks    map[string]*task   // assignment id → what this worker made of it
 	changed  chan struct{}
+}
+
+// task is an assignment as this worker carries it out.
+type task struct {
+	a       Assignment
+	status  AssignmentStatus
+	started bool
+	cancel  context.CancelFunc // the job's, once it runs
+	done    time.Time
 }
 
 // GitLabJob is a GitLab job a controller placed on this worker.
@@ -62,12 +77,13 @@ type GitLabJob struct {
 }
 
 type workerVM struct {
-	vm     fleet.VM
-	size   fleet.Resources
-	since  time.Time
-	job    string
-	took   string
-	cancel context.CancelFunc
+	vm         fleet.VM
+	size       fleet.Resources
+	since      time.Time
+	job        string
+	took       string
+	assignment string
+	cancel     context.CancelFunc
 }
 
 // NewWorker reads the worker's config and certificate.
@@ -78,7 +94,8 @@ func NewWorker(cfg *WorkerConfig, version string, log hclog.Logger) (*Worker, er
 	}
 	w := &Worker{cfg: cfg, pki: p, log: log, version: version,
 		checks: map[string]string{}, passed: map[string]bool{}, count: map[string]int{},
-		vms: map[string]*workerVM{}, streams: map[string]*stream{}, changed: make(chan struct{}, 1)}
+		vms: map[string]*workerVM{}, drainBy: map[string]bool{}, clients: map[string]*client{},
+		tasks: map[string]*task{}, changed: make(chan struct{}, 1)}
 	f, err := GatherFacts(cfg, version)
 	if err != nil {
 		return nil, err
@@ -134,7 +151,7 @@ func (w *Worker) poke() {
 	}
 }
 
-// Run connects to every controller and serves them until ctx ends, then
+// Run watches every controller and reports to each until ctx ends, then
 // removes the worker's VMs.
 func (w *Worker) Run(ctx context.Context) error {
 	pool, err := w.pki.Pool()
@@ -142,15 +159,21 @@ func (w *Worker) Run(ctx context.Context) error {
 		return err
 	}
 	tlsCfg := clientTLS(w.pki, pool)
-	var wg sync.WaitGroup
 	for _, addr := range w.cfg.Controllers {
-		wg.Go(func() { w.keepConnected(ctx, addr, tlsCfg) })
+		w.clients[addr] = newClient(addr, tlsCfg)
+	}
+	var wg sync.WaitGroup
+	for _, cl := range w.clients {
+		wg.Go(func() { w.watchLoop(ctx, cl) })
 	}
 	wg.Go(func() { w.reportLoop(ctx) })
 	wg.Go(func() { w.renewLoop(ctx) })
 	wg.Go(func() { w.sweepLoop(ctx) })
 	<-ctx.Done()
 	wg.Wait()
+	for _, cl := range w.clients {
+		cl.close()
+	}
 	w.mu.Lock()
 	b := w.backend
 	w.mu.Unlock()
@@ -163,100 +186,37 @@ func (w *Worker) Run(ctx context.Context) error {
 	return nil
 }
 
-// keepConnected keeps a stream to one controller, dialling again when it
-// breaks.
-func (w *Worker) keepConnected(ctx context.Context, addr string, cfg *tls.Config) {
-	backoff := time.Second
+// watchLoop watches this worker's assignments on one controller and
+// carries them out.
+func (w *Worker) watchLoop(ctx context.Context, cl *client) {
+	rev, backoff, up, warned := "", time.Second, false, false
+	path := workerPath(w.cfg.ID, "/assignments")
 	for ctx.Err() == nil {
-		start := time.Now()
-		err := w.connect(ctx, addr, cfg)
+		var list AssignmentList
+		wctx, cancel := context.WithTimeout(ctx, watchTimeout+15*time.Second)
+		err := cl.do(wctx, http.MethodGet, path+"?rev="+url.QueryEscape(rev), nil, &list)
+		cancel()
 		if ctx.Err() != nil {
 			return
 		}
-		if time.Since(start) > time.Minute {
-			backoff = time.Second
+		if err != nil {
+			if !warned {
+				w.log.Warn("controller unreachable; trying again", "controller", cl.addr, "err", err)
+			}
+			up, rev, warned = false, "", true
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			backoff = min(backoff*2, 30*time.Second)
+			continue
 		}
-		w.log.Warn("controller stream ended; dialling again", "controller", addr, "err", err, "in", backoff.String())
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(backoff):
+		if !up {
+			w.log.Info("watching the controller's assignments", "controller", cl.addr)
 		}
-		backoff = min(backoff*2, 30*time.Second)
-	}
-}
-
-func (w *Worker) connect(ctx context.Context, addr string, tlsCfg *tls.Config) error {
-	cc, err := dial(addr, tlsCfg)
-	if err != nil {
-		return err
-	}
-	defer cc.Close()
-	sctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	cs, err := cc.NewStream(sctx, &serviceDesc.Streams[0], "/"+serviceName+"/Connect")
-	if err != nil {
-		return err
-	}
-	s := newStream(cs)
-	if err := s.tell("hello", Hello{Facts: w.facts, Report: w.report()}); err != nil {
-		return err
-	}
-	w.mu.Lock()
-	w.streams[addr] = s
-	w.mu.Unlock()
-	defer func() {
-		w.mu.Lock()
-		if w.streams[addr] == s {
-			delete(w.streams, addr)
-		}
-		w.mu.Unlock()
-	}()
-	w.log.Info("connected to controller", "controller", addr)
-	return s.serve(func(m *Msg) { w.handle(ctx, s, m) })
-}
-
-// handle answers a controller.
-func (w *Worker) handle(ctx context.Context, s *stream, m *Msg) {
-	switch m.Kind {
-	case "fit":
-		var fit Fit
-		if err := m.Decode(&fit); err == nil {
-			w.configure(ctx, fit)
-		}
-	case "create":
-		var req createReq
-		_ = m.Decode(&req)
-		resp, err := w.create(ctx, req.Class)
-		_ = s.answer(m, resp, err)
-	case "delete":
-		var req vmReq
-		_ = m.Decode(&req)
-		_ = s.answer(m, nil, w.delete(ctx, req.VM))
-	case "handover":
-		_ = s.answer(m, nil, nil)
-	case "run-github":
-		var req runGitHubReq
-		_ = m.Decode(&req)
-		_ = s.answer(m, nil, w.runGitHub(ctx, req))
-	case "run-gitlab":
-		var req runGitLabReq
-		_ = m.Decode(&req)
-		_ = s.answer(m, nil, w.runGitLab(ctx, req))
-	case "drain":
-		var d bool
-		_ = m.Decode(&d)
-		w.mu.Lock()
-		w.draining = d
-		w.mu.Unlock()
-		w.poke()
-		if m.ID != 0 {
-			_ = s.answer(m, nil, nil)
-		}
-	default:
-		if m.ID != 0 {
-			_ = s.answer(m, nil, fmt.Errorf("unknown request %q", m.Kind))
-		}
+		up, rev, backoff, warned = true, list.Rev, time.Second, false
+		w.reconcile(ctx, list.Assignments)
 	}
 }
 
@@ -264,12 +224,13 @@ func (w *Worker) handle(ctx context.Context, s *stream, m *Msg) {
 // first time, and runs the microVM check on each.
 func (w *Worker) configure(ctx context.Context, fit Fit) {
 	w.mu.Lock()
-	if w.backend != nil || w.building {
-		// Another controller's fit, or the same again.
+	if w.backend != nil || w.building || time.Since(w.builtAt) < 5*time.Minute {
+		// Another controller's fit, the same again, or too soon after a
+		// failed build.
 		w.mu.Unlock()
 		return
 	}
-	w.building = true
+	w.building, w.builtAt = true, time.Now()
 	w.mu.Unlock()
 	go func() {
 		err := w.build(ctx, fit)
@@ -465,9 +426,15 @@ func (w *Worker) report() Report {
 		r.Checks[k] = v
 	}
 	for id, v := range w.vms {
-		r.VMs = append(r.VMs, VMInfo{ID: id, Class: v.vm.Class, Since: v.since, Job: v.job, Took: v.took})
+		r.VMs = append(r.VMs, VMInfo{ID: id, Class: v.vm.Class, Since: v.since, Job: v.job, Took: v.took, Assignment: v.assignment})
 	}
 	slices.SortFunc(r.VMs, func(a, b VMInfo) int { return strings.Compare(a.ID, b.ID) })
+	for _, t := range w.tasks {
+		if !t.status.terminal() || time.Since(t.done) < reportDone {
+			r.Assignments = append(r.Assignments, t.status)
+		}
+	}
+	slices.SortFunc(r.Assignments, func(a, b AssignmentStatus) int { return strings.Compare(a.ID, b.ID) })
 	anyPassed := false
 	for _, ok := range w.passed {
 		anyPassed = anyPassed || ok
@@ -488,47 +455,215 @@ func (w *Worker) report() Report {
 	return r
 }
 
-// reportLoop sends the worker's report to every controller when it
-// changes and every 5 s: that is also its heartbeat.
+// reportLoop sends the worker's status to every controller when it
+// changes and every 5 s: that is also its heartbeat. The answers carry the
+// worker's classes and whether it is drained.
 func (w *Worker) reportLoop(ctx context.Context) {
 	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
 	for {
+		up := StatusUpdate{Facts: w.facts, Report: w.report()}
+		var wg sync.WaitGroup
+		for addr, cl := range w.clients {
+			wg.Go(func() {
+				rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+				defer cancel()
+				var resp StatusResponse
+				if err := cl.do(rctx, http.MethodPut, workerPath(w.cfg.ID, "/status"), up, &resp); err != nil {
+					return
+				}
+				w.configure(ctx, resp.Fit)
+				w.setDrain(addr, resp.Draining)
+			})
+		}
+		wg.Wait()
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 		case <-w.changed:
 		}
-		w.broadcast("report", w.report())
 	}
 }
 
-func (w *Worker) broadcast(kind string, body any) {
+// setDrain records whether a controller drains this worker: it is drained
+// while any does.
+func (w *Worker) setDrain(addr string, d bool) {
 	w.mu.Lock()
-	streams := make([]*stream, 0, len(w.streams))
-	for _, s := range w.streams {
-		streams = append(streams, s)
+	w.drainBy[addr] = d
+	was := w.draining
+	w.draining = false
+	for _, x := range w.drainBy {
+		w.draining = w.draining || x
+	}
+	changed := was != w.draining
+	w.mu.Unlock()
+	if changed {
+		w.log.Info("draining", "draining", !was)
+		w.poke()
+	}
+}
+
+// reconcile carries out a controller's list of this worker's assignments:
+// a new one boots its VM, a job set runs on it, a cancel stops it. One no
+// longer listed goes on: its controller may be gone.
+func (w *Worker) reconcile(ctx context.Context, list []Assignment) {
+	for _, a := range list {
+		w.mu.Lock()
+		t := w.tasks[a.ID]
+		if t == nil {
+			if a.Cancel {
+				w.mu.Unlock()
+				continue
+			}
+			t = &task{a: a, status: AssignmentStatus{ID: a.ID, Class: a.Class, Phase: PhasePending, Since: time.Now()}}
+			w.tasks[a.ID] = t
+			w.mu.Unlock()
+			w.poke()
+			go w.boot(ctx, t)
+			continue
+		}
+		t.a.Cancel = t.a.Cancel || a.Cancel
+		if t.a.Run == nil && a.Run != nil {
+			t.a.Run = a.Run
+		}
+		w.mu.Unlock()
+		w.advance(ctx, t)
+	}
+}
+
+// boot takes room for the task's VM and boots it.
+func (w *Worker) boot(ctx context.Context, t *task) {
+	vm, err := w.createVM(ctx, t.a.Class, false)
+	if err != nil {
+		reason := ""
+		if errors.Is(err, ErrNoRoom) {
+			reason = ReasonNoRoom
+		}
+		w.finish(t, reason, err)
+		return
+	}
+	w.mu.Lock()
+	if v := w.vms[vm.VM]; v != nil {
+		v.assignment = t.a.ID
+	}
+	t.status.Phase, t.status.VM, t.status.Instance, t.status.Class, t.status.Since = PhaseReady, vm.VM, vm.Instance, vm.Class, time.Now()
+	w.mu.Unlock()
+	w.poke()
+	w.advance(ctx, t)
+}
+
+// advance moves a task on: a cancel stops it, a job given runs.
+func (w *Worker) advance(ctx context.Context, t *task) {
+	w.mu.Lock()
+	phase, cancelled := t.status.Phase, t.a.Cancel
+	switch {
+	case t.status.terminal(), phase == PhasePending:
+		w.mu.Unlock() // boot advances it when the VM is up
+	case cancelled && phase == PhaseReady:
+		vm := t.status.VM
+		w.mu.Unlock()
+		_ = w.delete(context.WithoutCancel(ctx), vm)
+		w.finish(t, "", errors.New("cancelled by the controllers"))
+	case cancelled && phase == PhaseRunning:
+		cancel := t.cancel
+		w.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+	case phase == PhaseReady && t.a.Run != nil && !t.started:
+		t.started = true
+		w.mu.Unlock()
+		go w.run(ctx, t)
+	default:
+		w.mu.Unlock()
+	}
+}
+
+// finish ends a task: Succeeded with no error, else Failed.
+func (w *Worker) finish(t *task, reason string, err error) {
+	w.mu.Lock()
+	if t.status.terminal() {
+		w.mu.Unlock()
+		return
+	}
+	t.status.Phase, t.status.Since, t.done = PhaseSucceeded, time.Now(), time.Now()
+	if err != nil {
+		t.status.Phase, t.status.Reason, t.status.Err = PhaseFailed, reason, err.Error()
 	}
 	w.mu.Unlock()
-	for _, s := range streams {
-		_ = s.tell(kind, body)
-	}
+	w.poke()
 }
 
-// create takes room for a VM of class and boots it, or answers ErrNoRoom.
-func (w *Worker) create(ctx context.Context, class string) (createResp, error) {
-	return w.createVM(ctx, class, false)
+// run runs a task's job on its VM, detached from any controller: the
+// worker follows it and removes the VM when it ends.
+func (w *Worker) run(ctx context.Context, t *task) {
+	w.mu.Lock()
+	v := w.vms[t.status.VM]
+	if v == nil {
+		w.mu.Unlock()
+		w.finish(t, "", fmt.Errorf("its vm %s is gone", t.status.VM))
+		return
+	}
+	rctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	run := *t.a.Run
+	v.cancel, t.cancel = cancel, cancel
+	t.status.Phase, t.status.Since = PhaseRunning, time.Now()
+	w.mu.Unlock()
+	w.poke()
+	log := w.log.With("vm", v.vm.ID, "assignment", t.a.ID)
+	var err error
+	switch {
+	case run.GitHub != nil:
+		w.setJob(v, "github")
+		err = w.runGitHub(rctx, cancel, v, *run.GitHub, log, func(job string) {
+			w.mu.Lock()
+			v.took, t.status.Took = job, job
+			w.mu.Unlock()
+			w.poke()
+		})
+	case run.GitLab != nil && w.GitLab != nil:
+		w.setJob(v, "gitlab")
+		err = w.GitLab(rctx, v.vm, GitLabJob{Job: run.GitLab.Job, Runner: run.GitLab.Runner})
+	case run.GitLab != nil:
+		err = errors.New("this worker can't run GitLab jobs")
+	default:
+		err = errors.New("the assignment's job is empty")
+	}
+	if ctx.Err() != nil {
+		return // the worker is stopping; Run removes the VMs
+	}
+	w.mu.Lock()
+	if t.a.Cancel && err != nil {
+		err = fmt.Errorf("cancelled by the controllers: %w", err)
+	}
+	w.mu.Unlock()
+	log.Info("job done; removing its vm", "err", err)
+	_ = w.delete(context.WithoutCancel(ctx), v.vm.ID)
+	w.finish(t, "", err)
+}
+
+func (w *Worker) setJob(v *workerVM, job string) {
+	w.mu.Lock()
+	v.job = job
+	w.mu.Unlock()
+	w.poke()
+}
+
+// bootedVM is a VM createVM booted.
+type bootedVM struct {
+	VM, Class, Instance string
 }
 
 // createVM boots a VM of the class; check, for the microVM check, takes
 // room in a class not yet passed.
-func (w *Worker) createVM(ctx context.Context, class string, check bool) (createResp, error) {
+func (w *Worker) createVM(ctx context.Context, class string, check bool) (bootedVM, error) {
 	w.mu.Lock()
 	c, ok := w.classes[class]
 	if !ok {
 		w.mu.Unlock()
-		return createResp{}, fmt.Errorf("this worker has no class %q", class)
+		return bootedVM{}, fmt.Errorf("this worker has no class %q", class)
 	}
 	room := w.roomLocked()[class]
 	if check {
@@ -536,7 +671,7 @@ func (w *Worker) createVM(ctx context.Context, class string, check bool) (create
 	}
 	if room < 1 {
 		w.mu.Unlock()
-		return createResp{}, ErrNoRoom
+		return bootedVM{}, ErrNoRoom
 	}
 	size := fleet.Resources{CPUs: c.CPUs, MemoryMB: int64(c.Memory)}
 	w.used = addRes(w.used, size, 1)
@@ -555,22 +690,22 @@ func (w *Worker) createVM(ctx context.Context, class string, check bool) (create
 	if err != nil {
 		undo()
 		if errors.Is(err, fleet.ErrNoRoom) {
-			return createResp{}, ErrNoRoom
+			return bootedVM{}, ErrNoRoom
 		}
-		return createResp{}, err
+		return bootedVM{}, err
 	}
 	actx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	vm, err := r.Acquire(actx)
 	if err != nil {
 		undo()
-		return createResp{}, err
+		return bootedVM{}, err
 	}
 	w.mu.Lock()
 	w.vms[vm.ID] = &workerVM{vm: vm, size: size, since: time.Now()}
 	w.mu.Unlock()
 	w.poke()
-	return createResp{VM: vm.ID, Class: vm.Class, Instance: vm.Instance}, nil
+	return bootedVM{VM: vm.ID, Class: vm.Class, Instance: vm.Instance}, nil
 }
 
 func addRes(a, b fleet.Resources, n int) fleet.Resources {
@@ -600,103 +735,43 @@ func (w *Worker) delete(ctx context.Context, id string) error {
 	return err
 }
 
-// runGitHub starts a just-in-time runner on a VM, detached: the worker
-// follows it and removes the VM when it exits, whatever became of the
-// controller that placed it.
-func (w *Worker) runGitHub(ctx context.Context, req runGitHubReq) error {
-	w.mu.Lock()
-	v, ok := w.vms[req.VM]
-	if !ok {
-		w.mu.Unlock()
-		return fmt.Errorf("no vm %q", req.VM)
-	}
-	if v.job != "" {
-		w.mu.Unlock()
-		return fmt.Errorf("vm %q runs %s already", req.VM, v.job)
-	}
-	rctx, cancel := context.WithCancel(ctx)
-	v.job, v.cancel = "github", cancel
-	w.mu.Unlock()
-	w.poke()
-	log := w.log.With("vm", req.VM)
+// runGitHub runs a just-in-time runner on a VM until it exits. A runner
+// that takes no job is stopped, as the leader's idle watch would; the
+// leader may be gone.
+func (w *Worker) runGitHub(ctx context.Context, cancel context.CancelFunc, v *workerVM, req GitHubRun, log hclog.Logger, took func(string)) error {
 	start := github.SSHStart(req.RunnerVersion, req.CacheURL, log)
 	tookc := make(chan struct{})
 	go func() {
-		// A runner that takes no job is stopped, as the leader's idle watch
-		// would; the leader may be gone.
 		idle := req.IdleTimeout + time.Minute
 		if req.IdleTimeout == 0 {
 			idle = 11 * time.Minute
 		}
 		select {
 		case <-tookc:
-		case <-rctx.Done():
+		case <-ctx.Done():
 		case <-time.After(idle):
 			log.Warn("runner got no job; stopping it")
 			cancel()
 		}
 	}()
-	go func() {
-		var once sync.Once
-		err := start(rctx, github.VM{VM: source.VM{ID: v.vm.ID, Class: v.vm.Class, Instance: v.vm.Instance}, Conn: v.vm.Conn}, req.JITConfig, func(job string) {
-			once.Do(func() { close(tookc) })
-			w.mu.Lock()
-			v.took = job
-			w.mu.Unlock()
-			w.broadcast("event", Event{VM: req.VM, Kind: "took", Job: job})
-			w.poke()
-		})
-		ev := Event{VM: req.VM, Kind: "exit"}
-		if err != nil {
-			ev.Err = err.Error()
-		}
-		if ctx.Err() != nil {
-			return // the worker is stopping; Run removes the VMs
-		}
-		log.Info("runner exited; removing its vm", "err", err)
-		_ = w.delete(context.WithoutCancel(ctx), req.VM)
-		w.broadcast("event", ev)
-	}()
-	return nil
-}
-
-func (w *Worker) runGitLab(ctx context.Context, req runGitLabReq) error {
-	if w.GitLab == nil {
-		return errors.New("this worker can't run GitLab jobs")
-	}
-	w.mu.Lock()
-	v, ok := w.vms[req.VM]
-	if !ok {
-		w.mu.Unlock()
-		return fmt.Errorf("no vm %q", req.VM)
-	}
-	if v.job != "" {
-		w.mu.Unlock()
-		return fmt.Errorf("vm %q runs %s already", req.VM, v.job)
-	}
-	rctx, cancel := context.WithCancel(ctx)
-	v.job, v.cancel = "gitlab", cancel
-	w.mu.Unlock()
-	w.poke()
-	go func() {
-		err := w.GitLab(rctx, v.vm, GitLabJob{Job: req.Job, Runner: req.Runner})
-		ev := Event{VM: req.VM, Kind: "exit"}
-		if err != nil {
-			ev.Err = err.Error()
-		}
-		if ctx.Err() != nil {
-			return
-		}
-		w.log.Info("gitlab job done; removing its vm", "vm", req.VM, "err", err)
-		_ = w.delete(context.WithoutCancel(ctx), req.VM)
-		w.broadcast("event", ev)
-	}()
-	return nil
+	var once sync.Once
+	return start(ctx, github.VM{VM: source.VM{ID: v.vm.ID, Class: v.vm.Class, Instance: v.vm.Instance}, Conn: v.vm.Conn}, req.JITConfig, func(job string) {
+		once.Do(func() { close(tookc) })
+		took(job)
+	})
 }
 
 // idleVM is how long a VM may wait for the job it was made for; one a
 // leader made and then lost is removed after it.
 const idleVM = 15 * time.Minute
+
+// A finished assignment stays in the reports for reportDone, for the
+// controllers to see how it ended, and is remembered for forgetDone, so a
+// controller that lists it still is not obeyed twice.
+const (
+	reportDone = 2 * time.Minute
+	forgetDone = time.Hour
+)
 
 // sweepLoop removes VMs that never got their job.
 func (w *Worker) sweepLoop(ctx context.Context) {
@@ -709,10 +784,19 @@ func (w *Worker) sweepLoop(ctx context.Context) {
 		case <-t.C:
 		}
 		var idle []string
+		var orphans []*task
 		w.mu.Lock()
 		for id, v := range w.vms {
 			if v.job == "" && time.Since(v.since) > idleVM {
 				idle = append(idle, id)
+				if t := w.tasks[v.assignment]; t != nil {
+					orphans = append(orphans, t)
+				}
+			}
+		}
+		for id, t := range w.tasks {
+			if t.status.terminal() && time.Since(t.done) > forgetDone {
+				delete(w.tasks, id)
 			}
 		}
 		w.mu.Unlock()
@@ -720,11 +804,14 @@ func (w *Worker) sweepLoop(ctx context.Context) {
 			w.log.Warn("removing a vm no job came for", "vm", id, "after", idleVM.String())
 			_ = w.delete(ctx, id)
 		}
+		for _, t := range orphans {
+			w.finish(t, "", fmt.Errorf("no job came for its vm in %s", idleVM))
+		}
 	}
 }
 
 // renewLoop renews the worker's certificate after two thirds of its life,
-// over a controller's stream.
+// with any controller.
 func (w *Worker) renewLoop(ctx context.Context) {
 	t := time.NewTicker(time.Hour)
 	defer t.Stop()
@@ -749,29 +836,24 @@ func (w *Worker) renewIfDue(ctx context.Context) error {
 	if time.Since(c.NotBefore) < life*2/3 {
 		return nil
 	}
-	w.mu.Lock()
-	var s *stream
-	for _, x := range w.streams {
-		s = x
-		break
-	}
-	w.mu.Unlock()
-	if s == nil {
-		return errors.New("no controller to renew it with")
-	}
 	csr, err := w.pki.NewKey()
 	if err != nil {
 		return err
 	}
-	var resp renewResp
-	rctx, cancel := context.WithTimeout(ctx, time.Minute)
-	defer cancel()
-	if err := s.ask(rctx, "renew", renewReq{CSR: csr}, &resp); err != nil {
-		return err
+	err = errors.New("no controller to renew it with")
+	for _, cl := range w.clients {
+		var resp renewResp
+		rctx, cancel := context.WithTimeout(ctx, time.Minute)
+		err = cl.do(rctx, http.MethodPost, workerPath(w.cfg.ID, "/certificate"), renewReq{CSR: csr}, &resp)
+		cancel()
+		if err != nil {
+			continue
+		}
+		if err := w.pki.Install(resp.Cert, nil); err != nil {
+			return err
+		}
+		w.log.Info("certificate renewed", "by", cl.addr)
+		return nil
 	}
-	if err := w.pki.Install(resp.Cert, nil); err != nil {
-		return err
-	}
-	w.log.Info("certificate renewed")
-	return nil
+	return err
 }
