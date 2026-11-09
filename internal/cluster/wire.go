@@ -33,6 +33,29 @@ import (
 //	GET  /v1/artifacts/{name}             a binary a worker installs
 const apiVersion = "v1"
 
+// Protocol is the fleet protocol this build speaks: what the API's
+// messages mean, beyond their JSON, which only ever gains fields. A
+// controller takes workers and controllers that speak MinProtocol to
+// Protocol; it goes up when a change needs both ends to know it, and
+// MinProtocol when a controller can no longer serve the old one. Release
+// versions say nothing of this: a fleet runs mixed versions while it
+// upgrades.
+const (
+	Protocol    = 1
+	MinProtocol = 1
+)
+
+// protocolErr says why a machine speaking p is turned away, or nil.
+func protocolErr(p int) error {
+	switch {
+	case p < MinProtocol:
+		return fmt.Errorf("it speaks fleet protocol %d and the controllers %d to %d: upgrade it", p, MinProtocol, Protocol)
+	case p > Protocol:
+		return fmt.Errorf("it speaks fleet protocol %d and the controllers %d to %d: upgrade the controllers first", p, MinProtocol, Protocol)
+	}
+	return nil
+}
+
 // DefaultPort is the controllers' port.
 const DefaultPort = "9481"
 

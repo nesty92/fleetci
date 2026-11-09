@@ -75,7 +75,7 @@ func newTestFleet(t *testing.T) *testFleet {
 func (f *testFleet) report(t *testing.T, r Report) StatusResponse {
 	t.Helper()
 	var resp StatusResponse
-	up := StatusUpdate{Facts: Facts{Arch: "amd64", CPUs: 4, MemoryMB: 8192, DiskMB: 100 << 10}, Report: r}
+	up := StatusUpdate{Facts: Facts{Arch: "amd64", CPUs: 4, MemoryMB: 8192, DiskMB: 100 << 10, Protocol: Protocol}, Report: r}
 	if err := f.worker.do(context.Background(), http.MethodPut, workerPath("w1", "/status"), up, &resp); err != nil {
 		t.Fatal(err)
 	}
@@ -256,5 +256,32 @@ func TestMissingAssignment(t *testing.T) {
 	defer f.c.mu.Unlock()
 	if a.status.Phase != PhaseFailed {
 		t.Fatalf("still %s after forgetMissing", a.status.Phase)
+	}
+}
+
+// TestProtocol: a worker or controller speaking a protocol the controller
+// does not is turned away with 409, and gets no place in the fleet.
+func TestProtocol(t *testing.T) {
+	f := newTestFleet(t)
+	for _, p := range []int{MinProtocol - 1, Protocol + 1} {
+		up := StatusUpdate{Facts: Facts{Arch: "amd64", CPUs: 4, Version: "v9", Protocol: p}, Report: Report{State: Ready}}
+		err := f.worker.do(context.Background(), http.MethodPut, workerPath("w1", "/status"), up, nil)
+		var se *StatusError
+		if !errors.As(err, &se) || se.Code != http.StatusConflict || !strings.Contains(se.Msg, "upgrade") {
+			t.Fatalf("protocol %d: %v", p, err)
+		}
+		f.c.mu.Lock()
+		_, known := f.c.workers["w1"]
+		f.c.mu.Unlock()
+		if known {
+			t.Fatalf("protocol %d: the worker was taken in", p)
+		}
+		if _, err := f.c.join(JoinRequest{Token: "x.y", ID: "w9", Facts: Facts{Protocol: p}}); err == nil || !strings.Contains(err.Error(), "protocol") {
+			t.Fatalf("protocol %d: join: %v", p, err)
+		}
+	}
+	f.report(t, Report{State: Ready})
+	if st := f.c.Status(); st.Versions["ctl-1"] != "test" {
+		t.Fatalf("versions %v", st.Versions)
 	}
 }

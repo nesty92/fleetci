@@ -20,6 +20,8 @@ type Facts struct {
 	// Only, when set, are the only classes it runs.
 	Only    []string `json:"only,omitempty"`
 	Version string   `json:"version"`
+	// Protocol is the fleet protocol it speaks.
+	Protocol int `json:"protocol"`
 	// Hosts are a joining controller's addresses, for its certificate.
 	Hosts []string `json:"hosts,omitempty"`
 }
@@ -207,6 +209,8 @@ type Artifact struct {
 // pingMsg is a controller's heartbeat to another, and the answer.
 type pingMsg struct {
 	ID        string                 `json:"id"`
+	Version   string                 `json:"version,omitempty"`
+	Protocol  int                    `json:"protocol,omitempty"`
 	Leader    string                 `json:"leader"`
 	Advertise []string               `json:"advertise,omitempty"`
 	Revoked   map[string]Revoked     `json:"revoked,omitempty"`
@@ -240,7 +244,9 @@ type Status struct {
 	Controller  string               `json:"controller"`
 	Leader      string               `json:"leader"`
 	Controllers map[string]time.Time `json:"controllers"`
-	Workers     []WorkerStatus       `json:"workers"`
+	// Versions are the controllers' fleetci versions.
+	Versions map[string]string `json:"versions,omitempty"`
+	Workers  []WorkerStatus    `json:"workers"`
 }
 
 // WorkerStatus is a worker as a controller sees it.

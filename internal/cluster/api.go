@@ -81,6 +81,12 @@ func (c *Controller) handlePing(w http.ResponseWriter, r *http.Request, id Ident
 		writeErr(w, http.StatusForbidden, errors.New("the ping names another controller"))
 		return
 	}
+	if err := protocolErr(p.Protocol); err != nil {
+		// Not a peer: it takes no part in the election here, nor this
+		// controller in its.
+		writeErr(w, http.StatusConflict, fmt.Errorf("controller %s (fleetci %s): %w", p.ID, p.Version, err))
+		return
+	}
 	c.merge(p)
 	writeJSON(w, http.StatusOK, c.pingMsg())
 }
@@ -128,6 +134,12 @@ func (c *Controller) handleWorkerStatus(w http.ResponseWriter, r *http.Request, 
 	var up StatusUpdate
 	if err := readJSON(r, &up); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := protocolErr(up.Facts.Protocol); err != nil {
+		// Turned away until it is upgraded: it gets no assignments, and
+		// shows as Unreachable.
+		writeErr(w, http.StatusConflict, fmt.Errorf("worker %s (fleetci %s): %w", id.ID, up.Facts.Version, err))
 		return
 	}
 	fit := c.fit(up.Facts)

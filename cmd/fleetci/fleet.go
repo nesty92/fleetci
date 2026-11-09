@@ -97,7 +97,7 @@ func fleetSources(ctx context.Context, c *cluster.Controller) error {
 	var runs []func() error
 	if cfg.GitHub != nil {
 		gcfg := *cfg.GitHub
-		gcfg.NameByJob = true // one runner per job across leaders: GitHub refuses the second
+		gcfg.NameByJob = true    // one runner per job across leaders: GitHub refuses the second
 		gcfg.HandOverIdle = true // a leader stepping down leaves its runners to their workers
 		d, err := github.New(ctx, gcfg, capacity, c.GitHubStart(gcfg), log.Named("github"))
 		if err != nil {
@@ -293,6 +293,9 @@ func printStatus(out io.Writer, st cluster.Status) {
 	var ctl []string
 	for _, id := range slices.Sorted(maps.Keys(st.Controllers)) {
 		s := id
+		if v := st.Versions[id]; v != "" {
+			s += " " + v
+		}
 		if id == st.Leader {
 			s += " (leader)"
 		}
@@ -303,7 +306,7 @@ func printStatus(out io.Writer, st cluster.Status) {
 	}
 	fmt.Fprintf(out, "controllers  %s\n\n", strings.Join(ctl, ", "))
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "WORKER\tSTATE\tBUDGET\tUSED\tCLASSES (room)\tVMS\tNOTE")
+	fmt.Fprintln(tw, "WORKER\tVERSION\tSTATE\tBUDGET\tUSED\tCLASSES (room)\tVMS\tNOTE")
 	for _, w := range st.Workers {
 		var cls []string
 		for _, c := range w.Fit.Classes {
@@ -318,6 +321,10 @@ func printStatus(out io.Writer, st cluster.Status) {
 			jobs = append(jobs, strings.TrimSpace(v.Class+" "+j))
 		}
 		note := w.Report.Reason
+		if v := st.Versions[st.Controller]; v != "" && w.Facts.Version != "" && w.Facts.Version != v {
+			note = strings.TrimSpace("not on the controller's " + v + "; " + note)
+			note = strings.TrimSuffix(note, ";")
+		}
 		if len(w.Fit.Refused) > 0 {
 			var r []string
 			for _, n := range slices.Sorted(maps.Keys(w.Fit.Refused)) {
@@ -325,7 +332,7 @@ func printStatus(out io.Writer, st cluster.Status) {
 			}
 			note = strings.TrimSpace(note + " " + strings.Join(r, "; "))
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%d cpu %s\t%d cpu %s\t%s\t%s\t%s\n", w.ID, w.State,
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%d cpu %s\t%d cpu %s\t%s\t%s\t%s\n", w.ID, w.Facts.Version, w.State,
 			w.Facts.CPUs, fleet.Size(w.Facts.MemoryMB), w.Report.UsedCPUs, fleet.Size(w.Report.UsedMemory),
 			strings.Join(cls, " "), strings.Join(jobs, ", "), note)
 	}

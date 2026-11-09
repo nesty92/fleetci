@@ -122,7 +122,7 @@ func NewWorker(cfg *WorkerConfig, version string, log hclog.Logger) (*Worker, er
 
 // GatherFacts reads what this machine has.
 func GatherFacts(cfg *WorkerConfig, version string) (Facts, error) {
-	f := Facts{Arch: runtime.GOARCH, Labels: cfg.Labels, Only: cfg.Classes, Version: version}
+	f := Facts{Arch: runtime.GOARCH, Labels: cfg.Labels, Only: cfg.Classes, Version: version, Protocol: Protocol}
 	// The budget as fleetci serve works it out, for a class on the host.
 	probe := map[string]fleet.Class{"probe": {Plugin: "fleeting-plugin-fleetingd", CPUs: 1, Memory: 1, MaxInstances: 1}}
 	b, on, err := fleet.HostBudget(cfg.Host, probe)
@@ -477,6 +477,7 @@ func (w *Worker) report() Report {
 func (w *Worker) reportLoop(ctx context.Context) {
 	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
+	var turnedAway sync.Map // controller address → logged its refusal
 	for {
 		up := StatusUpdate{Facts: w.facts, Report: w.report()}
 		var wg sync.WaitGroup
@@ -487,7 +488,16 @@ func (w *Worker) reportLoop(ctx context.Context) {
 				var resp StatusResponse
 				if err := cl.do(rctx, http.MethodPut, workerPath(w.cfg.ID, "/status"), up, &resp); err != nil {
 					w.setDrain(addr, nil) // what it said no longer counts
+					var se *StatusError
+					if errors.As(err, &se) && se.Code == http.StatusConflict {
+						if _, logged := turnedAway.LoadOrStore(addr, true); !logged {
+							w.log.Error("the controller turns this worker away", "controller", addr, "error", se.Msg)
+						}
+					}
 					return
+				}
+				if _, was := turnedAway.LoadAndDelete(addr); was {
+					w.log.Info("the controller takes this worker again", "controller", addr)
 				}
 				w.configure(ctx, resp.Fit)
 				w.setDrain(addr, &resp.Draining)

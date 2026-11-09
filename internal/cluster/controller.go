@@ -57,6 +57,7 @@ type peerState struct {
 	seen      time.Time
 	leader    string
 	advertise []string
+	version   string
 }
 
 type workerConn struct {
@@ -296,7 +297,7 @@ func (c *Controller) pingLoop(ctx context.Context) {
 func (c *Controller) pingMsg() pingMsg {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return pingMsg{ID: c.ID(), Leader: c.leader, Advertise: c.cfg.Controller.Advertise,
+	return pingMsg{ID: c.ID(), Version: c.version, Protocol: Protocol, Leader: c.leader, Advertise: c.cfg.Controller.Advertise,
 		Revoked: maps.Clone(c.revoked), Tokens: maps.Clone(c.tokens), Drains: maps.Clone(c.drains)}
 }
 
@@ -308,7 +309,7 @@ func (c *Controller) merge(p pingMsg) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.peers[p.ID] = peerState{seen: time.Now(), leader: p.Leader, advertise: p.Advertise}
+	c.peers[p.ID] = peerState{seen: time.Now(), leader: p.Leader, advertise: p.Advertise, version: p.Version}
 	changed := false
 	for k, r := range p.Revoked {
 		if _, ok := c.revoked[k]; !ok {
@@ -466,6 +467,9 @@ func (c *Controller) join(req JoinRequest) (JoinResponse, error) {
 	if !ok || req.ID == "" || strings.ContainsAny(req.ID, "/ ") {
 		return JoinResponse{}, errors.New("a join needs a token and a machine id without / or spaces")
 	}
+	if err := protocolErr(req.Facts.Protocol); err != nil {
+		return JoinResponse{}, fmt.Errorf("fleetci %s can't join: %w", req.Facts.Version, err)
+	}
 	c.mu.Lock()
 	t, ok := c.tokens[tid]
 	c.mu.Unlock()
@@ -582,9 +586,11 @@ func (c *Controller) changed() <-chan struct{} {
 func (c *Controller) Status() Status {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	st := Status{Controller: c.ID(), Leader: c.leader, Controllers: map[string]time.Time{c.ID(): time.Now()}}
+	st := Status{Controller: c.ID(), Leader: c.leader, Controllers: map[string]time.Time{c.ID(): time.Now()},
+		Versions: map[string]string{c.ID(): c.version}}
 	for id, p := range c.peers {
 		st.Controllers[id] = p.seen
+		st.Versions[id] = p.version
 	}
 	for _, id := range slices.Sorted(maps.Keys(c.workers)) {
 		w := c.workers[id]
