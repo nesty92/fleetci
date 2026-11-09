@@ -15,7 +15,7 @@ dedicated server (OVH, Hetzner, …; KVM)
 ```
 
 Needs fleetci 0.4.0 or later (`overflow`) and the fleetingd fork
-[v0.4.0-fleetci.2](https://github.com/nesty92/fleeting-plugin-fleetingd/releases/tag/v0.4.0-fleetci.2)
+[v0.4.0-fleetci.3](https://github.com/nesty92/fleeting-plugin-fleetingd/releases/tag/v0.4.0-fleetci.3)
 or later. The AWS plugin is tried with fleetci; the Google Cloud and Azure
 plugins are not yet, so try them on a test class first.
 
@@ -56,7 +56,7 @@ curl -fsSL -o /usr/local/bin/cloud-hypervisor \
 chmod 755 /usr/local/bin/cloud-hypervisor
 
 # fleetingd, our fork
-curl -fsSL https://github.com/nesty92/fleeting-plugin-fleetingd/releases/download/v0.4.0-fleetci.2/fleeting-plugin-fleetingd_linux_amd64.tar.gz \
+curl -fsSL https://github.com/nesty92/fleeting-plugin-fleetingd/releases/download/v0.4.0-fleetci.3/fleeting-plugin-fleetingd_linux_amd64.tar.gz \
   | tar -xz -C /usr/local/bin fleeting-plugin-fleetingd
 
 # fleetci and its gitlab-runner plugin
