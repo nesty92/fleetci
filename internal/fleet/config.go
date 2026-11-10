@@ -65,6 +65,12 @@ type Class struct {
 
 	// Reclaim is how the class learns that the cloud wants a VM back.
 	Reclaim Reclaim `json:"reclaim" toml:"reclaim"`
+
+	// RegistryMirror is a registry that mirrors Docker Hub, such as a
+	// pull-through cache next to the VMs, as its root URL
+	// (http://10.0.1.5:5000). Each VM's Docker and buildx's BuildKit pull
+	// Docker Hub's images through it.
+	RegistryMirror string `json:"registry_mirror,omitempty" toml:"registry_mirror"`
 }
 
 // Reclaim watches a class's VMs for the cloud's notice that it is taking
@@ -211,6 +217,11 @@ func (c Class) validate(name string) error {
 	}
 	if c.CPUs < 0 || c.Memory < 0 {
 		return fmt.Errorf("class %q: cpus and memory can't be negative", name)
+	}
+	if c.RegistryMirror != "" {
+		if _, err := CheckMirror(c.RegistryMirror); err != nil {
+			return fmt.Errorf("class %q: %w", name, err)
+		}
 	}
 	if c.IdleCount < 0 || c.IdleCount > c.MaxInstances {
 		return fmt.Errorf("class %q: idle_count must be between 0 and max_instances", name)

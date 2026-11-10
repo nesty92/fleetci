@@ -173,6 +173,35 @@ Install `zstd` on every image. The cache key includes the compression,
 so a VM without zstd (gzip) misses what a VM with it saved.
 `hack/cache/up.sh` runs the server on RustFS for [hack/local](hack/local).
 
+### Docker Hub mirror
+
+Each fresh VM pulls its images from Docker Hub, whose anonymous limit
+counts per IP, so every VM behind one NAT shares it. With a class's
+`registry_mirror` set to a registry that mirrors Docker Hub, the VM's
+Docker and buildx's BuildKit (the `docker-container` builders
+`docker/setup-buildx-action` makes) pull Docker Hub's images through it.
+No workflow changes, for GitHub and GitLab jobs alike:
+
+```toml
+[classes.small]
+registry_mirror = "http://10.0.1.5:5000"
+```
+
+fleetci adds the mirror to `/etc/docker/daemon.json` (the VM's user needs
+`sudo` and the image `python3` when the file exists), signals dockerd to
+reload it, and writes `~/.docker/buildx/buildkitd.default.toml` when there
+is none. A VM without Docker is left alone, and one where this fails pulls
+from Docker Hub as before.
+
+The mirror is a registry's root URL. [distribution's
+registry](https://distribution.github.io/distribution/recipes/mirror/) as a
+pull-through cache, on the cache's S3 bucket, is one; `hack/cache/up.sh`
+runs it next to the Actions cache. Put it in the VMs' network (on AWS their
+VPC), so pulls stay off the NAT. Docker only mirrors Docker Hub this way:
+images from ghcr.io or quay.io come from there. ECR's pull-through cache
+serves Docker Hub under a prefix (`.../docker-hub/library/node`), which
+Docker's mirror setting can't take.
+
 ## Install
 
 On AWS, [terraform-aws-gitlab-runner-autoscaler](https://github.com/nesty92/terraform-aws-gitlab-runner-autoscaler)
