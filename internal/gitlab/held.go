@@ -59,8 +59,14 @@ func (h held) put(j heldJob, log hclog.Logger) {
 	if err == nil {
 		err = os.MkdirAll(string(h), 0o700)
 	}
+	// Written whole or not at all: a kill mid-write leaves a .tmp, which
+	// the next start removes, never a note cut short.
+	tmp := h.path(j.ID) + ".tmp"
 	if err == nil {
-		err = os.WriteFile(h.path(j.ID), b, 0o600)
+		err = os.WriteFile(tmp, b, 0o600)
+	}
+	if err == nil {
+		err = os.Rename(tmp, h.path(j.ID))
 	}
 	if err != nil {
 		log.Warn("noting a job taken; a controller restarted before it has a VM can't place it", "err", err)
@@ -99,6 +105,10 @@ func LoadHeld(dir string, log hclog.Logger) *Held {
 	}
 	for _, e := range ents {
 		p := filepath.Join(dir, e.Name())
+		if filepath.Ext(p) != ".json" {
+			_ = os.Remove(p) // a note its writer was killed writing
+			continue
+		}
 		b, err := os.ReadFile(p)
 		var j heldJob
 		if err == nil {

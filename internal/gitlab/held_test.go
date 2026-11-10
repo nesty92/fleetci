@@ -57,7 +57,13 @@ func TestHeldFailAfter(t *testing.T) {
 	h, log := held(dir), hclog.NewNullLogger()
 	h.put(heldJob{ID: 1, Token: "job-token-1", URL: srv.URL}, log)
 	h.put(heldJob{ID: 3, Token: "job-token-3", URL: srv.URL}, log)
+	if err := os.WriteFile(h.path(5)+".tmp", []byte(`{"id":5,"tok`), 0o600); err != nil { // cut short by a kill
+		t.Fatal(err)
+	}
 	hs := LoadHeld(dir, log)
+	if _, err := os.Stat(h.path(5) + ".tmp"); err == nil {
+		t.Error("a note cut short was left")
+	}
 	h.put(heldJob{ID: 2, Token: "job-token-2", URL: srv.URL}, log) // the new leader's
 	hs.FailAfter(context.Background(), 0)
 
