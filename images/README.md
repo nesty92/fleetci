@@ -54,6 +54,9 @@ vm_image_url = "https://github.com/nesty92/fleetci/releases/download/vm-image-gi
 A class serving both GitHub and GitLab jobs takes `github`: it has all
 `gitlab` has.
 
+For everything `ubuntu-latest` has, build GitHub's own image from its
+recipe: [runner-images](runner-images/README.md).
+
 fleetingd reads the list on each start and downloads an image it doesn't
 have yet; running VMs keep theirs. To stay on one build, use its own
 release's URL. Leave `runner_version` unset and fleetci runs the runner the
