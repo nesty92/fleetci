@@ -146,6 +146,41 @@ func TestTaskForgotten(t *testing.T) {
 
 // TestReconcileTakesRoom: no report has a new assignment's task without
 // the room its VM takes, or the controllers place another VM in that room.
+// A VM taskscaler keeps idle, which no task holds, takes its room from the
+// other classes, and is in the report; its own class may still place one,
+// as the next VM of the class is that one.
+func TestIdleVMsTakeRoom(t *testing.T) {
+	const small, big = "1vcpu-2gb", "2vcpu-2gb"
+	w := &Worker{log: hclog.NewNullLogger(), backend: &fleet.Backend{},
+		budget: fleet.Resources{CPUs: 3, MemoryMB: 6144},
+		classes: map[string]Class{
+			small: {Name: small, ClassSpec: ClassSpec{CPUs: 1, Memory: 2048}},
+			big:   {Name: big, ClassSpec: ClassSpec{CPUs: 2, Memory: 2048}},
+		},
+		fclasses: map[string]fleet.Class{small: {MaxInstances: 3}, big: {MaxInstances: 1}},
+		passed:   map[string]bool{small: true, big: true}, checks: map[string]string{}, count: map[string]int{},
+		vms: map[string]*workerVM{}, tasks: map[string]*task{}, changed: make(chan struct{}, 1)}
+	if r := w.report(); r.Room[small] != 3 || r.Room[big] != 1 || r.Idle != nil {
+		t.Fatalf("nothing idle: room %v, idle %v", r.Room, r.Idle)
+	}
+	w.idle = func(class string) int {
+		if class == small {
+			return 2
+		}
+		return 0
+	}
+	r := w.report()
+	if r.Room[big] != 0 {
+		t.Errorf("room for %d %s beside 2 idle %s, in 3 cpus", r.Room[big], big, small)
+	}
+	if r.Room[small] != 3 {
+		t.Errorf("room for %d %s, with its own 2 idle in a budget for 3", r.Room[small], small)
+	}
+	if r.Idle[small] != 2 {
+		t.Errorf("idle %v", r.Idle)
+	}
+}
+
 func TestReconcileTakesRoom(t *testing.T) {
 	const class = "1vcpu-2gb"
 	worker := func() *Worker {

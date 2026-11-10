@@ -506,6 +506,30 @@ func (b *Backend) Died(class string) int64 {
 	return n
 }
 
+// Idle is how many of a class's VMs are booted and hold no job: ones
+// taskscaler started for a wait that ended before they were ready, and
+// keeps until the class's idle_time. They take room on the host all the
+// same.
+func (b *Backend) Idle(class string) int {
+	n := 0
+	for p := range b.allPools() {
+		if p.name != class {
+			continue
+		}
+		select {
+		case <-p.ready:
+		default:
+			continue
+		}
+		if p.ts == nil {
+			continue
+		}
+		available, _ := p.ts.Capacity()
+		n += available / p.class.capacity()
+	}
+	return n
+}
+
 func (b *Backend) Has(class string) bool {
 	_, ok := b.pools[class]
 	return ok

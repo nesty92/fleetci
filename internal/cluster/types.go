@@ -56,11 +56,14 @@ type Report struct {
 	State  string `json:"state"`
 	Reason string `json:"reason,omitempty"`
 	// Room is how many more VMs of each class fit now.
-	Room       map[string]int    `json:"room"`
-	UsedCPUs   int               `json:"used_cpus"`
-	UsedMemory int64             `json:"used_memory_mb"`
-	VMs        []VMInfo          `json:"vms,omitempty"`
-	Checks     map[string]string `json:"checks,omitempty"` // class → "ok …" or the failure
+	Room       map[string]int `json:"room"`
+	UsedCPUs   int            `json:"used_cpus"`
+	UsedMemory int64          `json:"used_memory_mb"`
+	VMs        []VMInfo       `json:"vms,omitempty"`
+	// Idle is how many VMs of each class are booted with no job and no
+	// assignment, until their idle_time: none, mostly.
+	Idle   map[string]int    `json:"idle,omitempty"`
+	Checks map[string]string `json:"checks,omitempty"` // class → "ok …" or the failure
 	// Assignments are the assignments it has, and those it finished
 	// lately.
 	Assignments []AssignmentStatus `json:"assignments,omitempty"`

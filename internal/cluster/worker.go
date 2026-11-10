@@ -45,6 +45,7 @@ type Worker struct {
 	classes  map[string]Class
 	fclasses map[string]fleet.Class
 	backend  *fleet.Backend
+	idle     func(class string) int // in tests, in place of backend.Idle
 	building bool
 	builtAt  time.Time // the last build's start
 	checks   map[string]string
@@ -388,9 +389,12 @@ func (w *Worker) fleetClass(c Class, egress, images, subnet string) (fleet.Class
 		PluginConfig: fleet.RawConfig(raw),
 		Connector:    fleet.Connector{Username: "ubuntu", Timeout: fleet.Duration(5 * time.Minute)},
 		MaxInstances: max(n, 1),
-		Host:         &yes,
-		CPUs:         c.CPUs,
-		Memory:       c.Memory,
+		// Each VM takes one job, so one idle is never worth keeping: it
+		// holds room the budget can't give a job.
+		IdleTime: fleet.Duration(idleSpare),
+		Host:     &yes,
+		CPUs:     c.CPUs,
+		Memory:   c.Memory,
 	}, nil
 }
 
@@ -460,15 +464,44 @@ func (w *Worker) fitsLocked(name string) int {
 		return 0
 	}
 	free := fleet.Resources{CPUs: w.budget.CPUs - w.used.CPUs, MemoryMB: w.budget.MemoryMB - w.used.MemoryMB}
+	// The idle VMs of the other classes hold their room too; this class's
+	// own are within its max_instances, and the next of its VMs is one.
+	for other, oc := range w.classes {
+		if other != name {
+			k := w.idleVMs(other)
+			free.CPUs -= k * oc.CPUs
+			free.MemoryMB -= int64(k) * int64(oc.Memory)
+		}
+	}
 	n := min(free.CPUs/c.CPUs, int(free.MemoryMB/int64(c.Memory)))
 	n = min(n, w.fclasses[name].MaxInstances-w.count[name])
 	return max(n, 0)
+}
+
+// idleVMs is how many of a class's VMs are booted with no job, which no
+// task of the worker's holds.
+func (w *Worker) idleVMs(class string) int {
+	if w.idle != nil {
+		return w.idle(class)
+	}
+	if w.backend == nil {
+		return 0
+	}
+	return w.backend.Idle(class)
 }
 
 func (w *Worker) report() Report {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	r := Report{Room: w.roomLocked(), UsedCPUs: w.used.CPUs, UsedMemory: w.used.MemoryMB, Checks: map[string]string{}}
+	for name := range w.classes {
+		if k := w.idleVMs(name); k > 0 {
+			if r.Idle == nil {
+				r.Idle = map[string]int{}
+			}
+			r.Idle[name] = k
+		}
+	}
 	for k, v := range w.checks {
 		r.Checks[k] = v
 	}
@@ -892,6 +925,10 @@ func (w *Worker) runGitHub(ctx context.Context, cancel context.CancelFunc, v *wo
 // idleVM is how long a VM may wait for the job it was made for; one a
 // leader made and then lost is removed after it.
 const idleVM = 15 * time.Minute
+
+// idleSpare is how long a worker's taskscaler keeps a VM no job took: one
+// it booted for a wait that ended before the VM was ready.
+const idleSpare = time.Minute
 
 // A finished assignment stays in the reports while a controller lists it,
 // and for reportDone after, longer than a watch takes to answer; it is

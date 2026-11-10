@@ -416,6 +416,9 @@ func printStatus(out io.Writer, st cluster.Status) {
 			}
 			notes = append(notes, s)
 		}
+		for _, c := range slices.Sorted(maps.Keys(w.Report.Idle)) {
+			notes = append(notes, fmt.Sprintf("%d %s idle", w.Report.Idle[c], c))
+		}
 		for _, n := range slices.Sorted(maps.Keys(w.Fit.Refused)) {
 			notes = append(notes, "no "+n+": "+w.Fit.Refused[n])
 		}
