@@ -382,21 +382,25 @@ def main():
         findings.append(f'{sum(not x["done"] for x in js)} jobs had not ended 45 minutes after the calm')
     r.log(f'{len(js)} jobs, {sum(x["done"] for x in js)} over')
     time.sleep(30)  # the workers remove the last VMs
-    left, idle = {}, {}
-    reported = {w['id']: len((w.get('report') or {}).get('vms') or []) for w in (status() or {}).get('workers') or []}
-    for m, n in reported.items():
-        if n:
+    left, idle, unknown = {}, {}, {}
+    reports = {w['id']: w.get('report') or {} for w in (status() or {}).get('workers') or []}
+    for m, rep in reports.items():
+        if n := len(rep.get('vms') or []):
             left[m] = n
+        if n := sum((rep.get('idle') or {}).values()):
+            idle[m] = n
     for m in WORKERS:
+        rep = reports.get(m, {})
         n = len(ssh(m, 'pidof cloud-hypervisor || true').stdout.split())
-        if n > reported.get(m, 0):
-            # A VM the worker's report doesn't list: fleetingd's taskscaler
-            # keeps an idle instance at times, and removes it after its
-            # idle_time, within max_instances, the worker's budget.
-            idle[m] = n - reported.get(m, 0)
+        if n > len(rep.get('vms') or []) + sum((rep.get('idle') or {}).values()):
+            unknown[m] = n
     if left:
         findings.append(f'VMs left once the jobs were over: {left}')
-    notes = [f'cloud-hypervisor processes no report lists, idle taskscaler instances: {idle}'] if idle else []
+    if unknown:
+        findings.append(f'cloud-hypervisor processes no report accounts for: {unknown}')
+    # Spares taskscaler booted for a wait that ended first: the worker
+    # counts their room, and removes them after a minute idle.
+    notes = [f'idle VMs, counted in the reports: {idle}'] if idle else []
     r.stop.set()
     if r.over_budget:
         findings.append(f'past the budget: {r.over_budget[:5]}')
