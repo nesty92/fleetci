@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.1](https://github.com/nesty92/fleetci/compare/v0.7.0...v0.7.1) (2026-11-10)
+
+
+### Bug Fixes
+
+* **release:** find the binaries through GoReleaser's artifacts.json ([#33](https://github.com/nesty92/fleetci/issues/33)) ([fcff245](https://github.com/nesty92/fleetci/commit/fcff24533aff4a3d3a303819fff1cacb9450415c))
+
 ## [0.7.0](https://github.com/nesty92/fleetci/compare/v0.6.0...v0.7.0) (2026-11-10)
 
 
