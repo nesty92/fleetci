@@ -30,6 +30,7 @@ import argparse
 import json
 import os
 import random
+import re
 import subprocess
 import sys
 import threading
@@ -56,7 +57,14 @@ KINDS = {
     'lag': (2, 'worker', (20, 90), "add delay and loss to the worker's network"),
     'ctl-kill': (1, 'ctl', None, 'kill -9 the controller; systemd starts it again'),
     'ctl-stop': (1, 'ctl', (10, 40), 'SIGSTOP the controller, then SIGCONT'),
+    'ctl-kill-holding': (1, 'ctl', None, 'freeze the workers, start a pipeline, kill -9 the controller once it '
+                                         'holds a GitLab job no worker has, then thaw them'),
 }
+# The kinds the plans of before ctl-kill-holding drew from: --faults with
+# these replays their seeds.
+KINDS_V1 = 'vm-kill,worker-kill,worker-stop,worker-cut,worker-offline,lag,ctl-kill,ctl-stop'
+HOLD_WAIT = 60  # how long ctl-kill-holding waits for the controller to take a GitLab job
+HELD_PASSED = 15 * 60  # how soon after the kill a job it held must have passed
 AFTERMATH = 90  # how long after an instant fault a job's failure is put down to it
 # A job of the playground's takes a minute or two; one that lasts this long
 # was left hanging, whatever faults it saw.
@@ -94,7 +102,13 @@ def make_plan(seed, minutes, kinds):
         key = e.get('target', 'vm')
         if busy.get(key, 0) > t:
             continue  # one fault at a time on each target
-        busy[key] = t + e.get('for', 0)
+        if kind == 'ctl-kill-holding':
+            # It freezes every worker for up to HOLD_WAIT.
+            if any(busy.get(w, 0) > t for w in WORKERS):
+                continue
+            for w in WORKERS:
+                busy[w] = t + HOLD_WAIT
+        busy[key] = t + e.get('for', HOLD_WAIT if kind == 'ctl-kill-holding' else 0)
         events.append(e)
     events.sort(key=lambda e: e['at'])
     return {'version': 1, 'seed': seed, 'minutes': minutes, 'faults': kinds, 'events': events}
@@ -173,6 +187,8 @@ def start(e):
         w, pid = all_[min(int(e['pick'] * len(all_)), len(all_) - 1)]
         r = ssh(w, f'kill -9 {pid}')
         return f'killed microVM pid {pid} on {w} ({len(all_)} up)' + ('' if r.returncode == 0 else f': {r.stderr.strip()}')
+    if k == 'ctl-kill-holding':
+        return kill_holding()
     if k in ('worker-kill', 'ctl-kill'):
         r = signal(m, 'KILL')
         return f'killed {unit(m)} on {m}' + ('' if r.returncode == 0 else f': {r.stderr.strip()}')
@@ -187,6 +203,43 @@ def start(e):
         netem(m, DELAY[m] + e['delay_ms'], e['delay_ms'] // 4, e['loss_pct'])
         return f'{m}: +{e["delay_ms"]}ms, {e["loss_pct"]}% loss for {e["for"]}s'
     raise ValueError(k)
+
+
+# The GitLab jobs ctl-kill-holding's kills held, and when: (job id, epoch).
+HELD = []
+
+
+def kill_holding():
+    """With the workers frozen, a GitLab job the controller takes waits for
+    a VM: the controller is killed while it holds one, which its next start
+    should place, and run, as if nothing happened."""
+    t0 = time.time()
+    # The controller's current process, whose jobs not placed are held,
+    # whenever it took them.
+    inv = ssh('ctl', 'systemctl show -p InvocationID --value fleetci-controller').stdout.strip()
+    for w in WORKERS:
+        signal(w, 'STOP')
+    try:
+        r = run(['glab', 'ci', 'run', '-R', GL_REPO, '-b', GL_REF])
+        if r.returncode != 0:
+            return f'no pipeline to hold: {r.stderr.strip()[:120]}'
+        taken = []
+        while not taken and time.time() < t0 + HOLD_WAIT:
+            time.sleep(2)
+            log = ssh('ctl', f'journalctl _SYSTEMD_INVOCATION_ID={inv} -o cat --no-pager').stdout
+            taken = sorted(set(re.findall(r'Checking for jobs\.\.\. received.*? job=(\d+)', log)))
+            placed = set(re.findall(r'job placed: job=(\d+)', log))
+            taken = [j for j in taken if j not in placed]
+        if not taken:
+            return f'the controller took no GitLab job in {HOLD_WAIT}s; nothing killed'
+        r = signal('ctl', 'KILL')
+        now = time.time()
+        HELD.extend((j, now) for j in taken)
+        return f'killed fleetci-controller on ctl holding GitLab jobs {", ".join(taken)}' + (
+            '' if r.returncode == 0 else f': {r.stderr.strip()}')
+    finally:
+        for w in WORKERS:
+            signal(w, 'CONT')
 
 
 def heal(e):
@@ -335,10 +388,11 @@ def main():
             sys.exit(f'no such fault: {", ".join(bad)}; there are {", ".join(KINDS)}')
         seed = a.seed if a.seed is not None else int.from_bytes(os.urandom(4), 'big')
         plan = make_plan(seed, a.minutes, kinds)
-    replay = f'python3 -I hack/lab/chaos.py --seed {plan["seed"]} --minutes {plan["minutes"]:g}' + (
-        '' if plan['faults'] == list(KINDS) else f' --faults {",".join(plan["faults"])}')
+    # --faults always: a kind added later changes what a seed draws.
+    replay = (f'python3 -I hack/lab/chaos.py --seed {plan["seed"]} --minutes {plan["minutes"]:g}'
+              f' --faults {",".join(plan["faults"])}')
     for e in plan['events']:
-        print(f'{e["at"]:>7.1f}  {e["kind"]:<14} ' + ' '.join(f'{k}={v}' for k, v in e.items() if k not in ('at', 'kind')))
+        print(f'{e["at"]:>7.1f}  {e["kind"]:<17} ' + ' '.join(f'{k}={v}' for k, v in e.items() if k not in ('at', 'kind')))
     print(f'replay: {replay} <out dir>')
     if a.dry_run:
         return
@@ -419,6 +473,17 @@ def main():
             unexplained.append(j)
     if unexplained:
         findings.append(f'{len(unexplained)} jobs failed with no fault around them')
+    # Each GitLab job a killed controller held is placed by its next start,
+    # and passes, as no job failed by the kill can be retried but by hand.
+    by_id = {str(j['id']): j for j in js if j['forge'] == 'gitlab'}
+    for jid, killed in HELD:
+        j = by_id.get(jid)
+        end = ts(j['ended']) if j else None
+        if not j or j['state'] != 'success' or end - killed > HELD_PASSED:
+            findings.append(f'GitLab job {jid}, held by the killed controller, did not pass within {HELD_PASSED // 60} minutes: '
+                            + (f'{j["state"]}, ended {j["ended"]}' if j else 'not found'))
+    if HELD:
+        r.log('held jobs: ' + ', '.join(f'{jid} {by_id.get(jid, {}).get("state")}' for jid, _ in HELD))
     hung = [j for j in js if ts(j['started']) and (ts(j['ended']) or time.time()) - ts(j['started']) > HUNG]
     if hung:
         findings.append(f'{len(hung)} jobs lasted over {HUNG // 60} minutes, left hanging: '

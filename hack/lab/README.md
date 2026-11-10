@@ -44,8 +44,11 @@ unit that comes back when killed, and ends when the workers are Ready.
 `up.sh` brought up. It starts rounds of GitHub and GitLab jobs and, in
 between, faults: a microVM killed, a worker or the controller killed or
 stopped, a worker cut from the controller or from everything, a slow and
-lossy network. A seed makes the whole plan up front, so a run is random and
-can be run again:
+lossy network, or the controller killed while it holds a GitLab job no
+worker has yet (`ctl-kill-holding`: the workers are frozen until it does).
+A seed makes the whole plan up front, so a run is random and can be run
+again with the `--faults` the run printed; `--faults ctl-kill-holding`
+alone tries just that:
 
     python3 -I hack/lab/chaos.py --minutes 10 $DATA/chaos-1
     python3 -I hack/lab/chaos.py --seed 42 --dry-run x     # just the plan
@@ -54,8 +57,10 @@ can be run again:
 It heals everything after the last fault, or when stopped, waits for the
 workers and the jobs, then checks that the workers are Ready, every job
 ended, no worker went past its budget, no VM was left behind and every
-failed job had a fault around it. The plan, what was done when, the
-fleet's status every 3 s, the jobs, the logs and `report.md` go in the
+failed job had a fault around it, none ran over 15 minutes, and each
+GitLab job a killed controller held passed: its next start places it.
+The plan, what was done when, the fleet's status every 3 s, the jobs, the
+logs and `report.md` go in the
 directory; it exits 1 when a check failed.
 
 `rewind.sh` takes the machines back to before `fleetci init`, keeping the
