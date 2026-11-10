@@ -56,8 +56,9 @@ type Worker struct {
 	drainBy  map[string]bool // controller address → whether it drains this worker
 	reach    []string
 	github   bool
-	clients  map[string]*client // controller address → its client
-	tasks    map[string]*task   // assignment id → what this worker made of it
+	clients  map[string]*client   // controller address → its client
+	tasks    map[string]*task     // assignment id → what this worker made of it
+	lists    map[string]time.Time // controller address → when it last listed this worker's assignments
 	changed  chan struct{}
 	update   *updater
 	started  time.Time          // when this process started
@@ -75,6 +76,15 @@ type task struct {
 	cancel  context.CancelFunc // the job's, once it runs
 	done    time.Time
 	listed  time.Time // when a controller last listed it
+	by      string    // the address of the controller that last listed it
+}
+
+// forgotten says whether a task can't get its job any more: its VM is up
+// with none, and the controller that made it has gone on listing this
+// worker's assignments without it, as one that restarted and lost them
+// does. One whose controller is unreachable is not: it sends no lists.
+func (t *task) forgotten(lastList time.Time) bool {
+	return t.status.Phase == PhaseReady && t.a.Run == nil && t.by != "" && lastList.Sub(t.listed) > forgetMissing
 }
 
 // reportable says whether a task goes in the reports: until it is over,
@@ -248,7 +258,7 @@ func (w *Worker) watchLoop(ctx context.Context, cl *client) {
 			w.log.Info("watching the controller's assignments", "controller", cl.addr)
 		}
 		up, rev, backoff, warned = true, list.Rev, time.Second, false
-		w.reconcile(ctx, list.Assignments)
+		w.reconcile(ctx, cl.addr, list.Assignments)
 	}
 }
 
@@ -568,19 +578,25 @@ func (w *Worker) setDrain(addr string, d *bool) {
 // reconcile carries out a controller's list of this worker's assignments:
 // a new one boots its VM, a job set runs on it, a cancel stops it. One no
 // longer listed goes on: its controller may be gone.
-func (w *Worker) reconcile(ctx context.Context, list []Assignment) {
+func (w *Worker) reconcile(ctx context.Context, by string, list []Assignment) {
+	w.mu.Lock()
+	if w.lists == nil {
+		w.lists = map[string]time.Time{}
+	}
+	w.lists[by] = time.Now()
+	w.mu.Unlock()
 	for _, a := range list {
 		w.mu.Lock()
 		t := w.tasks[a.ID]
 		if t != nil {
-			t.listed = time.Now()
+			t.listed, t.by = time.Now(), by
 		}
 		if t == nil {
 			if a.Cancel {
 				w.mu.Unlock()
 				continue
 			}
-			t = &task{a: a, status: AssignmentStatus{ID: a.ID, Class: a.Class, Phase: PhasePending, Since: time.Now(), Created: a.Created}, listed: time.Now()}
+			t = &task{a: a, status: AssignmentStatus{ID: a.ID, Class: a.Class, Phase: PhasePending, Since: time.Now(), Created: a.Created}, listed: time.Now(), by: by}
 			w.tasks[a.ID] = t
 			// The room is taken with the task, so no report has one
 			// without the other: the controllers would place another VM
@@ -896,8 +912,8 @@ func (w *Worker) sweepLoop(ctx context.Context) {
 			return
 		case <-t.C:
 		}
-		var idle []string
-		var orphans []*task
+		var idle, forgotten []string
+		var orphans, unlisted []*task
 		w.mu.Lock()
 		for id, v := range w.vms {
 			if v.job == "" && time.Since(v.since) > idleVM {
@@ -905,6 +921,12 @@ func (w *Worker) sweepLoop(ctx context.Context) {
 				if t := w.tasks[v.assignment]; t != nil {
 					orphans = append(orphans, t)
 				}
+			}
+		}
+		for _, t := range w.tasks {
+			if t.forgotten(w.lists[t.by]) && !slices.Contains(idle, t.status.VM) {
+				forgotten = append(forgotten, t.status.VM)
+				unlisted = append(unlisted, t)
 			}
 		}
 		for id, t := range w.tasks {
@@ -919,6 +941,11 @@ func (w *Worker) sweepLoop(ctx context.Context) {
 		}
 		for _, t := range orphans {
 			w.finish(t, "", fmt.Errorf("no job came for its vm in %s", idleVM))
+		}
+		for i, t := range unlisted {
+			w.log.Warn("removing a vm its controller no longer lists, before any job", "vm", forgotten[i], "assignment", t.a.ID, "controller", t.by)
+			_ = w.delete(ctx, forgotten[i])
+			w.finish(t, "", errors.New("its controller no longer lists it, and gave it no job: did the controller restart?"))
 		}
 	}
 }

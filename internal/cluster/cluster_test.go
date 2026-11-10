@@ -123,6 +123,27 @@ func TestTaskReportable(t *testing.T) {
 	}
 }
 
+func TestTaskForgotten(t *testing.T) {
+	now := time.Now()
+	ready := func(run *RunSpec) *task {
+		return &task{a: Assignment{Run: run}, status: AssignmentStatus{Phase: PhaseReady}, listed: now.Add(-5 * time.Minute), by: "ctl"}
+	}
+	if !ready(nil).forgotten(now) {
+		t.Error("a VM with no job its controller has stopped listing is kept")
+	}
+	if ready(nil).forgotten(now.Add(-5 * time.Minute)) {
+		t.Error("a VM whose controller sent no list since is dropped, as in a partition")
+	}
+	if ready(&RunSpec{}).forgotten(now) {
+		t.Error("a VM with its job is dropped: the worker sees a job through")
+	}
+	booting := ready(nil)
+	booting.status.Phase = PhasePending
+	if booting.forgotten(now) {
+		t.Error("a VM still booting is dropped")
+	}
+}
+
 // TestReconcileTakesRoom: no report has a new assignment's task without
 // the room its VM takes, or the controllers place another VM in that room.
 func TestReconcileTakesRoom(t *testing.T) {
@@ -138,7 +159,7 @@ func TestReconcileTakesRoom(t *testing.T) {
 	// The zero backend fails each boot, which gives its room back: a
 	// report comes before or after that, never in between.
 	w := worker()
-	w.reconcile(context.Background(), []Assignment{{ID: "a1", Class: class}, {ID: "a2", Class: class}})
+	w.reconcile(context.Background(), "ctl", []Assignment{{ID: "a1", Class: class}, {ID: "a2", Class: class}})
 	r := w.report()
 	pending := 0
 	for _, s := range r.Assignments {
@@ -152,7 +173,7 @@ func TestReconcileTakesRoom(t *testing.T) {
 	// One past the budget is refused there and then.
 	w = worker()
 	w.used, w.count[class] = w.budget, 2
-	w.reconcile(context.Background(), []Assignment{{ID: "a3", Class: class}})
+	w.reconcile(context.Background(), "ctl", []Assignment{{ID: "a3", Class: class}})
 	if st := w.tasks["a3"].status; st.Phase != PhaseFailed || st.Reason != ReasonNoRoom {
 		t.Fatalf("one past the budget: %+v", st)
 	}
