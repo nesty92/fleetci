@@ -7,12 +7,18 @@ ap +160 ms), as if it were somewhere else. The host needs KVM, nested.
 
     docker build -t fleetci-lab hack/lab
     docker run -d --init --name fleetci-lab --hostname lab \
+      --memory 16g --memory-swap 16g \
       --device /dev/kvm --device /dev/net/tun --cap-add NET_ADMIN \
       --sysctl net.ipv4.ip_forward=1 \
       -v $DATA:/data -v $IMAGES:/base:ro \
       -v $CLOUD_HYPERVISOR:/usr/local/bin/cloud-hypervisor:ro \
       -v $PWD/hack/lab:/lab:ro fleetci-lab sleep infinity
     docker exec fleetci-lab /lab/reset.sh
+
+The machines take up to 15 GB (the controller 1.5, each worker 4.5); the
+memory limit makes the kernel kill a machine in the lab, not the host's
+other programs, when the host runs short. Put a lower one on a smaller
+host.
 
 `$DATA` holds `bin/` (fleetci, fleeting-plugin-fleetingd,
 cloud-hypervisor) and `secrets/` (`github-app.pem`, `github-app.id`,
