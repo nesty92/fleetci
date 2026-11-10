@@ -3,7 +3,7 @@
 
     python3 -I record.py <out dir>
 
-The lab (fleetci-lab from hack/lab on feat/fleet, after reset.sh or
+The lab (fleetci-lab from hack/lab, after reset.sh or
 rewind.sh, then this directory's tools.sh) is four machines that have
 nothing running yet; the workers have no fleetci. This types the demo into
 a terminal per pane, each a tmux session on a private server, and saves
