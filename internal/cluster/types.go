@@ -330,5 +330,8 @@ type (
 	tokenResp struct {
 		Token       string   `json:"token"`
 		Controllers []string `json:"controllers"`
+		// Pin is the answering controller's key, the first of
+		// Controllers, as curl's --pinnedpubkey takes it.
+		Pin string `json:"pin,omitempty"`
 	}
 )

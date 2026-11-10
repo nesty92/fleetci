@@ -487,26 +487,36 @@ func (c *Controller) CreateToken(role string, ttl time.Duration) (string, error)
 	return t.String(), nil
 }
 
+// checkToken finds a token (<id>.<secret>) that is good for the machine id:
+// unexpired, and unused or used by that machine. With id "", unused only.
+func (c *Controller) checkToken(token, id string) (string, TokenRecord, error) {
+	tid, secret, ok := strings.Cut(token, ".")
+	c.mu.Lock()
+	t, found := c.tokens[tid]
+	c.mu.Unlock()
+	switch {
+	case !ok || !found || !SecretMatches(secret, t.Hash):
+		return "", TokenRecord{}, errors.New("unknown token")
+	case time.Now().After(t.Expires):
+		return "", TokenRecord{}, errors.New("the token expired; make another with fleetci token create")
+	case t.Used != "" && t.Used != id:
+		return "", TokenRecord{}, fmt.Errorf("the token was used by %s already", t.Used)
+	}
+	return tid, t, nil
+}
+
 // join signs a joining machine's CSR with its token, once the classes say
 // it has something to run.
 func (c *Controller) join(req JoinRequest) (JoinResponse, error) {
-	tid, secret, ok := strings.Cut(req.Token, ".")
-	if !ok || req.ID == "" || strings.ContainsAny(req.ID, "/ ") {
+	if req.ID == "" || strings.ContainsAny(req.ID, "/ ") {
 		return JoinResponse{}, errors.New("a join needs a token and a machine id without / or spaces")
 	}
 	if err := protocolErr(req.Facts.Protocol); err != nil {
 		return JoinResponse{}, fmt.Errorf("fleetci %s can't join: %w", req.Facts.Version, err)
 	}
-	c.mu.Lock()
-	t, ok := c.tokens[tid]
-	c.mu.Unlock()
-	switch {
-	case !ok || !SecretMatches(secret, t.Hash):
-		return JoinResponse{}, errors.New("unknown token")
-	case time.Now().After(t.Expires):
-		return JoinResponse{}, errors.New("the token expired; make another with fleetci token create")
-	case t.Used != "" && t.Used != req.ID:
-		return JoinResponse{}, fmt.Errorf("the token was used by %s already", t.Used)
+	tid, t, err := c.checkToken(req.Token, req.ID)
+	if err != nil {
+		return JoinResponse{}, err
 	}
 	resp := JoinResponse{Role: t.Role, Manifest: c.manifest(req.Facts, t.Role)}
 	if t.Role == RoleWorker && len(resp.Manifest.Fit.Classes) == 0 {
@@ -516,7 +526,6 @@ func (c *Controller) join(req JoinRequest) (JoinResponse, error) {
 		}
 		return JoinResponse{}, errors.New("no class fits this machine: " + strings.Join(why, "; "))
 	}
-	var err error
 	if resp.Cert, err = c.pki.Sign(req.CSR, t.Role, req.ID, req.Facts.Hosts); err != nil {
 		return JoinResponse{}, err
 	}

@@ -14,6 +14,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base32"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
@@ -247,6 +248,17 @@ func IdentityOf(c *x509.Certificate) (Identity, error) {
 func CAHash(ca *x509.Certificate) string {
 	sum := sha256.Sum256(ca.RawSubjectPublicKeyInfo)
 	return hex.EncodeToString(sum[:])
+}
+
+// Pin is this machine's public key as curl's --pinnedpubkey takes it:
+// sha256// and the base64 of its SubjectPublicKeyInfo's hash.
+func (p PKI) Pin() (string, error) {
+	c, err := p.Cert()
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(c.RawSubjectPublicKeyInfo)
+	return "sha256//" + base64.StdEncoding.EncodeToString(sum[:]), nil
 }
 
 // Token is a join token: fci1.<CA hash>.<id>.<secret>. The id finds the

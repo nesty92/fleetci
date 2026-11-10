@@ -45,6 +45,9 @@ func (c *Controller) handler() http.Handler {
 	mux.HandleFunc("GET /v1/workers/{id}/assignments", c.auth(RoleWorker, c.handleAssignments))
 	mux.HandleFunc("POST /v1/workers/{id}/certificate", c.auth(RoleWorker, c.handleRenew))
 	mux.HandleFunc("GET /v1/artifacts/{name}", c.auth("", c.handleArtifact))
+	// A new machine's way in, before it has a certificate: install.go.
+	mux.HandleFunc("GET /v1/install.sh", c.handleInstallScript)
+	mux.HandleFunc("GET /v1/install/fleetci", c.handleInstallBinary)
 	return mux
 }
 
@@ -116,7 +119,12 @@ func (c *Controller) handleToken(w http.ResponseWriter, r *http.Request, _ Ident
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, tokenResp{Token: t, Controllers: c.controllers()})
+	pin, err := c.pki.Pin()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, tokenResp{Token: t, Controllers: c.controllers(), Pin: pin})
 }
 
 // workerOp drains, undrains, revokes or verifies a worker.
