@@ -582,9 +582,26 @@ func (w *Worker) reconcile(ctx context.Context, list []Assignment) {
 			}
 			t = &task{a: a, status: AssignmentStatus{ID: a.ID, Class: a.Class, Phase: PhasePending, Since: time.Now(), Created: a.Created}, listed: time.Now()}
 			w.tasks[a.ID] = t
+			// The room is taken with the task, so no report has one
+			// without the other: the controllers would place another VM
+			// in the room this one is about to take.
+			s, err := w.takeLocked(a.Class, false)
+			if err != nil {
+				reason := ""
+				if errors.Is(err, ErrNoRoom) {
+					reason = ReasonNoRoom
+				}
+				t.status.Phase, t.status.Reason, t.status.Err = PhaseFailed, reason, err.Error()
+				t.status.Since, t.done = time.Now(), time.Now()
+				t.status.Ended = t.status.Since
+				w.mu.Unlock()
+				w.log.Info("assignment refused", "assignment", a.ID, "class", a.Class, "err", err)
+				w.poke()
+				continue
+			}
 			w.mu.Unlock()
 			w.poke()
-			go w.boot(ctx, t)
+			go w.boot(ctx, t, s)
 			continue
 		}
 		t.a.Cancel = t.a.Cancel || a.Cancel
@@ -596,9 +613,9 @@ func (w *Worker) reconcile(ctx context.Context, list []Assignment) {
 	}
 }
 
-// boot takes room for the task's VM and boots it.
-func (w *Worker) boot(ctx context.Context, t *task) {
-	vm, err := w.createVM(ctx, t.a.Class, false)
+// boot boots the task's VM in the room taken for it.
+func (w *Worker) boot(ctx context.Context, t *task, s slot) {
+	vm, err := w.bootSlot(ctx, s)
 	if err != nil {
 		reason := ""
 		if errors.Is(err, ErrNoRoom) {
@@ -729,37 +746,59 @@ type bootedVM struct {
 	VM, Class, Instance string
 }
 
-// createVM boots a VM of the class; check, for the microVM check, takes
-// room in a class not yet passed.
-func (w *Worker) createVM(ctx context.Context, class string, check bool) (bootedVM, error) {
-	w.mu.Lock()
+// slot is the room taken for one VM of a class, until the VM is booted in
+// it or the boot fails.
+type slot struct {
+	class string
+	size  fleet.Resources
+}
+
+// takeLocked takes room for one VM of the class; check, for the microVM
+// check, takes it in a class not yet passed.
+func (w *Worker) takeLocked(class string, check bool) (slot, error) {
 	c, ok := w.classes[class]
 	if !ok {
-		w.mu.Unlock()
-		return bootedVM{}, fmt.Errorf("this worker has no class %q", class)
+		return slot{}, fmt.Errorf("this worker has no class %q", class)
 	}
 	room := w.roomLocked()[class]
 	if check {
 		room = w.fitsLocked(class)
 	}
 	if room < 1 {
-		w.mu.Unlock()
-		return bootedVM{}, ErrNoRoom
+		return slot{}, ErrNoRoom
 	}
-	size := fleet.Resources{CPUs: c.CPUs, MemoryMB: int64(c.Memory)}
-	w.used = addRes(w.used, size, 1)
+	s := slot{class: class, size: fleet.Resources{CPUs: c.CPUs, MemoryMB: int64(c.Memory)}}
+	w.used = addRes(w.used, s.size, 1)
 	w.count[class]++
+	return s, nil
+}
+
+// createVM takes room for a VM of the class and boots it.
+func (w *Worker) createVM(ctx context.Context, class string, check bool) (bootedVM, error) {
+	w.mu.Lock()
+	s, err := w.takeLocked(class, check)
+	w.mu.Unlock()
+	if err != nil {
+		return bootedVM{}, err
+	}
+	w.poke()
+	return w.bootSlot(ctx, s)
+}
+
+// bootSlot boots a VM in the room taken for it, and gives the room back
+// when it can't.
+func (w *Worker) bootSlot(ctx context.Context, s slot) (bootedVM, error) {
+	w.mu.Lock()
 	b := w.backend
 	w.mu.Unlock()
 	undo := func() {
 		w.mu.Lock()
-		w.used = addRes(w.used, size, -1)
-		w.count[class]--
+		w.used = addRes(w.used, s.size, -1)
+		w.count[s.class]--
 		w.mu.Unlock()
 		w.poke()
 	}
-	w.poke()
-	r, err := b.Reserve(class)
+	r, err := b.Reserve(s.class)
 	if err != nil {
 		undo()
 		if errors.Is(err, fleet.ErrNoRoom) {
@@ -775,7 +814,7 @@ func (w *Worker) createVM(ctx context.Context, class string, check bool) (booted
 		return bootedVM{}, err
 	}
 	w.mu.Lock()
-	w.vms[vm.ID] = &workerVM{vm: vm, size: size, since: time.Now()}
+	w.vms[vm.ID] = &workerVM{vm: vm, size: s.size, since: time.Now()}
 	w.mu.Unlock()
 	w.poke()
 	return bootedVM{VM: vm.ID, Class: vm.Class, Instance: vm.Instance}, nil

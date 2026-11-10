@@ -1,9 +1,14 @@
 package cluster
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/hashicorp/go-hclog"
+
+	"github.com/nesty92/fleetci/internal/fleet"
 )
 
 func TestFitClasses(t *testing.T) {
@@ -115,5 +120,40 @@ func TestTaskReportable(t *testing.T) {
 	done.listed = now.Add(-time.Hour)
 	if done.reportable(now) {
 		t.Error("a finished task nobody lists is still reported")
+	}
+}
+
+// TestReconcileTakesRoom: no report has a new assignment's task without
+// the room its VM takes, or the controllers place another VM in that room.
+func TestReconcileTakesRoom(t *testing.T) {
+	const class = "1vcpu-2gb"
+	worker := func() *Worker {
+		return &Worker{log: hclog.NewNullLogger(), backend: &fleet.Backend{},
+			budget:   fleet.Resources{CPUs: 2, MemoryMB: 4096},
+			classes:  map[string]Class{class: {Name: class, ClassSpec: ClassSpec{CPUs: 1, Memory: 2048}}},
+			fclasses: map[string]fleet.Class{class: {MaxInstances: 2}},
+			passed:   map[string]bool{class: true}, checks: map[string]string{}, count: map[string]int{},
+			vms: map[string]*workerVM{}, tasks: map[string]*task{}, changed: make(chan struct{}, 1)}
+	}
+	// The zero backend fails each boot, which gives its room back: a
+	// report comes before or after that, never in between.
+	w := worker()
+	w.reconcile(context.Background(), []Assignment{{ID: "a1", Class: class}, {ID: "a2", Class: class}})
+	r := w.report()
+	pending := 0
+	for _, s := range r.Assignments {
+		if s.Phase == PhasePending {
+			pending++
+		}
+	}
+	if pending+r.Room[class] > 2 {
+		t.Fatalf("%d pending and room for %d more, in a budget for 2", pending, r.Room[class])
+	}
+	// One past the budget is refused there and then.
+	w = worker()
+	w.used, w.count[class] = w.budget, 2
+	w.reconcile(context.Background(), []Assignment{{ID: "a3", Class: class}})
+	if st := w.tasks["a3"].status; st.Phase != PhaseFailed || st.Reason != ReasonNoRoom {
+		t.Fatalf("one past the budget: %+v", st)
 	}
 }

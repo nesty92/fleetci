@@ -140,7 +140,11 @@ func (f fleetCapacity) Create(ctx context.Context, class string) (source.VM, err
 				if ctx.Err() != nil {
 					return source.VM{}, ctx.Err()
 				}
-				if !errors.Is(err, ErrNoRoom) {
+				if errors.Is(err, ErrNoRoom) {
+					// Its report had room it no longer has: say so, a
+					// placement that keeps missing is worth seeing.
+					c.log.Info("the worker had no room after all", "worker", w.id, "class", cl)
+				} else {
 					c.log.Warn("creating a vm on a worker", "worker", w.id, "class", cl, "err", err)
 				}
 			}
