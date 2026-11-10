@@ -4,3 +4,4 @@ hack/aws/*.tfstate*
 hack/aws/terraform.tfvars
 hack/aws/tfplan
 dist/
+__pycache__/
