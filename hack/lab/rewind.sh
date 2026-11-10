@@ -6,7 +6,8 @@
 set -eu
 S=/data/ssh.sh
 stop='kill $(pidof fleetci) 2>/dev/null || true; end=$(($(date +%s)+30)); while pidof fleetci >/dev/null; do [ $(date +%s) -lt $end ] || { kill -9 $(pidof fleetci); }; sleep 1; done; kill $(pidof cloud-hypervisor) 2>/dev/null || true'
-unit='systemctl disable --now fleetci-worker 2>/dev/null; rm -f /etc/systemd/system/fleetci-worker.service; systemctl daemon-reload'
+unit='systemctl disable --now fleetci-worker 2>/dev/null; rm -f /etc/systemd/system/fleetci-worker.service; systemctl daemon-reload
+      journalctl -q --rotate; journalctl -q --vacuum-time=1s'
 for m in eu us ap; do $S $m "$unit" & done; wait
 for m in ctl eu us ap; do $S $m "$stop" & done; wait
 $S ctl 'rm -rf /etc/fleetci/pki /var/lib/fleetci /root/token* /root/.bash_history'
