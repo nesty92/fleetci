@@ -115,6 +115,7 @@ type fakeGitHub struct {
 	removed  []int64
 	nextID   int64
 	jobsJSON string
+	conflict bool // every runner name is registered already
 }
 
 func (g *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -145,6 +146,11 @@ func (g *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			g.t.Errorf("jitconfig body %+v, %v", body, err)
 		}
 		g.mu.Lock()
+		if g.conflict {
+			g.mu.Unlock()
+			http.Error(w, `{"message":"Already exists - A runner with the name already exists."}`, http.StatusConflict)
+			return
+		}
 		g.nextID++
 		id := g.nextID
 		g.jit[body.Name] = body.Labels
@@ -413,6 +419,46 @@ func TestDispatcherStopsWaitingForAJobTakenElsewhere(t *testing.T) {
 		d.mu.Lock()
 		defer d.mu.Unlock()
 		return d.taken[1] != nil && !d.taken[1].running
+	})
+	cancel()
+	<-done
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if len(backend.created) != 0 {
+		t.Errorf("%d vms created", len(backend.created))
+	}
+}
+
+// With runners named after their jobs, a name another controller's runner
+// holds already ends the wait for a VM at once: the job is that runner's,
+// and a VM booted for it would only be deleted.
+func TestDispatcherTakesNoVMForAJobAnotherControllerHolds(t *testing.T) {
+	gh := &fakeGitHub{t: t, jit: map[string][]string{}, conflict: true, jobsJSON: `{"jobs":[
+	  {"id":1,"name":"build","status":"queued","labels":["fleetci"]}
+	]}`}
+	srv := httptest.NewServer(gh)
+	defer srv.Close()
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	_ = os.WriteFile(tokenFile, []byte("test-token"), 0o600)
+	// Create waits until its context ends, as for a VM still booting.
+	backend := &fakeBackend{defaultClass: "2vcpu-1gb", full: true}
+	start := func(context.Context, VM, string, func(string)) error {
+		t.Error("a runner started")
+		return nil
+	}
+	d, err := New(t.Context(), Config{Repos: []string{"o/r"}, TokenFile: tokenFile, PollInterval: fleet.Duration(5 * time.Millisecond), APIURL: srv.URL, NameByJob: true},
+		backend, start, hclog.NewNullLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { d.Run(ctx); close(done) }()
+	waitFor(t, func() bool {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		a := d.taken[1]
+		return a != nil && !a.running && !a.retryAt.IsZero()
 	})
 	cancel()
 	<-done

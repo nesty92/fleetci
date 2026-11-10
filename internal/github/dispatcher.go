@@ -834,9 +834,16 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 	}
 	d.mu.Unlock()
 	name := d.runnerName(class, j.ID, try)
-	regc := make(chan registration, 1)
-	go func() { regc <- d.register(ctx, scope, name, labels) }()
 	wctx, unwait := context.WithCancel(ctx)
+	regc := make(chan registration, 1)
+	go func() {
+		r := d.register(ctx, scope, name, labels)
+		if d.cfg.NameByJob && conflict(r.err) {
+			// Another controller's runner holds the job: no VM for it.
+			unwait()
+		}
+		regc <- r
+	}()
 	d.mu.Lock()
 	if a := d.taken[j.ID]; a != nil {
 		a.unwait = unwait
