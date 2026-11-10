@@ -58,6 +58,9 @@ KINDS = {
     'ctl-stop': (1, 'ctl', (10, 40), 'SIGSTOP the controller, then SIGCONT'),
 }
 AFTERMATH = 90  # how long after an instant fault a job's failure is put down to it
+# A job of the playground's takes a minute or two; one that lasts this long
+# was left hanging, whatever faults it saw.
+HUNG = 15 * 60
 
 
 def make_plan(seed, minutes, kinds):
@@ -416,6 +419,10 @@ def main():
             unexplained.append(j)
     if unexplained:
         findings.append(f'{len(unexplained)} jobs failed with no fault around them')
+    hung = [j for j in js if ts(j['started']) and (ts(j['ended']) or time.time()) - ts(j['started']) > HUNG]
+    if hung:
+        findings.append(f'{len(hung)} jobs lasted over {HUNG // 60} minutes, left hanging: '
+                        + ', '.join(f'{j["forge"]} {j["name"]}' for j in hung))
 
     for m in ('ctl',) + WORKERS:
         log = ssh(m, f'journalctl -u {unit(m)} --since "{since.replace("T", " ").rstrip("Z")} UTC" -o short-iso --no-pager',
