@@ -170,8 +170,14 @@ def unit(m):
     return 'fleetci-controller' if m == 'ctl' else 'fleetci-worker'
 
 
+# When the controller was killed, in epoch seconds.
+KILLS = []
+
+
 def signal(m, sig):
     # The main process only: a worker's VMs are in its unit too.
+    if m == 'ctl' and sig == 'KILL':
+        KILLS.append(time.time())
     return ssh(m, f'systemctl kill --kill-whom=main -s {sig} {unit(m)}')
 
 
@@ -308,6 +314,36 @@ def jobs(since):
     return sorted(out, key=lambda j: (j['started'] or '', j['name']))
 
 
+# A job GitLab gave out as the controller was killed, whose answer never
+# reached it: the controller can't know of it, GitLab only drops it at its
+# timeout, an hour on. Such a job is cancelled, and noted: (job, name).
+LOST = []
+IN_FLIGHT = 5  # how long before a kill a job GitLab gave out can be lost
+
+
+def lost_in_flight(js, since):
+    """Cancels the GitLab jobs running since a kill that no controller ever
+    received."""
+    near = [j for j in js if j['forge'] == 'gitlab' and not j['done'] and ts(j['started'])
+            and any(-IN_FLIGHT <= ts(j['started']) - k <= 1 for k in KILLS)]
+    if not near:
+        return
+    log = ssh('ctl', f'journalctl -u fleetci-controller --since "{since.replace("T", " ").rstrip("Z")} UTC" -o cat --no-pager',
+              timeout=60).stdout
+    seen = set(re.findall(r'Checking for jobs\.\.\. received.*? job=(\d+)', log))
+    for j in near:
+        if str(j['id']) not in seen and str(j['id']) not in {i for i, _ in LOST}:
+            for q in ('', '?force=true'):  # GitLab forces only a job already canceling
+                run(['glab', 'api', '-X', 'POST', f'projects/{GL_PROJECT}/jobs/{j["id"]}/cancel{q}'])
+            LOST.append((str(j['id']), j['name']))
+
+
+def over(since):
+    js = jobs(since)
+    lost_in_flight(js, since)
+    return js and all(x['done'] for x in js) and js
+
+
 # The run.
 
 class Run:
@@ -433,7 +469,7 @@ def main():
     r.log('three workers Ready' if ok else 'workers not Ready 10 minutes after the calm')
     if not ok:
         findings.append('the workers were not all Ready 10 minutes after the calm')
-    js = wait_for('every job over', lambda: (j := jobs(since)) and all(x['done'] for x in j) and j, 45 * 60, every=20)
+    js = wait_for('every job over', lambda: over(since), 45 * 60, every=20)
     if not js:
         js = jobs(since)
         findings.append(f'{sum(not x["done"] for x in js)} jobs had not ended 45 minutes after the calm')
@@ -458,6 +494,8 @@ def main():
     # Spares taskscaler booted for a wait that ended first: the worker
     # counts their room, and removes them after a minute idle.
     notes = [f'idle VMs, counted in the reports: {idle}'] if idle else []
+    notes += [f'GitLab job {name} was given out as the controller was killed, never reached it, and was cancelled'
+              for _, name in LOST]
     r.stop.set()
     if r.over_budget:
         findings.append(f'past the budget: {r.over_budget[:5]}')

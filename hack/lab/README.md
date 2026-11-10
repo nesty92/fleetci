@@ -59,6 +59,8 @@ workers and the jobs, then checks that the workers are Ready, every job
 ended, no worker went past its budget, no VM was left behind and every
 failed job had a fault around it, none ran over 15 minutes, and each
 GitLab job a killed controller held passed: its next start places it.
+A job GitLab gave out in the instant of a kill, whose answer never reached
+the controller, can't be: it is cancelled, and noted.
 The plan, what was done when, the fleet's status every 3 s, the jobs, the
 logs and `report.md` go in the
 directory; it exits 1 when a check failed.
