@@ -21,6 +21,7 @@ type testFleet struct {
 	c      *Controller
 	worker *client
 	other  *client // another worker's
+	addr   string
 }
 
 func newTestFleet(t *testing.T) *testFleet {
@@ -72,7 +73,7 @@ func newTestFleet(t *testing.T) *testFleet {
 		t.Cleanup(cl.close)
 		return cl
 	}
-	return &testFleet{c: c, worker: join("w1"), other: join("w2")}
+	return &testFleet{c: c, worker: join("w1"), other: join("w2"), addr: addr}
 }
 
 func (f *testFleet) report(t *testing.T, r Report) StatusResponse {

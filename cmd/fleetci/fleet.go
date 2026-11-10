@@ -10,6 +10,7 @@ import (
 	"maps"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -145,6 +146,7 @@ func tokenCmd(args []string, out io.Writer) error {
 	var resp struct {
 		Token       string   `json:"token"`
 		Controllers []string `json:"controllers"`
+		Pin         string   `json:"pin"`
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -159,7 +161,12 @@ func tokenCmd(args []string, out io.Writer) error {
 	if *asController {
 		flagC = " -as-controller -advertise <this machine's address>"
 	}
-	fmt.Fprintf(out, "%s\n\nOn the new machine, as root, good for %s and one join:\n  fleetci join%s -token %s %s\n", resp.Token, *ttl, flagC, resp.Token, at)
+	if *asController || resp.Pin == "" || len(resp.Controllers) == 0 {
+		fmt.Fprintf(out, "%s\n\nOn the new machine, as root, good for %s and one join:\n  fleetci join%s -token %s %s\n", resp.Token, *ttl, flagC, resp.Token, at)
+		return nil
+	}
+	fmt.Fprintf(out, "%s\n\nOn the new machine, as root, good for %s and one join: it installs fleetci, joins and\nstarts the worker as a service (fleetci join flags go at the end)\n  %s\n\nOr, with fleetci on it already:\n  fleetci join -service -token %s %s\n",
+		resp.Token, *ttl, cluster.InstallLine(at, resp.Pin, resp.Token), resp.Token, at)
 	return nil
 }
 
@@ -181,7 +188,11 @@ func joinCmd(args []string, out io.Writer) error {
 	fs.BoolVar(&o.AsController, "as-controller", false, "join as another controller, with a -for-controller token")
 	advertise := fs.String("advertise", "", "addr,…: a joining controller's addresses")
 	foreground := fs.Bool("foreground", false, "run the worker after joining, until SIGINT or SIGTERM")
+	service := fs.Bool("service", false, "then install and start the worker as the systemd service "+workerService)
 	_ = fs.Parse(args)
+	if *service && (*foreground || o.AsController) {
+		return errors.New("-service is for a worker that runs on its own: not with -foreground or -as-controller")
+	}
 	if fs.NArg() != 1 || o.Token == "" {
 		return errors.New("usage: fleetci join -token <token> [flags] <controller>")
 	}
@@ -218,6 +229,13 @@ func joinCmd(args []string, out io.Writer) error {
 	}
 	if o.AsController {
 		fmt.Fprintf(out, "\nThis machine is a controller now. Give it the fleet's controller.toml (its own id, advertise\nand peers), then: fleetci controller\n")
+		return nil
+	}
+	if *service {
+		if err := installService(systemdDir, filepath.Join(o.BinDir, "fleetci"), o.Config, systemctl, out); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "\nJoined, and the worker runs as %s: it checks a microVM per class, then\nthe controllers mark it Ready. Its log: journalctl -u %s -f\n", workerService, workerService)
 		return nil
 	}
 	if !*foreground {

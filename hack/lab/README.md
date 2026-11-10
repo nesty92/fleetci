@@ -26,8 +26,14 @@ usual setup, on each machine through `docker exec fleetci-lab /data/ssh.sh
 <ctl|eu|us|ap>`:
 
     ctl$ fleetci init && fleetci controller
-    ctl$ fleetci token create            # one per worker
-    eu$  fleetci join -token <token> -labels region=eu -cpus 2 -memory 4GB -foreground ctl
+    ctl$ fleetci token create            # one per worker; it prints the line below
+    eu$  curl -fsSk --pinnedpubkey sha256//… https://ctl:9481/v1/install.sh |
+           sh -s -- ctl <token> -labels region=eu -cpus 2 -memory 4GB
+
+The line installs fleetci from the controller, joins, and starts the worker
+as `fleetci-worker.service`. A machine with fleetci on it already can join
+with `fleetci join -service -token <token> ctl`, or with `-foreground` to
+watch the worker in the terminal.
 
 `rewind.sh` takes the machines back to before `fleetci init`, keeping the
 workers' images, in under a minute. The controller uses the GitLab runner
