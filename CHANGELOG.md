@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.7.0](https://github.com/nesty92/fleetci/compare/v0.6.0...v0.7.0) (2026-11-10)
+
+
+### Features
+
+* a fleet of machines run from controllers ([#31](https://github.com/nesty92/fleetci/issues/31)) ([8503255](https://github.com/nesty92/fleetci/commit/85032553f9e86429353f5f403ef950547e0893ca))
+* a restart of fleetci serve keeps the GitHub jobs running on its VMs ([#30](https://github.com/nesty92/fleetci/issues/30)) ([275b04f](https://github.com/nesty92/fleetci/commit/275b04f9c267493d5ddcf292bcf8614fd9592e6e))
+* **github:** serve whole orgs, sign in as a GitHub App, and start jobs from webhooks ([#25](https://github.com/nesty92/fleetci/issues/25)) ([6ac3617](https://github.com/nesty92/fleetci/commit/6ac3617e5bef0d4cbe0cae3ac3c23bfe238b0b91)), closes [#12](https://github.com/nesty92/fleetci/issues/12) [#13](https://github.com/nesty92/fleetci/issues/13)
+* **images:** a small VM image for fleetingd, built and published by CI ([#27](https://github.com/nesty92/fleetci/issues/27)) ([5b40b46](https://github.com/nesty92/fleetci/commit/5b40b460f6efa66ab71adac4b7db19a8ecc9f70d))
+* run workflows written for GitHub's hosted runners unchanged ([#29](https://github.com/nesty92/fleetci/issues/29)) ([a079b47](https://github.com/nesty92/fleetci/commit/a079b472d7b97b9b42b86465920abb183a8c00d0))
+
+
+### Performance Improvements
+
+* a waiting job gets its runner in about 1 s instead of 6 ([#28](https://github.com/nesty92/fleetci/issues/28)) ([911ea05](https://github.com/nesty92/fleetci/commit/911ea057d247770cdab2066761eac83e7cfca7dd))
+
 ## [0.6.0](https://github.com/nesty92/fleetci/compare/v0.5.0...v0.6.0) (2026-11-07)
 
 
