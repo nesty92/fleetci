@@ -26,6 +26,7 @@ import layout as L  # noqa: E402
 FPS = 30
 MAX_SPEED = 12
 MIN_BEAT = {'end': 2.0}
+OUTRO = 4.0  # the silent last card
 LEAD = 0.35  # speech starts this long into its beat
 AFTER = 0.9  # and the beat lasts this long after it
 
@@ -47,6 +48,7 @@ EDGE = hexc('#1f2a36')
 FG = hexc('#c8d3de')
 MUTED = hexc('#6b7a8a')
 ACCENT = hexc('#3dd6c6')
+PINK = hexc('#ff5fa2')  # an idea's name, once it has been shown
 REGION = {'ctl': ACCENT, 'admin': ACCENT, 'eu': hexc('#7aa7ff'), 'us': hexc('#f2c46b'), 'ap': hexc('#d79bff'),
           'forge': hexc('#c8d3de')}
 ANSI = [hexc(c) for c in ('#1b2530', '#ff7b72', '#7ee2a8', '#f2c46b', '#7aa7ff', '#d79bff', '#66d9e8', '#c8d3de',
@@ -223,18 +225,18 @@ class Screens:
         return i
 
 
-CHAPTERS = ['Machines', 'Controller', 'Tokens', 'Join', 'Check', 'Ready', 'Jobs', 'Done']
+CHAPTERS = ['Machines', 'Controller', 'Tokens', 'Join', 'Check', 'Ready', 'Jobs', 'Failure', 'Done']
 
 
 def header(chapter, speed, real):
     img = Image.new('RGB', (L.W, L.HEADER), INK)
     d = ImageDraw.Draw(img)
     d.text((L.GAP + 2, L.HEADER // 2), 'fleetci', font=ImageFont.truetype(SANS_B, 28), fill=ACCENT, anchor='lm')
-    d.text((132, L.HEADER // 2 + 1), 'a controller · workers anywhere · GitHub + GitLab', font=ImageFont.truetype(SANS, 17),
+    d.text((132, L.HEADER // 2 + 1), 'controllers · workers anywhere', font=ImageFont.truetype(SANS, 17),
            fill=MUTED, anchor='lm')
     f = ImageFont.truetype(SANS_M, 16)
     cur = CHAPTERS.index(chapter) if chapter in CHAPTERS else -1
-    x = 600
+    x = 560
     for i, c in enumerate(CHAPTERS):
         label = f'{i + 1}  {c}'
         tw = d.textlength(label, font=f)
@@ -243,7 +245,7 @@ def header(chapter, speed, real):
             d.text((x, L.HEADER // 2), label, font=f, fill=ACCENT, anchor='lm')
         else:
             d.text((x, L.HEADER // 2), label, font=f, fill=FG if i < cur else hexc('#3a4654'), anchor='lm')
-        x += tw + 38
+        x += tw + 30
     right = L.W - L.GAP - 4
     m, s = divmod(int(real), 60)
     d.text((right, L.HEADER // 2), f'real time {m:02d}:{s:02d}', font=ImageFont.truetype(MONO, 16), fill=MUTED,
@@ -285,6 +287,27 @@ def footer(text):
     return img
 
 
+CARD_C = (L.W // 2, 600)
+CARD_SPOTS = {'eu': (CARD_C[0] - 420, CARD_C[1] + 110), 'us': (CARD_C[0], CARD_C[1] + 190),
+              'ap': (CARD_C[0] + 420, CARD_C[1] + 110)}
+
+
+def flow(img, u):
+    """Jobs on their way: dots from the controller to the workers, one
+    after another along each line, at u seconds into the card."""
+    d = ImageDraw.Draw(img)
+    cx, cy = CARD_C
+    for k, (name, (x, y)) in enumerate(CARD_SPOTS.items()):
+        for j in range(2):
+            f = ((u - 0.4 * k - 0.9 * j) / 1.8) % 1.0
+            f = ease(f)
+            px, py = cx + (x - cx) * f, cy + (y - cy) * f
+            # Between the boxes only: none is 140x52, and the dot's 6.
+            if all(abs(px - bx) > 78 or abs(py - by) > 34 for bx, by in [CARD_C, (x, y)]):
+                d.ellipse([px - 6, py - 6, px + 6, py + 6], fill=REGION[name])
+    return img
+
+
 def card(kind, text_lines):
     img = Image.new('RGB', (L.W, L.H), INK)
     d = ImageDraw.Draw(img)
@@ -292,9 +315,9 @@ def card(kind, text_lines):
     for i, (t, size, col) in enumerate(text_lines):
         d.text((L.W // 2, 360 + i * 46), t, font=ImageFont.truetype(SANS, size), fill=col, anchor='mm')
     # The lab: the controller in the middle, the regions around it.
-    cx, cy = L.W // 2, 600
-    spots = {'eu': (cx - 420, cy + 110, 'an office'), 'us': (cx, cy + 190, 'a data center'),
-             'ap': (cx + 420, cy + 110, 'another country')}
+    cx, cy = CARD_C
+    where = {'eu': 'an office', 'us': 'a data center', 'ap': 'another country'}
+    spots = {n: (x, y, where[n]) for n, (x, y) in CARD_SPOTS.items()}
     lf = ImageFont.truetype(SANS_M, 22)
     sf = ImageFont.truetype(MONO, 17)
     for name, (x, y, _) in spots.items():
@@ -306,6 +329,24 @@ def card(kind, text_lines):
         if name != 'ctl':
             d.text((x, y + 48), _, font=ImageFont.truetype(SANS, 19), fill=MUTED, anchor='mm')
     return img
+
+
+def title_pill(frame, text, a):
+    """An idea's name, in pink, over the top of the content, faded in by a."""
+    f = font(SANS_B, 40)
+    d = ImageDraw.Draw(frame)
+    tw = d.textlength(text, font=f) + 8 * (len(text) - 1)
+    w, h = int(tw + 64), 70
+    pill = Image.new('RGB', (w, h), INK)
+    pd = ImageDraw.Draw(pill)
+    pd.rounded_rectangle([0, 0, w - 1, h - 1], radius=18, fill=hexc('#1a0f17'), outline=PINK, width=3)
+    x = 32
+    for ch in text:  # spaced capitals
+        pd.text((x, h // 2), ch, font=f, fill=PINK, anchor='lm')
+        x += pd.textlength(ch, font=f) + 8
+    x0, y0 = (L.W - w) // 2, L.HEADER + 14
+    region = frame.crop((x0, y0, x0 + w, y0 + h))
+    frame.paste(Image.blend(region, pill, a), (x0, y0))
 
 
 def wav(path):
@@ -323,6 +364,13 @@ def main():
     order = [b for b in script if b in ('intro', 'outro') or b in {x['beat'] for x in map(json.loads, open(os.path.join(rec, 'beats.jsonl')))}]
     speech = json.load(open(os.path.join(rec, 'speech', 'speech.json')))
     beats = [json.loads(line) for line in open(os.path.join(rec, 'beats.jsonl'))]
+    # A beat about whichever worker it happened on names it when recorded.
+    for b in beats:
+        if b.get('pane') and b['beat'] in script:
+            s = script[b['beat']]
+            s['focus'] = [b['pane'] if p == '@pane' else p for p in s['focus']]
+            if s.get('zoom') == '@pane':
+                s['zoom'] = b['pane']
     real = {b['beat']: b['t'] for b in beats}
     screens = Screens(os.path.join(rec, 'screens.jsonl'))
     t_end = beats[-1]['t'] + 2.0
@@ -332,7 +380,7 @@ def main():
     for name in order:
         sp = speech.get(name, 0)
         if name in ('intro', 'outro'):
-            dur = sp + LEAD + 1.4
+            dur = sp + LEAD + 1.4 if sp else OUTRO
             timeline.append((name, v, dur, None, 0))
         else:
             r0 = real[name]
@@ -361,12 +409,12 @@ def main():
         w.setframerate(sr)
         w.writeframes((np.clip(track, -1, 1) * 32767).astype(np.int16).tobytes())
 
-    intro = card('intro', [('CI jobs from GitHub and GitLab, on workers anywhere', 34, FG),
-                           ('a fresh microVM for every job', 26, MUTED)])
+    intro = card('intro', [('How do you run CI jobs on machines anywhere?', 40, FG),
+                           ('GitHub and GitLab · a fresh microVM for every job', 26, MUTED)])
     state = json.load(open(os.path.join(rec, 'forge.json')))
     n = sum(f['jobs'] for f in state.values())
     ok = sum(f['ok'] for f in state.values())
-    outro = card('outro', [(f'{n} jobs · {ok} passed · {n} microVMs · 3 workers', 34, FG),
+    outro = card('outro', [(f'{n} jobs · {ok} passed · one dead VM replaced · 3 workers', 34, FG),
                            ('github.com/nesty92/fleetci', 26, MUTED)])
 
     stills = [float(x) for x in os.environ.get('STILLS', '').split(',') if x]
@@ -414,7 +462,7 @@ def main():
             fade = min(1.0, u / 0.6, (dur - u) / 0.6) if name == 'intro' else min(1.0, u / 0.6, (dur - u) / 1.0)
             if name == 'intro' and u > dur - 0.6 and last_grid is None:
                 fade = 1.0
-            img = img.copy()
+            img = flow(img.copy(), u)
             img.paste(footer(script[name]['text']), (0, L.H - L.FOOTER - 40))
             frame = Image.blend(Image.new('RGB', (L.W, L.H), INK), img, max(0.0, fade))
         else:
@@ -453,6 +501,12 @@ def main():
                 h = round(gh + (big.height - gh) * z)
                 frame = Image.blend(frame, Image.new('RGB', (L.W, L.H), INK), 0.7 * z)
                 frame.paste(big if (w, h) == big.size else big.resize((w, h), Image.LANCZOS), (x, y))
+            if b.get('title'):
+                # Named once it has been shown: near the end of the speech.
+                t0 = LEAD + 0.72 * speech.get(name, 0)
+                a = min(1.0, (vt - v0 - t0) / 0.3, (v0 + dur - vt) / 0.3)
+                if a > 0:
+                    title_pill(frame, b['title'], a)
             frame.paste(header(b['chapter'], speed, rt), (0, 0))
             frame.paste(footer(b['text'] if vt - v0 < (speech.get(name, 0) + LEAD + AFTER + 0.5) else ''),
                         (0, L.H - L.FOOTER))

@@ -3,8 +3,9 @@
 
     python3 -I record.py <out dir>
 
-The lab (fleetci-demo-lab, after machines.sh, provision.sh and tools.sh)
-is four machines that have nothing running yet. This types the demo into
+The lab (fleetci-lab from hack/lab on feat/fleet, after reset.sh or
+rewind.sh, then this directory's tools.sh) is four machines that have
+nothing running yet; the workers have no fleetci. This types the demo into
 a terminal per pane, each a tmux session on a private server, and saves
 what every terminal shows four times a second (<out>/screens.jsonl), with
 the moments the narration starts at (<out>/beats.jsonl).
@@ -20,11 +21,12 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import layout  # noqa: E402
 
-LAB = 'fleetci-demo-lab'
+LAB = 'fleetci-lab'
 TMUX = ['tmux', '-L', 'fleetci-demo']
 HERE = os.path.dirname(os.path.abspath(__file__))
 GH_REPO = 'WireZone/fleetci-playground'
 GL_REPO = 'Nesty92/fleetci-playground'
+GL_PROJECT = 'Nesty92%2Ffleetci-playground'
 
 
 class Recorder:
@@ -37,9 +39,9 @@ class Recorder:
     def now(self):
         return round(time.time() - self.t0, 3)
 
-    def beat(self, name):
-        print(f'{self.now():7.1f}  {name}', flush=True)
-        self.beats.write(json.dumps({'t': self.now(), 'beat': name}) + '\n')
+    def beat(self, name, **extra):
+        print(f'{self.now():7.1f}  {name} {extra or ""}', flush=True)
+        self.beats.write(json.dumps({'t': self.now(), 'beat': name, **extra}) + '\n')
         self.beats.flush()
 
     def sample(self):
@@ -102,6 +104,52 @@ def until(what, cond, timeout, every=1.0):
     raise SystemExit(f'gave up waiting: {what}')
 
 
+def pin():
+    """The controller's key as curl's --pinnedpubkey takes it."""
+    r = lab('ctl', 'openssl x509 -in /etc/fleetci/pki/node.crt -pubkey -noout | openssl pkey -pubin -outform der'
+                   ' | openssl dgst -sha256 -binary | base64')
+    if r.returncode or not r.stdout.strip():
+        raise SystemExit(f'no pin: {r.stderr}')
+    return 'sha256//' + r.stdout.strip()
+
+
+def gitlab_vm():
+    """(worker, VM id, instance) of a GitLab job's VM that has run a few
+    seconds, or None."""
+    now = time.time()
+    for w in (status() or {}).get('workers') or []:
+        rep = w.get('report') or {}
+        inst = {a.get('vm'): a.get('instance') for a in rep.get('assignments') or []}
+        for vm in rep.get('vms') or []:
+            since = datetime.fromisoformat(vm['since'].replace('Z', '+00:00')).timestamp()
+            if vm.get('job') == 'gitlab' and now - since > 4:
+                return w['id'], vm['id'], inst.get(vm['id']) or ''
+    return None
+
+
+def vm_pid(worker, *keys):
+    """The pid of the cloud-hypervisor whose command line names one of keys."""
+    for k in keys:
+        if not k:
+            continue
+        r = lab(worker, f'for p in $(pidof cloud-hypervisor); do tr "\\0" " " </proc/$p/cmdline | grep -qF "{k}" && echo $p; done')
+        if r.stdout.split():
+            return r.stdout.split()[0]
+    return None
+
+
+def gitlab_failed():
+    """The ids of the failed jobs of the demo's latest GitLab pipeline."""
+    r = subprocess.run(['glab', 'api', f'projects/{GL_PROJECT}/pipelines?ref=demo&per_page=1'], capture_output=True, text=True)
+    try:
+        p = json.loads(r.stdout)[0]['id']
+        r = subprocess.run(['glab', 'api', f'projects/{GL_PROJECT}/pipelines/{p}/jobs?scope[]=failed'], capture_output=True,
+                           text=True)
+        return [j['id'] for j in json.loads(r.stdout)]
+    except (json.JSONDecodeError, IndexError, KeyError, TypeError):
+        return []
+
+
 def forge_state(out):
     try:
         with open(os.path.join(out, 'forge.json')) as f:
@@ -147,17 +195,20 @@ def main():
     until('a leader', lambda: (status() or {}).get('leader'), 60)
     time.sleep(2)
 
+    key = pin()
     r.beat('token')
     keys('admin', 'fleetci token create -ttl 15m')
-    time.sleep(3)
+    time.sleep(4)
     keys('admin', "for m in eu us ap; do fleetci token create -ttl 15m | head -1 | ssh $m 'cat > token'; done")
-    time.sleep(3)
+    until('the tokens on the workers', lambda: all(lab(m, 'test -s token').returncode == 0 for m in ('eu', 'us', 'ap')), 30)
+    time.sleep(1.5)
     keys('admin', 'fleetwatch')
     time.sleep(2)
 
     r.beat('join')
-    join = 'fleetci join -token $(cat token) -labels region={m} -cpus 2 -memory 4GB -foreground ctl |& short'
-    together(*[lambda m=m, d=d: (time.sleep(d), keys(m, join.format(m=m))) for m, d in (('eu', 0), ('us', 0.6), ('ap', 1.2))])
+    join = (f'curl -fsSk --pinnedpubkey {key} https://ctl:9481/v1/install.sh | sh -s -- ctl $(cat token)'
+            ' -labels region={m} -cpus 2 -memory 4GB && journalctl -fu fleetci-worker -o cat | short')
+    together(*[lambda m=m, d=d: (time.sleep(d), keys(m, join.format(m=m), cps=60)) for m, d in (('eu', 0), ('us', 0.6), ('ap', 1.2))])
     until('three workers', lambda: len((status() or {}).get('workers') or []) == 3, 120)
 
     r.beat('check')
@@ -179,8 +230,29 @@ def main():
 
     r.beat('running')
     total = lambda s: sum(f['jobs'] for f in s.values())  # noqa: E731
+
+    # A harder case: a GitLab job's VM dies under it.
+    vm = until('a GitLab job running', gitlab_vm, 300, every=0.5)
+    worker, vm_id, instance = vm
+    # fleetingd restores the VM from its slot's snapshot: the slot is the
+    # instance's first part, in cloud-hypervisor's command line.
+    pid = until('its cloud-hypervisor', lambda: vm_pid(worker, instance.split('-')[0] + '_snap'), 20, every=0.5)
+    r.beat('twist', pane=worker)
+    tmux('send-keys', '-t', 'admin', 'C-c')
+    time.sleep(0.5)
+    keys('admin', f"ssh {worker} 'kill -9 {pid}'  # a GitLab job's microVM")
+    time.sleep(1)
+    r.beat('replaced', pane=worker)
+    failed = until('the GitLab job failed', gitlab_failed, 120, every=2)
+    time.sleep(2)
+    keys('admin', 'fleetwatch')
+    time.sleep(6)
+
+    r.beat('retry')
+    for j in failed:
+        subprocess.run(['glab', 'api', '-X', 'POST', f'projects/{GL_PROJECT}/jobs/{j}/retry'], check=True, capture_output=True)
     until('the jobs done', lambda: (s := forge_state(out)) and total(s) >= 9
-          and sum(f['done'] for f in s.values()) == total(s), 900, every=2)
+          and sum(f['ok'] for f in s.values()) == total(s), 900, every=2)
 
     r.beat('done')
     time.sleep(8)

@@ -3,7 +3,7 @@
   "beat": "intro",
   "chapter": "",
   "focus": [],
-  "text": "This is fleetci. A controller takes CI jobs from GitHub and GitLab, and hands them to workers: machines that can be anywhere, in another office, a data center, or another country. Every job runs in a fresh microVM of the size it asks for."
+  "text": "How do you run CI jobs on machines in other offices, or other countries, without opening a single port to them?"
  },
  {
   "beat": "lab",
@@ -13,7 +13,7 @@
    "us",
    "ap"
   ],
-  "text": "Here, one controller and three workers, each in a different place. A worker only needs to reach the controller over the network, whether it is one hop away or a continent away."
+  "text": "Let's say we have a controller, and three machines: one in Europe, one in the US, one in Asia. They can reach the controller. The controller can't reach them."
  },
  {
   "beat": "init",
@@ -21,8 +21,9 @@
   "focus": [
    "ctl"
   ],
-  "text": "On the controller, fleetci init creates the fleet's certificate authority, and the controller's own certificate. Every machine in the fleet proves who it is with a certificate from it.",
-  "zoom": "ctl"
+  "zoom": "ctl",
+  "text": "First, the controller creates the fleet's own certificate authority. Every machine proves who it is with a certificate from it, and checks the other side's. This is called mutual TLS.",
+  "title": "MUTUAL TLS"
  },
  {
   "beat": "controller",
@@ -30,8 +31,8 @@
   "focus": [
    "ctl"
   ],
-  "text": "Then the controller starts. Its config names the GitHub organization and the GitLab runner it takes jobs from. Several controllers would elect a leader; this one leads on its own.",
-  "zoom": "ctl"
+  "zoom": "ctl",
+  "text": "Then the controller starts. It takes jobs from a GitHub organization and a GitLab runner. With no other controllers, it leads on its own."
  },
  {
   "beat": "token",
@@ -39,8 +40,9 @@
   "focus": [
    "admin"
   ],
-  "text": "To add a machine, the controller issues a join token, good for a single join, so each worker gets its own. Then this pane watches the fleet.",
-  "zoom": "admin"
+  "zoom": "admin",
+  "text": "To add a machine, we make a token. It works for one join, and expires in fifteen minutes. It also carries a hash of the fleet's authority, so a new machine can check the controller before it sends anything. This is a join token.",
+  "title": "JOIN TOKEN"
  },
  {
   "beat": "join",
@@ -50,8 +52,9 @@
    "us",
    "ap"
   ],
-  "text": "Each worker joins with one command. It gets its certificate from the controller, and the binaries it runs VMs with, so fleetci is all it needs to start with.",
-  "zoom": "eu"
+  "zoom": "eu",
+  "text": "So how does a bare machine join? With one line. It downloads fleetci from the controller, checks its sum, joins with the token, and starts the worker as a service. Nothing else to install, nothing to configure.",
+  "title": "ONE-LINE JOIN"
  },
  {
   "beat": "check",
@@ -59,11 +62,11 @@
   "focus": [
    "eu",
    "us",
-   "ap",
-   "admin"
+   "ap"
   ],
-  "text": "Before taking a job, a worker boots a microVM of each class it offers, checks that a job can run in it, and keeps a snapshot, so later VMs start in a couple of seconds.",
-  "zoom": "eu"
+  "zoom": "eu",
+  "text": "You may ask: how does the controller know a worker can run jobs? Before it takes any, each worker boots a microVM, checks it reaches GitHub and GitLab, and saves a snapshot of it. About twenty seconds, once.",
+  "title": "MICROVM CHECK"
  },
  {
   "beat": "ready",
@@ -71,27 +74,59 @@
   "focus": [
    "admin"
   ],
-  "text": "All three are Ready, each with its budget, and room for so many VMs of each class.",
-  "zoom": "admin"
+  "zoom": "admin",
+  "text": "When the check passes, the controller marks the worker ready. Three workers, in three places, all ready."
  },
  {
   "beat": "jobs",
   "chapter": "Jobs",
   "focus": [
-   "forge"
+   "forge",
+   "eu",
+   "us",
+   "ap"
   ],
-  "text": "Now the jobs: two GitHub workflows, and a GitLab pipeline. Nine jobs, more than the fleet has room for at once.",
-  "zoom": "forge"
+  "zoom": "forge",
+  "text": "Now, nine jobs at once: six from GitHub, three from GitLab. The leader places each job on a worker with room. The worker restores a fresh microVM from its snapshot, in two to three seconds.",
+  "title": "SNAPSHOT RESTORE"
  },
  {
   "beat": "running",
   "chapter": "Jobs",
   "focus": [
-   "ctl",
-   "admin",
+   "eu",
+   "us",
+   "ap"
+  ],
+  "text": "Every job gets a VM of its own, thrown away when the job ends. Nothing carries over from one job to the next."
+ },
+ {
+  "beat": "twist",
+  "chapter": "Failure",
+  "focus": [
+   "admin"
+  ],
+  "zoom": "admin",
+  "text": "Now, a harder case. Let's say a microVM dies in the middle of a GitLab job."
+ },
+ {
+  "beat": "replaced",
+  "chapter": "Failure",
+  "focus": [
+   "@pane"
+  ],
+  "zoom": "@pane",
+  "text": "Within seconds, the worker notices. It fails the job at once, instead of leaving it hanging, and boots a replacement, so the slot is free again.",
+  "title": "DEAD VM REPLACED"
+ },
+ {
+  "beat": "retry",
+  "chapter": "Failure",
+  "focus": [
    "forge"
   ],
-  "text": "The leader places each job on a worker with room, filling the busiest first, so the others stay free. Each job gets its own microVM, restored from the snapshot, and deleted when the job ends. Jobs that don't fit wait for a place."
+  "zoom": "forge",
+  "text": "Retry the job, and it runs on a fresh microVM, and passes."
  },
  {
   "beat": "done",
@@ -100,8 +135,7 @@
    "forge",
    "admin"
   ],
-  "text": "All nine jobs passed, across the three workers. None of their microVMs is left.",
-  "zoom": "forge"
+  "text": "Nine jobs. Nine passed. Three workers, anywhere."
  },
  {
   "beat": "end",
@@ -113,6 +147,6 @@
   "beat": "outro",
   "chapter": "",
   "focus": [],
-  "text": "fleetci. Per-job microVMs for GitHub and GitLab, on your own machines, wherever they are."
+  "text": ""
  }
 ]

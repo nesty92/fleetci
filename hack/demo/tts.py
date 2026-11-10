@@ -7,7 +7,7 @@ import numpy as np, soundfile as sf
 from kokoro_onnx import Kokoro
 
 SAY = [("fleetci", "fleet C I"), ("microVMs", "micro V Ms"), ("microVM", "micro V M"), ("CPUs", "C P Us"),
-       ("CPU", "C P U"), ("CI", "C I"), ("VMs", "V Ms"), ("VM", "V M"), ("GitLab", "Git Lab")]
+       ("CPU", "C P U"), ("CI", "C I"), ("VMs", "V Ms"), ("VM", "V M"), ("GitLab", "Git Lab"), ("TLS", "T L S")]
 
 
 def say(t):
