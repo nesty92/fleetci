@@ -17,6 +17,7 @@ on:
   push:
     paths:
       - images/**
+      - "!images/runner-images/**" # a recipe to build GitHub's image, not one of ours
       - .github/workflows/images.yml
 
 permissions:
