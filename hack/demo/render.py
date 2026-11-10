@@ -132,44 +132,81 @@ def mix(a, b, t):
 
 
 # What short.py did not shorten yet when the demo was recorded.
-TIDY = [(re.compile(r'(runner: )\d{4}-\d\d-\d\d \d\d:\d\d:\d\dZ: '), r'\1'), (re.compile(r'fleet\.class\.([\w\-]+) '), r'\1 ')]
+TIDY = [(re.compile(r'(runner: )\d{4}-\d\d-\d\d \d\d:\d\d:\d\dZ: '), r'\1'), (re.compile(r'fleet\.class\.([\w\-]+) '), r'\1 '),
+        # Whose org, user and repositories these are is not the demo's business.
+        (re.compile(r'WireZone/fleetci-playground|Nesty92/fleetci-playground @ demo'), 'playground'),
+        (re.compile(r'\["WireZone"\]'), '["your-org"]'),
+        (re.compile(r'(\x1b\[2m)?(gitlab_user_id|namespace_id|project)=(\x1b\[0m)?\S+ ?'), '')]
 
 
-def pane_image(name, lines, cursor, focused):
-    x, y, w, h, title = L.PANES[name]
+FONTS = {}
+
+
+def font(path, px):
+    if (path, px) not in FONTS:
+        FONTS[path, px] = ImageFont.truetype(path, px)
+    return FONTS[path, px]
+
+
+def pane_image(name, lines, cursor, focused, s=1.0):
+    """A pane as the grid shows it, or, at s > 1, zoomed in: drawn at s
+    times the font, so it stays sharp."""
+    _, _, w0, h0, title = L.PANES[name]
+    cols, rows = L.size(name)
+    mono_s, bold_s = font(MONO, round(L.FONT_PX * s)), font(MONO_B, round(L.FONT_PX * s))
+    cw = mono_s.getlength('M') if s != 1.0 else L.CELL_W
+    lh, pad, tb = round(L.LINE_H * s), round(L.PAD * s), round(L.TITLE * s)
+    w = w0 if s == 1.0 else round(cols * cw + 2 * pad)
+    h = h0 if s == 1.0 else tb + 2 * pad + rows * lh
     img = Image.new('RGB', (w, h), PANE)
     d = ImageDraw.Draw(img)
     colour = REGION[name]
-    d.rectangle([0, 0, w, L.TITLE], fill=TITLEBAR)
-    d.ellipse([12, L.TITLE // 2 - 4, 20, L.TITLE // 2 + 4], fill=colour)
-    d.text((28, L.TITLE // 2), title, font=ImageFont.truetype(SANS_M, 14), fill=FG if focused else MUTED, anchor='lm')
-    cols, rows = L.size(name)
+    d.rectangle([0, 0, w, tb], fill=TITLEBAR)
+    r0 = round(4 * s)
+    d.ellipse([round(12 * s), tb // 2 - r0, round(12 * s) + 2 * r0, tb // 2 + r0], fill=colour)
+    d.text((round(28 * s), tb // 2), title, font=font(SANS_M, round(14 * s)), fill=FG if focused else MUTED,
+           anchor='lm')
     for r, line in enumerate(lines[:rows]):
         cx = 0
-        ty = L.TITLE + L.PAD + r * L.LINE_H
+        ty = tb + pad + r * lh
         for a, b in TIDY:
             line = a.sub(b, line)
         for text, fg, bg, bold, dim in runs(line):
             text = text[:max(0, cols - cx)]
             if not text:
                 continue
-            px = L.PAD + cx * L.CELL_W
+            px = pad + cx * cw
             if bg:
-                d.rectangle([px, ty, px + len(text) * L.CELL_W, ty + L.LINE_H - 1], fill=bg)
+                d.rectangle([px, ty, px + len(text) * cw, ty + lh - 1], fill=bg)
             f = fg or FG
             if dim:
                 f = mix(f, PANE, 0.45)
-            d.text((px, ty + 1), text, font=mono_b if bold else mono, fill=f)
+            d.text((px, ty + round(s)), text, font=bold_s if bold else mono_s, fill=f)
             cx += len(text)
     if cursor and name not in ('forge',):
         cx, cy = cursor
         if cy < rows:
-            px, ty = L.PAD + cx * L.CELL_W, L.TITLE + L.PAD + cy * L.LINE_H
-            d.rectangle([px, ty + 1, px + L.CELL_W - 1, ty + L.LINE_H - 1], fill=mix(FG, PANE, 0.35))
-    d.rectangle([0, 0, w - 1, h - 1], outline=colour if focused else EDGE, width=2 if focused else 1)
+            px, ty = pad + cx * cw, tb + pad + cy * lh
+            d.rectangle([px, ty + 1, px + cw - 1, ty + lh - 1], fill=mix(FG, PANE, 0.35))
+    d.rectangle([0, 0, w - 1, h - 1], outline=colour if focused else EDGE, width=max(2, round(2 * s)) if focused else 1)
     if not focused:
         img = Image.blend(img, Image.new('RGB', (w, h), INK), 0.28)
     return img
+
+
+# Where a zoomed pane goes: the middle of the screen, as big as fits.
+ZOOM_BOX = (60, L.HEADER + 12, L.W - 120, L.H - L.HEADER - L.FOOTER - 24)
+ZOOM_MAX = 1.9
+ZOOM_IN = 0.5  # seconds to zoom in, and out
+
+
+def zoom_scale(name):
+    _, _, w, h, _ = L.PANES[name]
+    return min(ZOOM_MAX, ZOOM_BOX[2] / w, ZOOM_BOX[3] / h)
+
+
+def ease(z):
+    return z * z * (3 - 2 * z)
 
 
 class Screens:
@@ -193,7 +230,7 @@ def header(chapter, speed, real):
     img = Image.new('RGB', (L.W, L.HEADER), INK)
     d = ImageDraw.Draw(img)
     d.text((L.GAP + 2, L.HEADER // 2), 'fleetci', font=ImageFont.truetype(SANS_B, 28), fill=ACCENT, anchor='lm')
-    d.text((132, L.HEADER // 2 + 1), '1 controller · 3 regions · GitHub + GitLab', font=ImageFont.truetype(SANS, 17),
+    d.text((132, L.HEADER // 2 + 1), 'a controller · workers anywhere · GitHub + GitLab', font=ImageFont.truetype(SANS, 17),
            fill=MUTED, anchor='lm')
     f = ImageFont.truetype(SANS_M, 16)
     cur = CHAPTERS.index(chapter) if chapter in CHAPTERS else -1
@@ -256,18 +293,18 @@ def card(kind, text_lines):
         d.text((L.W // 2, 360 + i * 46), t, font=ImageFont.truetype(SANS, size), fill=col, anchor='mm')
     # The lab: the controller in the middle, the regions around it.
     cx, cy = L.W // 2, 600
-    spots = {'eu': (cx - 420, cy + 110, '+20 ms'), 'us': (cx, cy + 190, '+80 ms'), 'ap': (cx + 420, cy + 110, '+160 ms')}
+    spots = {'eu': (cx - 420, cy + 110, 'an office'), 'us': (cx, cy + 190, 'a data center'),
+             'ap': (cx + 420, cy + 110, 'another country')}
     lf = ImageFont.truetype(SANS_M, 22)
     sf = ImageFont.truetype(MONO, 17)
-    for name, (x, y, ms) in spots.items():
+    for name, (x, y, _) in spots.items():
         d.line([cx, cy, x, y], fill=EDGE, width=3)
-        mx, my = (cx + x) // 2, (cy + y) // 2
-        d.text((mx + (0 if name != 'us' else 14), my - 16 if name != 'us' else my), ms, font=sf, fill=MUTED,
-               anchor='mm' if name != 'us' else 'lm')
     for name, (x, y, _) in [('ctl', (cx, cy, ''))] + list(spots.items()):
         c = REGION[name]
         d.rounded_rectangle([x - 70, y - 26, x + 70, y + 26], radius=12, fill=PANE, outline=c, width=2)
-        d.text((x, y), {'ctl': 'controller'}.get(name, f'worker {name}'), font=lf, fill=c, anchor='mm')
+        d.text((x, y), {'ctl': 'controller'}.get(name, 'worker'), font=lf, fill=c, anchor='mm')
+        if name != 'ctl':
+            d.text((x, y + 48), _, font=ImageFont.truetype(SANS, 19), fill=MUTED, anchor='mm')
     return img
 
 
@@ -324,12 +361,12 @@ def main():
         w.setframerate(sr)
         w.writeframes((np.clip(track, -1, 1) * 32767).astype(np.int16).tobytes())
 
-    intro = card('intro', [('one controller · three regions · GitHub and GitLab jobs', 34, FG),
+    intro = card('intro', [('CI jobs from GitHub and GitLab, on workers anywhere', 34, FG),
                            ('a fresh microVM for every job', 26, MUTED)])
     state = json.load(open(os.path.join(rec, 'forge.json')))
     n = sum(f['jobs'] for f in state.values())
     ok = sum(f['ok'] for f in state.values())
-    outro = card('outro', [(f'{n} jobs · {ok} passed · {n} microVMs · 3 regions', 34, FG),
+    outro = card('outro', [(f'{n} jobs · {ok} passed · {n} microVMs · 3 workers', 34, FG),
                            ('github.com/nesty92/fleetci', 26, MUTED)])
 
     stills = [float(x) for x in os.environ.get('STILLS', '').split(',') if x]
@@ -362,7 +399,7 @@ def main():
                            'loudnorm=I=-16:TP=-1.5:LRA=11,aformat=sample_rates=48000:channel_layouts=stereo',
                            '-c:a', 'aac', '-b:a', '192k', '-shortest', '-movflags', '+faststart', out],
                           stdin=subprocess.PIPE)
-    cache, last_grid = {}, None
+    cache, zcache, last_grid = {}, {}, None
     nframes = int(total * FPS) + 1
     if stills:
         nframes = min(nframes, nframes_max)
@@ -394,6 +431,28 @@ def main():
                     cache[p] = (key, pane_image(p, lines, cursor, focused))
                 x, y, _, _, _ = L.PANES[p]
                 frame.paste(cache[p][1], (x, y))
+            zp = b.get('zoom')
+            if zp:
+                prev = timeline[timeline.index(seg) - 1][0]
+                nxt = timeline[timeline.index(seg) + 1][0] if seg is not timeline[-1] else None
+                zin = 1.0 if script.get(prev, {}).get('zoom') == zp else min(1.0, (vt - v0) / ZOOM_IN)
+                zout = 1.0 if script.get(nxt, {}).get('zoom') == zp else min(1.0, (v0 + dur - vt) / ZOOM_IN)
+                z = ease(max(0.0, min(zin, zout)))
+                i = screens.at(zp, rt)
+                key = (i, zp)
+                if zcache.get('k') != key:
+                    lines, cursor = screens.s[zp][i] if i >= 0 else ([], None)
+                    zcache['k'], zcache['img'] = key, pane_image(zp, lines, cursor, True, zoom_scale(zp))
+                big = zcache['img']
+                gx, gy, gw, gh, _ = L.PANES[zp]
+                bx = ZOOM_BOX[0] + (ZOOM_BOX[2] - big.width) // 2
+                by = ZOOM_BOX[1] + (ZOOM_BOX[3] - big.height) // 2
+                x = round(gx + (bx - gx) * z)
+                y = round(gy + (by - gy) * z)
+                w = round(gw + (big.width - gw) * z)
+                h = round(gh + (big.height - gh) * z)
+                frame = Image.blend(frame, Image.new('RGB', (L.W, L.H), INK), 0.7 * z)
+                frame.paste(big if (w, h) == big.size else big.resize((w, h), Image.LANCZOS), (x, y))
             frame.paste(header(b['chapter'], speed, rt), (0, 0))
             frame.paste(footer(b['text'] if vt - v0 < (speech.get(name, 0) + LEAD + AFTER + 0.5) else ''),
                         (0, L.H - L.FOOTER))

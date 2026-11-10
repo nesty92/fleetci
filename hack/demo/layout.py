@@ -26,10 +26,10 @@ LOG_W = (W - 3 * GAP) // 2
 PANES = {
     'admin': (GAP, HEADER, ADMIN_W, TOP_H, 'ctl · admin'),
     'forge': (2 * GAP + ADMIN_W, HEADER, FORGE_W, TOP_H, 'the forges'),
-    'ctl': (GAP, HEADER + TOP_H + GAP, LOG_W, LOG_H, 'ctl · controller · core'),
-    'eu': (2 * GAP + LOG_W, HEADER + TOP_H + GAP, LOG_W, LOG_H, 'eu · worker · +20 ms'),
-    'us': (GAP, HEADER + TOP_H + 2 * GAP + LOG_H, LOG_W, LOG_H, 'us · worker · +80 ms'),
-    'ap': (2 * GAP + LOG_W, HEADER + TOP_H + 2 * GAP + LOG_H, LOG_W, LOG_H, 'ap · worker · +160 ms'),
+    'ctl': (GAP, HEADER + TOP_H + GAP, LOG_W, LOG_H, 'ctl · controller'),
+    'eu': (2 * GAP + LOG_W, HEADER + TOP_H + GAP, LOG_W, LOG_H, 'eu · worker'),
+    'us': (GAP, HEADER + TOP_H + 2 * GAP + LOG_H, LOG_W, LOG_H, 'us · worker'),
+    'ap': (2 * GAP + LOG_W, HEADER + TOP_H + 2 * GAP + LOG_H, LOG_W, LOG_H, 'ap · worker'),
 }
 
 

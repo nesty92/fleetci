@@ -90,8 +90,8 @@ def main():
     while True:
         gh, gl = github(since), gitlab(since)
         out = []
-        show(f'GitHub · {GH_REPO}', gh, out)
-        show(f'GitLab · {GL_PROJECT.replace("%2F", "/")} @ {GL_REF}', gl, out)
+        show('GitHub · playground', gh, out)
+        show('GitLab · playground', gl, out)
         sys.stdout.write('\033[H\033[2J' + '\n'.join(out))
         sys.stdout.flush()
         state = {f: {'jobs': len(rows), 'done': sum(mark(r[2])[2] for r in rows), 'ok': sum(mark(r[2])[3] for r in rows)}

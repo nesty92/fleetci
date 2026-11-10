@@ -18,7 +18,7 @@ NAME = re.compile(r'^([\w.\-]+): (.*)$')
 KV = re.compile(r'([@\w.\-]+)=("(?:[^"\\]|\\.)*"|\S+)')
 # The keys only a debugger wants.
 NOISE = {'timestamp', '@module', '@level', '@timestamp', 'plugin_version', 'plugin', 'path', 'pid',
-         'metadata', 'version', 'subsystem'}
+         'metadata', 'version', 'subsystem', 'gitlab_user_id', 'namespace_id', 'project'}
 # Lines only a debugger wants: taskscaler's bookkeeping, the runners' chatter.
 DROP = [re.compile(p) for p in [
     r'\.taskscaler: ', r'instance process finished', r'stopping instance', r'snapshot memory',
