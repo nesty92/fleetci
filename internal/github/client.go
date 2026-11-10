@@ -31,6 +31,8 @@ type job struct {
 	Name   string   `json:"name"`
 	Status string   `json:"status"`
 	Labels []string `json:"labels"`
+	// CreatedAt is when GitHub queued it.
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type runner struct {
@@ -57,6 +59,12 @@ func (e statusError) Error() string {
 func refused(err error) bool {
 	var s statusError
 	return errors.As(err, &s) && s.status >= 400 && s.status < 500 && !errors.As(err, new(rateLimited))
+}
+
+// conflict is GitHub refusing a runner name it has already.
+func conflict(err error) bool {
+	var s statusError
+	return errors.As(err, &s) && s.status == http.StatusConflict
 }
 
 // rateLimited is GitHub saying to send nothing until a time.

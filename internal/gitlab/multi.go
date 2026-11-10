@@ -74,6 +74,10 @@ type RunCommand struct {
 
 	interruptOnce sync.Once
 	abortOnce     sync.Once
+
+	// fleetci: dispatch, on a fleet's leader, sends each job taken to a
+	// worker instead of running it here.
+	dispatch *dispatcher
 }
 
 func (mr *RunCommand) log() *logrus.Entry {
@@ -344,6 +348,11 @@ func (mr *RunCommand) processRunner(id int, runner *common.RunnerConfig, runners
 		return fmt.Errorf("failed to update executor: %w", err)
 	}
 	defer provider.Release(runner, executorData)
+
+	// fleetci: a fleet's leader runs no build itself.
+	if mr.dispatch != nil {
+		return mr.dispatchBuild(runner, runners)
+	}
 
 	return mr.processBuildOnRunner(runner, runners, provider, executorData)
 }

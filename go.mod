@@ -13,8 +13,11 @@ require (
 	gitlab.com/gitlab-org/fleeting/nesting v0.5.0
 	gitlab.com/gitlab-org/fleeting/taskscaler v0.0.0-20261103060922-6d4e8d9a9815
 	gitlab.com/gitlab-org/gitlab-runner v1.11.1-0.20261028153507-66ad5002d924
+	gitlab.com/gitlab-org/moa v0.0.0-20260910174042-bac76a5a1e4c
+	gitlab.com/gitlab-org/step-runner v0.45.0
 	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/crypto v0.57.0
+	golang.org/x/mod v0.42.0
 	google.golang.org/grpc v1.84.0
 	k8s.io/utils v0.0.0-20261023123148-ca04ba58ecab
 )
@@ -187,8 +190,6 @@ require (
 	gitlab.com/gitlab-org/gitlab-terminal v0.0.0-20230425165333-62e9b619707c // indirect
 	gitlab.com/gitlab-org/golang-cli-helpers v0.0.0-20220124161940-198f30295e7e // indirect
 	gitlab.com/gitlab-org/labkit/v2 v2.29.2 // indirect
-	gitlab.com/gitlab-org/moa v0.0.0-20260910174042-bac76a5a1e4c // indirect
-	gitlab.com/gitlab-org/step-runner v0.45.0 // indirect
 	go.mozilla.org/pkcs7 v0.10.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/detectors/gcp v1.44.0 // indirect
@@ -201,7 +202,6 @@ require (
 	go.opentelemetry.io/otel/trace v1.46.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
 	golang.org/x/exp v0.0.0-20260813180055-c1d0aacb2297 // indirect
-	golang.org/x/mod v0.42.0 // indirect
 	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/oauth2 v0.37.0 // indirect
 	golang.org/x/sync v0.23.0 // indirect

@@ -4,6 +4,7 @@
 //	fleetci check           proves every class, the GitHub access and config.toml work
 //	fleetci watchdog        restarts gitlab-runner when its fleetci plugin is gone
 //	fleetci serve           runs GitHub Actions jobs on the classes, without gitlab-runner
+//	fleetci init, controller, token, join, worker, fleet: a fleet of machines
 package main
 
 import (
@@ -55,6 +56,18 @@ func main() {
 		err = serve(os.Args[2:])
 	case "watchdog":
 		err = watchdogCmd(os.Args[2:])
+	case "init":
+		err = initCmd(os.Args[2:], os.Stdout)
+	case "controller":
+		err = controllerCmd(os.Args[2:])
+	case "token":
+		err = tokenCmd(os.Args[2:], os.Stdout)
+	case "join":
+		err = joinCmd(os.Args[2:], os.Stdout)
+	case "worker":
+		err = workerCmd(os.Args[2:])
+	case "fleet":
+		err = fleetCmd(os.Args[2:], os.Stdout)
 	case "version", "--version":
 		fmt.Println("fleetci", version, revision)
 		return
@@ -79,6 +92,17 @@ func usage(w io.Writer) {
   fleetci watchdog [flags]        restart gitlab-runner when its fleetci plugin is gone
   fleetci serve [flags]           run GitHub Actions jobs on the classes, without gitlab-runner
   fleetci version
+
+A fleet of machines, run from controllers:
+  fleetci init [flags]            set up the first controller: the fleet's CA
+  fleetci controller [flags]      run a controller; the leader takes and places jobs
+  fleetci token create [flags]    print a join token for a new machine
+  fleetci join [flags] <ctl>      join this machine to the fleet and install it
+  fleetci worker [flags]          run this machine as a worker
+  fleetci fleet status|jobs       the fleet, and the jobs that ended
+  fleetci fleet update-check      ask the workers to look for an update now
+  fleetci fleet verify [worker]   run the workers' microVM checks again
+  fleetci fleet drain|undrain|revoke <worker>
 
 Run "fleetci <command> -h" for its flags. Both read fleetci.toml from -config,
 $FLEETCI_CONFIG or `+defaultConfig+`.

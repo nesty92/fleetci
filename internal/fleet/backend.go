@@ -47,6 +47,7 @@ type pool struct {
 	group   *supervised
 	reclaim *reclaimWatch // nil when the class isn't watched
 	conns   *vmConns      // one shared connection per instance
+	died    *deaths       // its instances that went without being removed
 	ts      taskscaler.Taskscaler
 	timeout time.Duration
 	// stored: the class's taskscaler state is kept on disk, so its VMs
@@ -369,7 +370,8 @@ func startPool(ctx context.Context, name string, c Class, groups map[string]stri
 	if st != nil {
 		ready = adoptUp(dockerUp(group, c.Connector.UseExternalAddr, log), func(key, instance string) { adopt(p, key, instance) })
 	}
-	scaled, up, reclaim := withReclaim(c, group, conns, ready, sshTunnel(conns), log)
+	p.died = newDeaths(log)
+	scaled, up, reclaim := withReclaim(c, group, conns, p.died, ready, sshTunnel(conns), log)
 	p.reclaim = reclaim
 	stop := func() {
 		if reclaim != nil {
@@ -401,12 +403,12 @@ func startPool(ctx context.Context, name string, c Class, groups map[string]stri
 // dropped and, for a class watched for reclaim, so the heartbeat of a VM
 // with a notice fails and up starts watching a VM once it is admitted.
 // reclaim is nil for a class that isn't watched.
-func withReclaim(c Class, group provider.InstanceGroup, conns *vmConns, up taskscaler.UpFunc, open opener, log hclog.Logger) (provider.InstanceGroup, taskscaler.UpFunc, *reclaimWatch) {
+func withReclaim(c Class, group provider.InstanceGroup, conns *vmConns, died *deaths, up taskscaler.UpFunc, open opener, log hclog.Logger) (provider.InstanceGroup, taskscaler.UpFunc, *reclaimWatch) {
 	if !c.watchesReclaim() {
-		return vmGroup{group, conns, nil}, up, nil
+		return vmGroup{group, conns, nil, died}, up, nil
 	}
 	w := newReclaimWatch(open, c.Reclaim.Rebalance, log.Named("reclaim"))
-	return vmGroup{group, conns, w}, watchOnceUp(up, w), w
+	return vmGroup{group, conns, w, died}, watchOnceUp(up, w), w
 }
 
 // watchOnceUp starts watching an instance for reclaim once up admits it.
@@ -441,6 +443,11 @@ func scalerOptions(c Class, settings provider.Settings, up taskscaler.UpFunc, st
 		// at the plugin's own memory, every quarter second; for a cloud one
 		// an API call, every second.
 		taskscaler.WithUpdateIntervalWhenExpecting(expectingInterval(c)),
+		// Otherwise it looks every minute, the default, for a cloud class
+		// an API call. On this host a look is the plugin's own memory: look
+		// every few seconds, so a VM that died is replaced, and a job
+		// waiting on it goes on, within seconds.
+		taskscaler.WithUpdateInterval(updateInterval(c)),
 		// A job waiting for a VM looks for a ready one this often. The look
 		// is in taskscaler's memory, and the default two seconds was most
 		// of a restored VM's wait.
@@ -455,6 +462,15 @@ func scalerOptions(c Class, settings provider.Settings, up taskscaler.UpFunc, st
 		// connects to the VM anyway.
 		taskscaler.WithHeartbeatFunc(func(context.Context, provider.ConnectInfo) error { return nil }),
 	}
+}
+
+// updateInterval is how often taskscaler lists a class's instances when
+// it expects none: 0 for taskscaler's default.
+func updateInterval(c Class) time.Duration {
+	if c.OnHost() {
+		return 5 * time.Second
+	}
+	return 0
 }
 
 // expectingInterval is how often taskscaler lists a class's instances
@@ -478,6 +494,42 @@ func (g initialised) Init(context.Context, hclog.Logger, provider.Settings) (pro
 }
 
 // Has reports whether a class exists.
+// Died is how many of a class's instances have gone without fleetci
+// removing them: VMs that died, cloud instances taken away.
+func (b *Backend) Died(class string) int64 {
+	var n int64
+	for p := range b.allPools() {
+		if p.name == class {
+			n += p.died.count()
+		}
+	}
+	return n
+}
+
+// Idle is how many of a class's VMs are booted and hold no job: ones
+// taskscaler started for a wait that ended before they were ready, and
+// keeps until the class's idle_time. They take room on the host all the
+// same.
+func (b *Backend) Idle(class string) int {
+	n := 0
+	for p := range b.allPools() {
+		if p.name != class {
+			continue
+		}
+		select {
+		case <-p.ready:
+		default:
+			continue
+		}
+		if p.ts == nil {
+			continue
+		}
+		available, _ := p.ts.Capacity()
+		n += available / p.class.capacity()
+	}
+	return n
+}
+
 func (b *Backend) Has(class string) bool {
 	_, ok := b.pools[class]
 	return ok

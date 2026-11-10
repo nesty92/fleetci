@@ -82,7 +82,33 @@ type Config struct {
 	// region. The runner is patched on the VM to accept it; other
 	// requests (artifacts) the server passes on to GitHub.
 	CacheURL string `json:"cache_url" toml:"cache_url"`
+
+	// NameByJob, set by fleetci's controller and never by fleetci.toml,
+	// names each runner after the job it is started for and the try,
+	// fleetci-<class>-j<job id>-<try>, in place of a random name. GitHub
+	// refuses a name it has with 409 Conflict, so two controllers that
+	// both lead for a while can't start two runners for one job: the one
+	// refused leaves the job for ClaimTimeout.
+	NameByJob bool `json:"-" toml:"-"`
+
+	// HandOverIdle, set by fleetci's controller, hands a runner that has
+	// taken no job yet to its VM's keeper when the dispatcher stops, as one
+	// that has: a fleet worker follows it, and stops it when it stays
+	// idle. The next leader leaves the job to it, by its name.
+	HandOverIdle bool `json:"-" toml:"-"`
+
+	// Transport, set by fleetci's controller, carries the API calls, which
+	// its metrics count.
+	Transport http.RoundTripper `json:"-" toml:"-"`
+	// QueueWait, set by fleetci's controller, is told how long each job
+	// waited, from GitHub queuing it to its VM being up.
+	QueueWait func(class string, wait time.Duration) `json:"-" toml:"-"`
 }
+
+// claimTimeout is how long a job whose runner's name GitHub already has,
+// registered by another controller, is left to that runner before a runner
+// is started for it under the next try.
+var claimTimeout = 3 * time.Minute
 
 // WebhookConfig is the [github.webhook] table: where GitHub delivers
 // workflow_job events.
@@ -206,7 +232,7 @@ func New(ctx context.Context, cfg Config, capacity source.Capacity, start StartF
 	if cfg.APIURL == "" {
 		cfg.APIURL = "https://api.github.com"
 	}
-	hc := &http.Client{Timeout: 30 * time.Second}
+	hc := &http.Client{Timeout: 30 * time.Second, Transport: cfg.Transport}
 	tokens, err := cfg.auth(hc)
 	if err != nil {
 		return nil, err
@@ -759,6 +785,18 @@ func (d *Dispatcher) done(id int64) {
 	d.forget(id, false, true)
 }
 
+// claimed leaves a job to the runner another controller started for it:
+// the next try waits claimTimeout, and this one doesn't count.
+func (d *Dispatcher) claimed(id int64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if a, ok := d.taken[id]; ok {
+		a.running = false
+		a.tries--
+		a.retryAt = time.Now().Add(claimTimeout)
+	}
+}
+
 // prune drops jobs that are no longer queued after an hour, so the map stays
 // small but a job is never served twice while it waits.
 func (d *Dispatcher) prune(queued map[int64]bool) {
@@ -789,9 +827,23 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 
 	// The runner is registered while the VM is taken: each takes most of a
 	// second, and neither needs the other.
-	regc := make(chan registration, 1)
-	go func() { regc <- d.register(ctx, scope, class, labels) }()
+	d.mu.Lock()
+	try := 1
+	if a := d.taken[j.ID]; a != nil {
+		try = a.serves
+	}
+	d.mu.Unlock()
+	name := d.runnerName(class, j.ID, try)
 	wctx, unwait := context.WithCancel(ctx)
+	regc := make(chan registration, 1)
+	go func() {
+		r := d.register(ctx, scope, name, labels)
+		if d.cfg.NameByJob && conflict(r.err) {
+			// Another controller's runner holds the job: no VM for it.
+			unwait()
+		}
+		regc <- r
+	}()
 	d.mu.Lock()
 	if a := d.taken[j.ID]; a != nil {
 		a.unwait = unwait
@@ -810,7 +862,7 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 		// A long wait for room: a config that old is swapped for a new one
 		// rather than trusted to still work.
 		d.unregister(ctx, scope, reg.id, log)
-		reg = d.register(ctx, scope, class, labels)
+		reg = d.register(ctx, scope, name, labels)
 	}
 	// handedOver: fleetci is stopping, and the runner, running its job, is
 	// left on its VM to the next fleetci, which removes both after it.
@@ -826,6 +878,14 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 		d.orphaned(orphan{scope: scope, name: reg.name})
 	}
 
+	if d.cfg.NameByJob && conflict(reg.err) {
+		log.Info("a runner of this name is registered already, by another controller: the job is left to it", "runner", reg.name, "for", claimTimeout.String())
+		if err == nil {
+			_ = d.capacity.Delete(context.WithoutCancel(ctx), created.ID)
+		}
+		d.claimed(j.ID)
+		return
+	}
 	if err != nil && gone {
 		log.Info("job taken by another runner while it waited for a vm", "waited", time.Since(start).Round(time.Second).String())
 		d.done(j.ID)
@@ -846,6 +906,9 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 	log = log.With("vm", created.ID, "instance", created.Instance)
 	if d.takenElsewhere(ctx, repo, j, start, log) {
 		return
+	}
+	if d.cfg.QueueWait != nil && !j.CreatedAt.IsZero() {
+		d.cfg.QueueWait(class, max(time.Since(j.CreatedAt), 0))
 	}
 	conn, err := d.capacity.Conn(created.ID)
 	if err != nil {
@@ -880,10 +943,10 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 	switch {
 	case ctx.Err() != nil:
 		// A runner that took no job yet goes with its VM, and its job
-		// waits for the next fleetci.
-		if took.Load() != nil && d.capacity.HandOver(context.WithoutCancel(ctx), created.ID) {
+		// waits for the next fleetci, unless HandOverIdle leaves it.
+		if (took.Load() != nil || d.cfg.HandOverIdle) && d.capacity.HandOver(context.WithoutCancel(ctx), created.ID) {
 			handedOver = true
-			log.Info("fleetci stopping: runner left on its vm with its job, for the next fleetci")
+			log.Info("fleetci stopping: runner left on its vm, for the next fleetci", "took", took.Load() != nil)
 		}
 	case err != nil || rctx.Err() != nil:
 		// Retried while the job is still queued: a runner that failed or
@@ -938,10 +1001,9 @@ type registration struct {
 	err  error
 }
 
-// register registers a runner for a job of class, under a name of its own:
-// the VM it will run on is not known yet.
-func (d *Dispatcher) register(ctx context.Context, scope, class string, labels []string) registration {
-	r := registration{name: runnerName(class)}
+// register registers a runner under name.
+func (d *Dispatcher) register(ctx context.Context, scope, name string, labels []string) registration {
+	r := registration{name: name}
 	r.id, r.jit, r.err = d.gh.jitConfig(ctx, scope, r.name, d.cfg.RunnerGroupID, labels)
 	r.at = time.Now()
 	return r
@@ -957,7 +1019,16 @@ func (d *Dispatcher) unregister(ctx context.Context, scope string, id int64, log
 	}
 }
 
-// runnerName names a runner after its class, as fleetci's VMs are.
+// runnerName names a runner after its class, as fleetci's VMs are, and with
+// NameByJob after its job and try; otherwise the name is its own, as the VM
+// it will run on is not known yet.
+func (d *Dispatcher) runnerName(class string, job int64, try int) string {
+	if d.cfg.NameByJob {
+		return fmt.Sprintf("fleetci-%s-j%d-%d", class, job, try)
+	}
+	return runnerName(class)
+}
+
 func runnerName(class string) string {
 	b := make([]byte, 4)
 	_, _ = rand.Read(b)

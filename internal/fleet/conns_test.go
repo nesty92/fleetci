@@ -121,7 +121,7 @@ func TestAJobsVMCarriesItsInstancesConnection(t *testing.T) {
 	conns := newVMConns(group, false, hclog.NewNullLogger())
 	defer conns.close()
 	c := Class{MaxInstances: 1, MaxUseCount: 100}
-	ts := scaler(t, vmGroup{group, conns, nil}, c)
+	ts := scaler(t, vmGroup{group, conns, nil, nil}, c)
 
 	b := &Backend{log: hclog.NewNullLogger(), vms: map[string]*pool{}}
 	p := &pool{name: "c", class: c, conns: conns, ts: ts}

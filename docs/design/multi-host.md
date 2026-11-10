@@ -6,9 +6,12 @@ Status: plan. The first step, the embedded GitLab runner, is a spike on
 ## Where this goes
 
 fleetci becomes one program that runs anywhere and takes jobs from GitLab
-and GitHub itself, with no gitlab-runner beside it. Several machines,
-joined over Tailscale, run it together: they share the work, and the
-cluster keeps going when one of them fails.
+and GitHub itself, with no gitlab-runner beside it. Several machines run
+it together: a leader, the only one connected to GitHub and GitLab, finds
+the jobs and places each on a worker with room; workers dial out to it,
+from behind any NAT, and never register anywhere; a standby takes over
+from a lost leader. A new machine joins with one command, which also
+installs and checks its microVMs. See [ha.md](ha.md).
 
 Today a GitLab install is gitlab-runner plus fleetci's fleeting plugin, and
 GitHub jobs need `fleetci serve`, a second process with classes of its own
@@ -118,24 +121,25 @@ What answers them:
   before it asks; a job of that class takes it, a job of another gives it
   back and waits for its own. A full host takes no jobs, and a nominated
   job's held room stops new ones.
-- Run the job on any host's VM (3, in step 2). The Docker executor only
-  dials the VM over SSH, so the host that took the job can run it on a VM
-  another host created, over Tailscale, that host carrying the SSH as
-  fleetci's proxy does today. The cluster chooses where the VM goes; GitLab
-  never needs to know. Nominations keep working, because a taken job's
-  class is known. The cost: the Docker API's traffic goes through the host
-  that took the job, and the job is lost if that host fails. Image pulls,
-  cache and artifacts go from the VM itself.
+- Place the job on any machine (3; [ha.md](ha.md)). With several
+  machines only the leader asks GitLab, and only while some worker has
+  room for the largest class. Once it has the job, and so its class, it
+  sends the job to a worker with room, which runs the build itself:
+  every call a build makes after it is taken uses the job's token, not
+  the runner's. No VM traffic crosses machines, and nominations work
+  across the fleet, because a taken job's class is known.
 - List pending jobs with GitLab's API (`GET /projects/:id/jobs?scope=pending`,
   or instance-wide for an admin), to warm VMs and see a large job waiting
   before it is taken. The API shows tags, not variables, so this needs the
   class as a tag too; the template can carry both.
 
-One runner per class answers 1 and 3 without any of that: fleetci asks for
-a class's job only when the class has room, so jobs it can't run stay
+One runner per class answers 1 and 3 on its own: fleetci asks for a
+class's job only when the class has room, so jobs it can't run stay
 pending in GitLab, where another host may take them. It costs a
 registration per class, the class as the job's tag, and nominations for
-jobs still in GitLab, which fleetci can't see or reorder.
+jobs still in GitLab, which fleetci can't see or reorder. With the leader
+the single runner answers all three, so per-class runners stay an option,
+not something several machines need.
 
 ### Job sources are plugins, as fleeting's providers are
 
@@ -143,7 +147,7 @@ fleeting keeps the cloud behind a small interface (`InstanceGroup`) and
 each cloud in a plugin binary of its own, run over hashicorp/go-plugin, so
 the implementation can be swapped without touching what uses it. fleetci
 does the same one level up: the core owns the classes, the host budget, the
-queue, the VMs and, later, the cluster; where jobs come from is a job
+queue, the VMs and, later, the placement across machines; where jobs come from is a job
 source behind an interface, in a binary of its own.
 
 ```go
@@ -186,9 +190,11 @@ What the boundary also gives:
 
 - The core restarts a source that dies; gitlab-runner never restarts a
   dead plugin, which is why `fleetci watchdog` exists.
-- In the cluster, Capacity is the cluster's: a source on any host reserves
-  room anywhere, and the core places the VM (step 2). The source doesn't
-  change.
+- With several machines, the leader's source gets a Capacity whose hosts
+  are the workers: `Reserve` and `Acquire` cross the stream to the worker
+  chosen. A GitLab source then has two halves, taking the job on the
+  leader and running the build on the worker; a GitHub source runs only
+  on the leader, since the runner on the VM does the rest.
 - The plugin direction stays: gitlab-runner loading `fleeting-plugin-fleetci`
   is unchanged and needs no source.
 
@@ -205,83 +211,53 @@ it holds. Plugin mode's GitHub dispatcher uses the same Capacity.
   binary of 101 MB against 23 MB, most of it the cloud SDKs of the cache
   adapters and secret resolvers; build tags could leave out the unused ones.
 
-## Step 2: the cluster
+## Step 2: a leader and its workers
 
-### What stays local
+Replaced by [ha.md](ha.md). Raft would stop a site cut off from the
+majority, and needs the machines to reach each other, which machines at
+several sites behind NAT often can't. Instead workers dial out to the
+controllers, and one controller, the leader, finds the jobs and places
+them by each worker's room. Two leaders at once do no harm: GitLab gives a
+job once, GitHub refuses a second runner of a job's name, and each worker
+reserves its own room. `fleetci join` adds a machine: trust from a token,
+the fleet's versions installed, and a microVM booted and checked before the
+worker takes jobs.
 
-Each host's budget is the host's own and needs no agreement: a host knows
-what runs on it. When the cluster loses quorum, every host keeps running
-its jobs and keeps taking jobs of its local classes within its budget. Only
-the shared things below pause.
-
-### What needs agreement
-
-| State | Why | How |
-|---|---|---|
-| Owner of each cloud class | Two processes driving one fleeting group remove each other's VMs | A lease with a fencing token, after Kubernetes client-go `leaderelection` |
-| GitHub dispatch | One host creates the just-in-time runner for a job | A claim per job id in the Raft log |
-| Where a taken job's VM goes | A host that took a job it has no room for runs it on another host's VM | Placement by the leader, kept in Raft |
-| Nominations between hosts | A long-waiting large job isn't starved by small ones elsewhere | Run by the leader, kept in Raft |
-| Hosts, their budgets and free room | Placement and nominations | Gossip (memberlist), heartbeats in Raft |
-
-### Consensus
-
-`hashicorp/raft`, which Nomad, Consul and Vault run on, is MPL-2.0 and is
-imported as a library, with `raft-boltdb` for its log, `memberlist` for
-finding peers over Tailscale and `raft-autopilot` for removing dead
-servers. etcd's `raft` (Apache-2.0) is the alternative; it leaves storage
-and transport to us.
-
-Surviving one server's failure takes three voters. With two machines, the
-third voter can be anything small: a cloud nano instance, a Raspberry Pi, a
-laptop. Further machines join as clients that run jobs and don't vote, as
-Nomad's do.
-
-### max_instances
-
-Proposed: per host for classes on the host, so each host's own limit holds;
-for the whole cluster for cloud classes, which have one owner. To decide
-before the cluster is built.
-
-### Where the ideas come from
-
-- Kubernetes (Apache-2.0, may be ported with credit): leader election with
-  leases; the node lifecycle controller, which marks a node NotReady after
-  a grace period.
-- Kueue (Apache-2.0): cohorts that borrow quota, for cloud overflow shared
-  by hosts.
-- Nomad (BUSL, ideas only, no code): servers and clients; heartbeat TTLs
-  that grow with the cluster; plan and apply with optimistic concurrency;
-  what happens to jobs on a client that disconnects.
-- Slurm (GPL, ideas only): down and drain states for nodes.
+What this section planned and the leader leaves out: running a taken job
+on another host's VM over the network. The leader places a job before
+any VM exists, so the worker that runs it owns the VM.
 
 ## Step 3: tests of several machines in one process
 
-A cluster of N nodes in one test, on Raft's in-memory transport wrapped in
-one that drops, delays and partitions messages. Faults come from a seeded
-schedule, so a failure replays exactly. After each run:
+Controllers and workers in one test, on one fake GitHub and one fake
+GitLab, over in-memory streams wrapped in a transport that drops, delays
+and cuts them. Faults come from a seeded schedule, so a failure replays
+exactly. After each run:
 
 - no host ran past its budget;
-- no cloud class had two owners at once (fencing tokens only grow);
-- no job was claimed twice;
+- no cloud group had two owners at once;
+- no job got runners, or builds, on two workers at once;
+- no job waited past `claim_timeout` while a `Ready` worker had room for
+  it and a leader was up;
 - every job taken started, or failed with its reason.
 
 ## Step 4: the demo
 
-Three to five Cloud Hypervisor microVMs from the local kit act as servers,
-each running fleetci with a dockervm class, or a fake plugin when testing
-scale. headscale (self-hosted Tailscale control, BSD-3) joins them, so the
-kit needs no tailnet account; real Tailscale between real machines comes
-after.
+Three to five Cloud Hypervisor microVMs from the local kit act as
+machines, with nested KVM, each joined with `fleetci join`: one controller
+with a public port, the workers each behind a NAT of their own, reaching
+only it and the forge. A fake plugin stands in for fleetingd when testing
+scale. Real machines at real sites come after.
 
 ## Step 5: chaos
 
-- kill -9 the leader; stop a server with SIGSTOP, which is worse than a
-  crash;
+- kill -9 a member; stop one with SIGSTOP, which is worse than a crash;
 - partitions with nftables, latency and loss with netem;
-- clock jumps; a full disk under Raft's directory;
-- Tailscale falling back to its DERP relays; expired node keys;
+- clock jumps; a full disk under `state_dir`;
+- a worker cut from the controllers but not from the forge; a site cut
+  off with its own controller;
+- expired join tokens; revoked worker certificates;
 - rolling upgrades.
 
 The invariants of step 3 are checked against the event history of each
-run, and the claim and lease API with Porcupine (MIT) for linearizability.
+run.
