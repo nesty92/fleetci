@@ -129,7 +129,7 @@ func manifest(args []string) error {
 	for _, arch := range arches {
 		bins := map[string]release.Binary{}
 		name := "fleetci-linux-" + arch
-		sum, size, err := release.SHA256File(filepath.Join(*dist, name))
+		sum, size, err := release.SHA256File(distFile(*dist, name))
 		if err != nil {
 			return err
 		}
@@ -304,4 +304,24 @@ func untarOne(ctx context.Context, hc *http.Client, url, member, path string) er
 		}
 		return f.Close()
 	}
+}
+
+// distFile is where GoReleaser put the release asset name. A binary
+// "archive" stays in its build directory (dist/fleetci_linux_amd64_v1/fleetci)
+// and is uploaded under the archive's name, so look it up in
+// dist/artifacts.json (its paths are relative to where GoReleaser ran, the
+// checkout); dist/name is the fallback, for a directory of downloaded assets.
+func distFile(dist, name string) string {
+	b, err := os.ReadFile(filepath.Join(dist, "artifacts.json"))
+	if err == nil {
+		var arts []struct{ Name, Path string }
+		if json.Unmarshal(b, &arts) == nil {
+			for _, a := range arts {
+				if a.Name == name && a.Path != "" {
+					return a.Path
+				}
+			}
+		}
+	}
+	return filepath.Join(dist, name)
 }
