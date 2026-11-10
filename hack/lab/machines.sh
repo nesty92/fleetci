@@ -80,9 +80,12 @@ runcmd:
 UD
   printf 'instance-id: lab-%s-1\nlocal-hostname: %s\n' "$n" "$n" > "$m/meta-data"
   cloud-localds -N "$m/net.yaml" "$m/seed.img" "$m/user-data" "$m/meta-data"
+  # free_page_reporting: the guest hands the host back the memory its
+  # job VMs free, so a worker holds what it uses, not all of ${mem}M.
   nohup cloud-hypervisor --kernel "$KERNEL" --cmdline "console=ttyS0 root=/dev/vda1 rw" \
     --disk path="$m/disk.qcow2",image_type=qcow2,backing_files=on path="$m/seed.img",readonly=on,image_type=raw \
     --cpus boot=$cpus,nested=on --memory size=${mem}M \
+    --balloon size=0,free_page_reporting=on \
     --net tap=$tap,mac=$mac --serial file="$m/serial.log" --console off \
     > "$m/ch.log" 2>&1 &
   echo $! > "$m/pid"
