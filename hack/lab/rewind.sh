@@ -9,6 +9,8 @@ stop='kill $(pidof fleetci) 2>/dev/null || true; end=$(($(date +%s)+30)); while 
 unit='systemctl disable --now fleetci-worker 2>/dev/null; rm -f /etc/systemd/system/fleetci-worker.service; systemctl daemon-reload
       journalctl -q --rotate; journalctl -q --vacuum-time=1s'
 for m in eu us ap; do $S $m "$unit" & done; wait
+# up.sh's controller, which would come back when killed
+$S ctl 'systemctl stop fleetci-controller 2>/dev/null; systemctl reset-failed fleetci-controller 2>/dev/null; true'
 for m in ctl eu us ap; do $S $m "$stop" & done; wait
 $S ctl 'rm -rf /etc/fleetci/pki /var/lib/fleetci /root/token* /root/.bash_history'
 for m in eu us ap; do
