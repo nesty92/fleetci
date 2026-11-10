@@ -158,7 +158,7 @@ func GatherFacts(cfg *WorkerConfig, version string) (Facts, error) {
 	}
 	var st syscall.Statfs_t
 	if err := syscall.Statfs(cfg.StateDir, &st); err == nil {
-		f.DiskMB = int64(st.Bavail) * st.Bsize / (1 << 20)
+		f.DiskMB = int64(st.Bavail) * int64(st.Bsize) / (1 << 20)
 	}
 	f.KVM = kvmProblem()
 	return f, nil
