@@ -47,7 +47,7 @@ func NewDispatch(ctx context.Context, c Config, capacity source.Capacity, remote
 	}
 	p := l.mr.executorProviders.GetByName(executorName).(*provider)
 	l.mr.dispatch = &dispatcher{ctx: ctx, capacity: capacity, remote: remote, log: log,
-		classes: source.Names(classes), defaultClass: defaultClass, classOf: p.classOf}
+		classes: source.Names(classes), defaultClass: defaultClass, classOf: p.classOf, held: held(c.HeldDir)}
 	if c.Concurrent == 0 {
 		// The fleet grows as workers join; room, not this, holds jobs back.
 		l.mr.config.Concurrent = 256
@@ -63,6 +63,7 @@ type dispatcher struct {
 	classes      []string
 	defaultClass string
 	classOf      func(*common.RunnerConfig) string
+	held         held
 }
 
 // dispatchBuild takes one job from GitLab and runs it on a worker. It
@@ -82,7 +83,9 @@ func (mr *RunCommand) dispatchBuild(runner *common.RunnerConfig, runners chan *c
 	}
 	creds := &common.JobCredentials{ID: job.ID, Token: job.Token}
 	log := d.log.With("job", job.ID, "project", job.JobInfo.ProjectID)
+	d.held.put(heldJob{ID: job.ID, Token: job.Token, URL: runner.URL}, log)
 	fail := func(err error) error {
+		defer d.held.drop(job.ID)
 		log.Error("job not placed; failing it", "err", err)
 		trace, terr := mr.network.ProcessJob(*runner, creds)
 		if terr != nil {
@@ -131,6 +134,7 @@ func (mr *RunCommand) dispatchBuild(runner *common.RunnerConfig, runners chan *c
 		return fail(err)
 	}
 	log.Info("job placed", "class", class, "vm", vm.ID)
+	d.held.drop(job.ID) // the worker has it now, and ends it
 	if err := d.remote(d.ctx, vm, jobJSON, runnerJSON); err != nil {
 		if d.ctx.Err() != nil {
 			return nil // the leader stops; the job goes on on its worker

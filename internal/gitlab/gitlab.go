@@ -60,6 +60,10 @@ type Config struct {
 	// (concurrent, check_interval, shutdown_timeout...) apply unless set
 	// above.
 	ConfigFile string `json:"config_file" toml:"config_file"`
+
+	// HeldDir, set by fleetci's controller, keeps a note of each job taken
+	// and not yet on a worker, which FailHeld fails after a restart.
+	HeldDir string `json:"-" toml:"-"`
 }
 
 // Runner is one class's GitLab runner.
