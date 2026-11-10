@@ -85,15 +85,18 @@ func controllerCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	c.Sources = fleetSources
-	if cfg.GitLab != nil {
-		// Leading or not, the jobs this controller took before it was
-		// killed, and never placed, are failed rather than left running.
-		failHeld := gitlab.FailHeld(heldDir(cfg), log.Named("gitlab"))
-		go failHeld()
-	}
 	ctx, stop := signalContext()
 	defer stop()
+	var held *gitlab.Held
+	if cfg.GitLab != nil {
+		// The jobs this controller took before it was killed or restarted,
+		// and never placed: placed once it leads, failed if it doesn't
+		// lead soon.
+		held = gitlab.LoadHeld(heldDir(cfg), log.Named("gitlab"))
+		go held.FailAfter(ctx, gitlab.ResumeWithin)
+	}
+	exiting := func() bool { return ctx.Err() != nil }
+	c.Sources = func(lctx context.Context, c *cluster.Controller) error { return fleetSources(lctx, c, held, exiting) }
 	return c.Run(ctx)
 }
 
@@ -103,7 +106,7 @@ func heldDir(cfg *cluster.ControllerConfig) string {
 }
 
 // fleetSources are the leader's job sources, over the fleet's capacity.
-func fleetSources(ctx context.Context, c *cluster.Controller) error {
+func fleetSources(ctx context.Context, c *cluster.Controller, held *gitlab.Held, exiting func() bool) error {
 	cfg, log := c.Config(), c.Log()
 	capacity := c.Capacity()
 	var runs []func() error
@@ -120,7 +123,7 @@ func fleetSources(ctx context.Context, c *cluster.Controller) error {
 	}
 	if cfg.GitLab != nil {
 		gcfg := *cfg.GitLab
-		gcfg.HeldDir = heldDir(cfg)
+		gcfg.HeldDir, gcfg.Held, gcfg.Exiting = heldDir(cfg), held, exiting
 		l, err := gitlab.NewDispatch(ctx, gcfg, capacity, c.GitLabRemote(), log.Named("gitlab"))
 		if err != nil {
 			return err

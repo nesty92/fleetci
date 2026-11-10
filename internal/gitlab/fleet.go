@@ -47,7 +47,8 @@ func NewDispatch(ctx context.Context, c Config, capacity source.Capacity, remote
 	}
 	p := l.mr.executorProviders.GetByName(executorName).(*provider)
 	l.mr.dispatch = &dispatcher{ctx: ctx, capacity: capacity, remote: remote, log: log,
-		classes: source.Names(classes), defaultClass: defaultClass, classOf: p.classOf, held: held(c.HeldDir)}
+		classes: source.Names(classes), defaultClass: defaultClass, classOf: p.classOf,
+		held: held(c.HeldDir), resume: c.Held, exiting: c.Exiting}
 	if c.Concurrent == 0 {
 		// The fleet grows as workers join; room, not this, holds jobs back.
 		l.mr.config.Concurrent = 256
@@ -64,6 +65,8 @@ type dispatcher struct {
 	defaultClass string
 	classOf      func(*common.RunnerConfig) string
 	held         held
+	resume       *Held       // the jobs the last process left waiting
+	exiting      func() bool // whether the controller exits, not only stops leading
 }
 
 // dispatchBuild takes one job from GitLab and runs it on a worker. It
@@ -83,19 +86,8 @@ func (mr *RunCommand) dispatchBuild(runner *common.RunnerConfig, runners chan *c
 	}
 	creds := &common.JobCredentials{ID: job.ID, Token: job.Token}
 	log := d.log.With("job", job.ID, "project", job.JobInfo.ProjectID)
-	d.held.put(heldJob{ID: job.ID, Token: job.Token, URL: runner.URL}, log)
-	fail := func(err error) error {
-		defer d.held.drop(job.ID)
-		log.Error("job not placed; failing it", "err", err)
-		trace, terr := mr.network.ProcessJob(*runner, creds)
-		if terr != nil {
-			mr.network.UpdateJob(*runner, creds, common.UpdateJobInfo{ID: job.ID, State: common.Failed, FailureReason: common.RunnerSystemFailure})
-			return err
-		}
-		fmt.Fprintln(trace, "fleetci: "+err.Error())
-		logTerminationError(mr.log(), "Fail", trace.Fail(err, common.JobFailureData{Reason: common.RunnerSystemFailure}))
-		return err
-	}
+	rc := *runner
+	rc.Token = runner.ShortDescription() // the worker never sees the runner token
 
 	class := d.classOf(runner) // a runner of a class takes that class's jobs
 	for _, v := range job.Variables {
@@ -110,32 +102,44 @@ func (mr *RunCommand) dispatchBuild(runner *common.RunnerConfig, runners chan *c
 		class = d.defaultClass
 	}
 	if !slices.Contains(d.classes, class) {
-		return fail(fmt.Errorf("unknown class %q; the fleet has %v (default %s)", class, d.classes, d.defaultClass))
-	}
-	ctx, cancel := context.WithTimeout(d.ctx, defaultAcquireWait)
-	vm, err := d.capacity.Create(ctx, class)
-	cancel()
-	if err != nil {
-		if d.ctx.Err() != nil {
-			err = errors.New("the controller stopped before the job had a VM")
-		}
-		return fail(fmt.Errorf("no %s VM: %w", class, err))
+		return mr.failJob(rc, creds, fmt.Errorf("unknown class %q; the fleet has %v (default %s)", class, d.classes, d.defaultClass), log)
 	}
 	jobJSON, err := marshalJob(job)
 	if err != nil {
-		_ = d.capacity.Delete(context.Background(), vm.ID)
-		return fail(err)
+		return mr.failJob(rc, creds, err, log)
 	}
-	rc := *runner
-	rc.Token = runner.ShortDescription() // the worker never sees the runner token
 	runnerJSON, err := json.Marshal(&rc)
 	if err != nil {
-		_ = d.capacity.Delete(context.Background(), vm.ID)
-		return fail(err)
+		return mr.failJob(rc, creds, err, log)
 	}
-	log.Info("job placed", "class", class, "vm", vm.ID)
-	d.held.drop(job.ID) // the worker has it now, and ends it
-	if err := d.remote(d.ctx, vm, jobJSON, runnerJSON); err != nil {
+	n := heldJob{ID: job.ID, Token: job.Token, URL: runner.URL, Class: class, Job: jobJSON, Runner: runnerJSON}
+	d.held.put(n, log)
+	return mr.place(rc, n, log)
+}
+
+// place runs a job taken, and noted, on a VM of its class, and returns when
+// it ends there. With no VM for it, it fails the job; but a controller
+// that exits leaves it noted, for its next start to place.
+func (mr *RunCommand) place(rc common.RunnerConfig, n heldJob, log hclog.Logger) error {
+	d := mr.dispatch
+	creds := &common.JobCredentials{ID: n.ID, Token: n.Token}
+	ctx, cancel := context.WithTimeout(d.ctx, defaultAcquireWait)
+	vm, err := d.capacity.Create(ctx, n.Class)
+	cancel()
+	if err != nil {
+		if d.ctx.Err() != nil {
+			if d.held != "" && d.exiting != nil && d.exiting() {
+				log.Info("the controller stops before the job had a VM: its next start places it")
+				return nil
+			}
+			err = errors.New("the controller stopped leading before the job had a VM")
+		}
+		d.held.drop(n.ID)
+		return mr.failJob(rc, creds, fmt.Errorf("no %s VM: %w", n.Class, err), log)
+	}
+	log.Info("job placed", "class", n.Class, "vm", vm.ID)
+	d.held.drop(n.ID) // the worker has it now, and ends it
+	if err := d.remote(d.ctx, vm, n.Job, n.Runner); err != nil {
 		if d.ctx.Err() != nil {
 			return nil // the leader stops; the job goes on on its worker
 		}
@@ -144,6 +148,48 @@ func (mr *RunCommand) dispatchBuild(runner *common.RunnerConfig, runners chan *c
 	}
 	log.Info("job done", "vm", vm.ID)
 	return nil
+}
+
+// resumeHeld places the jobs the controller's last process took and left
+// waiting for a VM, each as it would have.
+func (mr *RunCommand) resumeHeld() {
+	d := mr.dispatch
+	if d == nil {
+		return
+	}
+	for _, n := range d.resume.take() {
+		log := d.log.With("job", n.ID)
+		var rc common.RunnerConfig
+		err := json.Unmarshal(n.Runner, &rc)
+		switch {
+		case err != nil || len(n.Job) == 0:
+			// A note without the job, from before notes held it, can
+			// only be failed.
+			rc.URL = n.URL
+			d.held.drop(n.ID)
+			_ = mr.failJob(rc, &common.JobCredentials{ID: n.ID, Token: n.Token}, errors.New("the controller restarted before the job had a VM"), log)
+		case !slices.Contains(d.classes, n.Class):
+			d.held.drop(n.ID)
+			_ = mr.failJob(rc, &common.JobCredentials{ID: n.ID, Token: n.Token}, fmt.Errorf("class %q is gone from the fleet", n.Class), log)
+		default:
+			log.Info("placing a job taken before a restart", "class", n.Class)
+			go func() { _ = mr.place(rc, n, log) }()
+		}
+	}
+}
+
+// failJob fails a job taken that can't be placed, as a runner system
+// failure, which a job's retry can take, saying why in its log.
+func (mr *RunCommand) failJob(rc common.RunnerConfig, creds *common.JobCredentials, err error, log hclog.Logger) error {
+	log.Error("job not placed; failing it", "err", err)
+	trace, terr := mr.network.ProcessJob(rc, creds)
+	if terr != nil {
+		mr.network.UpdateJob(rc, creds, common.UpdateJobInfo{ID: creds.ID, State: common.Failed, FailureReason: common.RunnerSystemFailure})
+		return err
+	}
+	fmt.Fprintln(trace, "fleetci: "+err.Error())
+	logTerminationError(mr.log(), "Fail", trace.Fail(err, common.JobFailureData{Reason: common.RunnerSystemFailure}))
+	return err
 }
 
 // marshalJob is the job as GitLab sent it. spec.Job round-trips through

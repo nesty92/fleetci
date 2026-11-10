@@ -62,8 +62,15 @@ type Config struct {
 	ConfigFile string `json:"config_file" toml:"config_file"`
 
 	// HeldDir, set by fleetci's controller, keeps a note of each job taken
-	// and not yet on a worker, which FailHeld fails after a restart.
+	// and not yet on a worker, for the next start to place after a restart.
 	HeldDir string `json:"-" toml:"-"`
+	// Held, set by fleetci's controller, is the jobs its last process left
+	// noted, which the loop places when it runs.
+	Held *Held `json:"-" toml:"-"`
+	// Exiting, set by fleetci's controller, says whether it exits, rather
+	// than only stops leading: a job still waiting for a VM is then left
+	// noted, not failed.
+	Exiting func() bool `json:"-" toml:"-"`
 }
 
 // Runner is one class's GitLab runner.
@@ -252,6 +259,7 @@ func New(ctx context.Context, c Config, capacity source.Capacity, log hclog.Logg
 // waits for them up to the shutdown timeout.
 func (l *Loop) Run(ctx context.Context) error {
 	go l.mr.run()
+	l.mr.resumeHeld()
 	<-ctx.Done()
 	l.log.Info("stopping: aborting running GitLab jobs")
 	return l.mr.Stop()
