@@ -1,0 +1,25 @@
+# One job of the language matrix (hack/cachelab/realmatrix.sh starts it):
+# a real repo's CI at a commit, on fleetci-cache, with the cache disk, or
+# on fleetci-plain, without.
+name: matrix
+run-name: matrix ${{ inputs.id }}
+on:
+  workflow_dispatch:
+    inputs:
+      id: {required: true}
+      lang: {required: true}
+      url: {required: true}
+      commit: {required: true}
+      runner: {required: true}
+jobs:
+  matrix:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 60
+    env:
+      MATRIX_ID: ${{ inputs.id }}
+      MATRIX_LANG: ${{ inputs.lang }}
+      MATRIX_URL: ${{ inputs.url }}
+      MATRIX_COMMIT: ${{ inputs.commit }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: sh ci/run.sh github

@@ -1,0 +1,11 @@
+# One job of the language matrix (hack/cachelab/realmatrix.sh starts it,
+# with push options): a real repo's CI at a commit, in the language's
+# image, with the tools' caches under /fleetci, on the cache disk unless
+# FLEETCI_CACHE is off.
+matrix:
+  image: $MATRIX_IMAGE
+  timeout: 60m
+  rules:
+    - if: $MATRIX_ID
+  script:
+    - sh ci/run.sh gitlab
