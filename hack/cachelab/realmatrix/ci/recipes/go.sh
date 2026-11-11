@@ -6,5 +6,7 @@ recipe() {
   step vet "go vet ./..."
   step test "go test -race ./..."
   # GoReleaser's image has Go 1.26; fleetci's go.mod asks for 1.27.
-  step_image goreleaser/goreleaser:v2.14.0 release "git config --global --add safe.directory /src && GOTOOLCHAIN=auto goreleaser release --snapshot --clean"
+  # Two builds at a time: by default one per CPU, and on 12 CPUs, each with
+  # its own compiles, a cold build outgrows 12 GB.
+  step_image goreleaser/goreleaser:v2.14.0 release "git config --global --add safe.directory /src && GOTOOLCHAIN=auto goreleaser release --snapshot --clean --parallelism 2"
 }
