@@ -1,8 +1,9 @@
 #!/bin/sh
 # Runs on the host: the language matrix (matrix.txt) as real CI jobs on
-# fleetci, in the cachelab's e2e fleetci, one job at a time. For each
-# language, its oldest commit with no cache disk, every commit with the
-# disk (the first fills it), then its newest with no disk again.
+# fleetci, in the cachelab's e2e fleetci, one job at a time; two copies,
+# each given its own names, run two at once. For each language, its
+# oldest commit with no cache disk, every commit with the disk (the first
+# fills it), then its newest with no disk again.
 #
 #   realmatrix.sh github|gitlab [name...]
 #
@@ -22,7 +23,6 @@ FLEETCI_LOG=$DATA/e2e/fleetci.log
 GL=${GL:-$OUT/gitlab-playground} # a clone of the GitLab playground, on branch matrix
 names=${*:-$(grep -v '^#' "$here/matrix.txt" | awk 'NF {print $1}')}
 
-count() { grep -c "$1" "$FLEETCI_LOG" 2>/dev/null || true; }
 wait_for() { # <what> <seconds> <command...>: until the command succeeds
   what=$1 secs=$2; shift 2
   end=$(($(date +%s) + secs))
@@ -31,12 +31,10 @@ wait_for() { # <what> <seconds> <command...>: until the command succeeds
     sleep 5
   done
 }
-grows() { [ "$(count "$1")" -gt "$2" ]; }
 
 job() { # <name> <url> <commit> <with disk: yes|no> <tag>
   name=$1 url=$2 commit=$3 disk=$4 tag=$5
   id="$forge-$name-$tag-$(date +%s)"
-  released=$(count 'vm released') kept=$(count 'cache kept\|layer is dropped\|layer not kept')
   case $forge in
   github)
     runner=fleetci-plain; [ $disk = no ] || runner=fleetci-cache
@@ -62,10 +60,17 @@ job() { # <name> <url> <commit> <with disk: yes|no> <tag>
   fi
   echo "$(date +%T) $id started after $(($(date +%s) - t))s"
   wait_for "$id end" 4200 grep -q " $id end" "$SINK" || { echo "$id: no end" | tee -a "$OUT/$forge.log"; exit 1; }
-  # Done: its VM is gone, and its disk's layer kept, before the next.
-  wait_for "$id vm released" 600 grows 'vm released' "$released" || true
-  [ $disk = no ] || wait_for "$id cache kept" 600 grows 'cache kept\|layer is dropped\|layer not kept' "$kept" || true
+  # Done: its VM is released, which fleetci logs once the disk's layer
+  # is kept, before the next. The runner names the VM.
   start=$(grep " $id start" "$SINK" | cut -d' ' -f1)
+  runner=$(grep " $id start" "$SINK" | sed -n 's/.* runner=\([^ ]*\).*/\1/p')
+  vm=$(grep "runner=$runner " "$FLEETCI_LOG" | sed -n 's/.* vm=\([^ ]*\).*/\1/p' | head -1)
+  if [ -n "$vm" ]; then
+    wait_for "$id vm released" 600 grep -q "vm released: vm=$vm " "$FLEETCI_LOG" || true
+  else
+    echo "$id: which VM ran it is not known; waiting a minute" >&2
+    sleep 60
+  fi
   line=$(grep " $id end" "$SINK" | tail -1)
   echo "$line queued=$(awk -v a="$start" -v b="$t" 'BEGIN { printf "%.0f", a - b }')s" | tee -a "$OUT/$forge.log"
 }

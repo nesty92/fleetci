@@ -39,7 +39,7 @@ gitlab)
   if grep -q " $C " /proc/mounts; then disk=yes; else disk=no; mkdir -p $C; fi
   ;;
 esac
-post "$id start $mode $lang $MATRIX_COMMIT disk=$disk"
+post "$id start $mode $lang $MATRIX_COMMIT disk=$disk runner=${RUNNER_NAME:-$(hostname)}"
 
 steps="" failed=0
 SRC=$PWD/matrix-src
