@@ -26,6 +26,11 @@ for name in $names; do
     sh /lab/replay.sh 0 none $name $last no
     echo "$name: cache disk $(du -cm /data/cache-*.qcow2 | tail -1 | cut -f1) MB in $((i - 1)) layers"
   } 2>&1 | tee $out/$name.log
+  # HASH=1 keeps the layers' block hashes, for dedup.py report.
+  if [ -n "${HASH:-}" ]; then
+    mkdir -p $out/hashes
+    python3 -I /lab/dedup.py hash $out/hashes/$name $name /data/cache-*.qcow2
+  fi
   rm -f /data/cache-*.qcow2
 done
 echo matrix done

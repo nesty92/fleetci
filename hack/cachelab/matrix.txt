@@ -14,3 +14,5 @@ python       https://github.com/pallets/flask           49943b5a94413a530761350f
 rust         https://github.com/BurntSushi/ripgrep      178cc027e283fd965cb72d0a7395b219eada170c   6
 java         https://github.com/google/gson             a961b0fe088f8558d00cc1b56e506a3656907a91   6
 ruby         https://github.com/rack/rack               da90464e3fa93e3cb49dc2d4ede798e6c6b70b4f   6
+nextjs       https://github.com/vercel/chatbot          a8989b522fa3672a2ae52f053105e40993b36ca1   6
+react        https://github.com/excalidraw/excalidraw   701b901a0f1ba3d0b390d9cdf63d112e25abac4b   6
