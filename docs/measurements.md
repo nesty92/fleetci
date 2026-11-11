@@ -226,3 +226,23 @@ exceeded"), so a chain has to be merged before that.
 
 caddy, on a 2-vCPU, 4 GB VM: the Docker build 79 s cold, 1.3 s warm, 6.1–6.7 s
 after a one-line change; the Go build 64 s cold, 4.5–5.2 s warm.
+
+### A merge train
+
+fleetci's last 13 commits as a busy repo's merge train
+([hack/cachelab/train.sh](../hack/cachelab/train.sh)): the oldest is main
+as the train starts, each other one a merge request whose pipeline runs on
+main plus the ones ahead of it. Three pipelines at once, each in a 2-vCPU,
+4 GB VM on the same host. A merge request merges once it and all ahead of
+it are done, and the next one starts on the cache of the last one merged,
+so three VMs read one parent layer at once and none reads a cache from a
+merge request that hasn't merged.
+
+| | Per merge request | 12 merge requests |
+| --- | --- | --- |
+| cache disk | 40–110 s | 357 s |
+| no cache | 873–935 s | about 60 min (3 measured; 4 rounds of them) |
+
+Warm, a pipeline's tests took 3–63 s: Go reuses the results of packages a
+commit didn't touch. Filling main's cache took 12 min at 2 vCPU (13.4 GB);
+each merge request then added 9–335 MB.
