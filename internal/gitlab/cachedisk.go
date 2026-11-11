@@ -41,20 +41,19 @@ const (
 	cachePathsVariable = "FLEETCI_CACHE_PATHS"
 )
 
-// writer says whether a job writes its project's shared caches. It reads
-// only what GitLab's payload says of the job, which its .gitlab-ci.yml
-// can't change.
-func writer(rules []string, build *common.Build) bool {
+// gitlabJob is what GitLab's payload says of a job, which its
+// .gitlab-ci.yml can't change.
+func gitlabJob(build *common.Build) cachedisk.Job {
 	ref := build.GitInfo.Ref
-	return cachedisk.IsWriter(rules, cachedisk.Job{
+	return cachedisk.Job{
 		Ref:       ref,
 		Tag:       build.GitInfo.RefType == spec.RefTypeTag,
 		Protected: build.IsProtected(),
-		Default:   ref == gitlabDefaultBranch(build),
+		Default:   ref != "" && ref == gitlabDefaultBranch(build),
 		Review: slices.ContainsFunc(build.GitInfo.Refspecs, func(s string) bool {
 			return strings.Contains(s, "refs/merge-requests/")
 		}),
-	})
+	}
 }
 
 // gitlabDefaultBranch is CI_DEFAULT_BRANCH as GitLab set it. A job's own
@@ -89,25 +88,24 @@ func cacheFor(c *CacheDisk, build *common.Build, rc *common.RunnerConfig) (*cach
 	if err != nil || u.Host == "" {
 		return nil, fmt.Errorf("the runner's url %q", build.Runner.URL)
 	}
-	project := build.JobInfo.ProjectFullPath
-	scope := cachedisk.Scope{
+	req := cachedisk.Request{
 		Forge:    "gitlab",
 		Instance: u.Host,
 		Project:  strconv.FormatInt(build.JobInfo.ProjectID, 10),
-		Ref:      build.GitInfo.Ref,
+		Path:     build.JobInfo.ProjectFullPath,
+		Job:      gitlabJob(build),
 		Key:      strings.TrimSpace(vars.ExpandValue(vars.Value(cacheKeyVariable))),
-		Writer:   writer(c.Rules(project), build),
 		From:     fields(vars.ExpandValue(vars.Value(cacheFromVariable))),
 	}
-	if len(scope.Key) > 200 {
+	if len(req.Key) > 200 {
 		return nil, fmt.Errorf("%s is longer than 200 characters", cacheKeyVariable)
 	}
-	if len(scope.From) == 0 {
+	if len(req.From) == 0 {
 		if d := vars.Value("CI_DEFAULT_BRANCH"); d != "" {
-			scope.From = []string{d}
+			req.From = []string{d}
 		}
 	}
-	job := &cacheJob{scope: scope}
+	job := &cacheJob{scope: c.Scope(req)}
 	dir := projectDir(build, rc)
 	for _, p := range fields(vars.ExpandValue(vars.Value(cachePathsVariable))) {
 		if !path.IsAbs(p) {

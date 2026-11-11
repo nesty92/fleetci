@@ -84,6 +84,15 @@ func (c capacityVMs) AttachCache(ctx context.Context, vm string, scope cachedisk
 	return nil, nil
 }
 
+// HasCache says whether the VM's class has a cache disk.
+func (c capacityVMs) HasCache(vm string) bool {
+	a, ok := c.Capacity.(source.CacheAttacher)
+	return ok && a.HasCache(vm)
+}
+
+// capacityVMs passes cache disks through.
+var _ source.CacheAttacher = capacityVMs{}
+
 // capacityReservation is a source.Reservation, used once by Acquire or
 // Release.
 type capacityReservation struct {
@@ -265,10 +274,6 @@ func (e *executor) Prepare(options common.ExecutorPrepareOptions) (err error) {
 // one, and returns the Docker volumes that keep the job's paths on it.
 // Without it the job runs all the same, from cold.
 func (e *executor) attachCache(options common.ExecutorPrepareOptions, vm source.VM) []string {
-	a, ok := e.p.vms.(source.CacheAttacher)
-	if !ok {
-		return nil
-	}
 	job, err := cacheFor(e.p.cacheDisk, options.Build, options.Config)
 	if err != nil {
 		options.BuildLogger.Warningln("No cache disk: " + err.Error())
@@ -277,15 +282,15 @@ func (e *executor) attachCache(options common.ExecutorPrepareOptions, vm source.
 	if job == nil {
 		return nil
 	}
-	st, err := a.AttachCache(options.Context, vm.ID, job.scope)
+	msg, err := source.AttachCache(options.Context, e.p.vms, vm.ID, job.scope)
 	if err != nil {
 		options.BuildLogger.Warningln("No cache disk: " + err.Error())
 		return nil
 	}
-	if st == nil {
+	if msg == "" {
 		return nil
 	}
-	options.BuildLogger.Println(cachedisk.Describe(job.scope, *st))
+	options.BuildLogger.Println(msg)
 	job.keepFromClean(options.Build)
 	return job.volumes()
 }

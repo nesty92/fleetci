@@ -175,3 +175,39 @@ func Describe(s Scope, st Start) string {
 	}
 	return msg
 }
+
+// Request is what a forge says of a job, and what the job asks for: all a
+// source gives to get the job's cache scope. Sources differ only in when
+// they know it: GitLab before the job's VM is prepared, GitHub once the
+// runner has taken the job.
+type Request struct {
+	Forge    string // "gitlab", "github"
+	Instance string // the forge's host
+	// Project is the project's stable id; Path its name, which Projects
+	// match.
+	Project, Path string
+	Job
+	// Fork is the fork's name for a request from one: its job never
+	// writes, and its cache is kept under the fork's name.
+	Fork string
+	// Key and From are the job's choice, where the forge lets it choose.
+	Key  string
+	From []string
+}
+
+// Scope is the job's cache scope, writer or not as the policy says.
+func (p *Policy) Scope(r Request) Scope {
+	ref := r.Ref
+	if r.Fork != "" {
+		ref = r.Fork + ":" + r.Ref
+	}
+	return Scope{
+		Forge:    r.Forge,
+		Instance: r.Instance,
+		Project:  r.Project,
+		Ref:      ref,
+		Key:      r.Key,
+		Writer:   r.Fork == "" && p.Writer(r.Path, r.Job),
+		From:     r.From,
+	}
+}

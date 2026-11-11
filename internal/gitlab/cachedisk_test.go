@@ -7,6 +7,8 @@ import (
 
 	"gitlab.com/gitlab-org/gitlab-runner/common"
 	"gitlab.com/gitlab-org/gitlab-runner/common/spec"
+
+	"github.com/nesty92/fleetci/internal/cachedisk"
 )
 
 // job is a GitLab job on ref, as its payload has it: GitLab's variables
@@ -83,7 +85,7 @@ func TestWriter(t *testing.T) {
 	} {
 		var got []string
 		for name, b := range jobs {
-			if writer(tc.rules, b) {
+			if cachedisk.IsWriter(tc.rules, gitlabJob(b)) {
 				got = append(got, name)
 			}
 		}

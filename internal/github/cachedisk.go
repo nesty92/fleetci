@@ -78,16 +78,15 @@ func (d *Dispatcher) cacheDisk(ctx context.Context, ca source.CacheAttacher, vm 
 		log.Warn("no cache disk", "err", err)
 		return "No cache disk: " + err.Error()
 	}
-	scope := cacheScope(d.cfg.CacheDisk, d.instance(), f)
-	st, err := ca.AttachCache(ctx, vm.ID, scope)
+	msg, err := source.AttachCache(ctx, ca, vm.ID, cacheScope(d.cfg.CacheDisk, d.instance(), f))
 	if err != nil {
 		log.Warn("no cache disk", "err", err)
 		return "No cache disk: " + err.Error()
 	}
-	if st == nil {
+	if msg == "" {
 		return "No cache disk"
 	}
-	return cachedisk.Describe(scope, *st)
+	return msg
 }
 
 // runnersJob finds the job the runner took: the one it was started for,
@@ -167,31 +166,29 @@ func isReview(event string) bool { return strings.HasPrefix(event, "pull_request
 
 func isFork(f cacheFacts) bool { return f.headRepo != "" && !strings.EqualFold(f.headRepo, f.repo) }
 
-// cacheScope is the job's cache disk: its repo's, under its branch. A
-// pull request's from a fork is under the fork's name and never writes.
+// cacheScope is the job's cache disk: its repo's, under its branch.
 func cacheScope(p *cachedisk.Policy, instance string, f cacheFacts) cachedisk.Scope {
-	review, fork := isReview(f.event), isFork(f)
-	ref := f.branch
-	if fork {
-		ref = f.headRepo + ":" + f.branch
-	}
-	s := cachedisk.Scope{
+	review := isReview(f.event)
+	r := cachedisk.Request{
 		Forge:    "github",
 		Instance: instance,
 		Project:  strconv.FormatInt(f.repoID, 10),
-		Ref:      ref,
-		Writer: !fork && p.Writer(f.repo, cachedisk.Job{
+		Path:     f.repo,
+		Job: cachedisk.Job{
 			Ref:       f.branch,
 			Tag:       f.tag,
-			Protected: f.protected && !review,
+			Protected: f.protected && !review, // a pull request runs the merge, not its branch
 			Default:   !f.tag && f.branch == f.defaultBranch,
 			Review:    review,
-		}),
+		},
+	}
+	if isFork(f) {
+		r.Fork = f.headRepo
 	}
 	if f.defaultBranch != "" {
-		s.From = []string{f.defaultBranch}
+		r.From = []string{f.defaultBranch}
 	}
-	return s
+	return p.Scope(r)
 }
 
 // instance is GitHub's host, for the disks' keys.

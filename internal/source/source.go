@@ -59,6 +59,21 @@ type CacheAttacher interface {
 	HasCache(vm string) bool
 }
 
+// AttachCache gives the VM the scope's cache disk when capacity can, and
+// says what it got, for the job's log: "" when the VM's class has none.
+// Every source attaches this way; only when differs.
+func AttachCache(ctx context.Context, capacity any, vm string, scope cachedisk.Scope) (string, error) {
+	a, ok := capacity.(CacheAttacher)
+	if !ok {
+		return "", nil
+	}
+	st, err := a.AttachCache(ctx, vm, scope)
+	if err != nil || st == nil {
+		return "", err
+	}
+	return cachedisk.Describe(scope, *st), nil
+}
+
 // Reservation is room for one VM, held until Acquire or Release.
 type Reservation struct {
 	ID string `json:"id"`
