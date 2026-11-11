@@ -412,9 +412,12 @@ own; it writes the shared one only under `all`. A pull request from a fork
 never writes, even under `all`, and its cache is kept apart, under the
 fork's name.
 
-fleetci's GitHub App or token reads the run and the branch: it needs
-`Actions: read` and `Contents: read` on the repos it serves. The runner's
-image needs passwordless `sudo`, as for the rest of fleetci.
+fleetci's GitHub App or token reads the job and its run, which needs
+`Actions: read` on the repos it serves. Rules other than `default` and
+`all` also need the branch, to tell a protected branch or a tag: that
+needs `Contents: read`. Without it, the job's log says so and the job runs
+with no disk. The runner's image needs passwordless `sudo`, as for the
+rest of fleetci.
 
 Not yet on GitHub: choosing keys and paths to keep (the `FLEETCI_CACHE_*`
 variables are GitLab's), and serving `actions/cache` from the disk.
