@@ -219,3 +219,40 @@ func TestPluginGone(t *testing.T) {
 		}
 	}
 }
+
+// A plugin that exits while it starts: its restart waits for the start,
+// and then replaces it, instead of finding nothing to replace.
+func TestSupervisedPluginExitsWhileStarting(t *testing.T) {
+	p := &fakePlugins{id: "fd4"}
+	first := true
+	start := func(ctx context.Context, exited func()) (provider.InstanceGroup, provider.ProviderInfo, func(), error) {
+		g, info, kill, err := p.start(ctx, exited)
+		if first {
+			first = false
+			g.(*fakeGroup).dead.Store(true)
+			exited()
+			time.Sleep(20 * time.Millisecond) // the restart runs meanwhile
+		}
+		return g, info, kill, err
+	}
+	s, _, err := supervise(context.Background(), start, hclog.NewNullLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for p.started() < 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("no restart")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for {
+		if g, _ := s.current(); g != p.groups[0] {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the dead plugin is still current")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
