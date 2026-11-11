@@ -188,3 +188,41 @@ The rest is GitHub's: 3 s for the runner to start and connect, 2.3 s for
 GitHub to hand it the job. Of the 3 s, 2 s is `run.sh` until it is
 connected, waiting on GitHub; reading the runner's files into the
 snapshot's page cache beforehand changed nothing.
+
+## A cache disk per VM
+
+Each job's VM gets a second disk for caches: a qcow2 overlay on the cache
+the last job left, kept after the job as the next layer. Docker's and
+containerd's data and the Go caches go on it. Measured with
+[hack/cachelab](../hack/cachelab): real commits, oldest first, each in a
+fresh 4-vCPU, 6 GB VM, running its repo's own CI steps.
+
+fleetci, last 8 commits (`go vet`, `go test -race`, GoReleaser snapshot):
+
+| Job | Image pull | Vet | Tests | GoReleaser | Steps |
+| --- | --- | --- | --- | --- | --- |
+| no cache disk, first and newest commit | 36–44 s | 77–80 s | 110–119 s | 229–232 s | 462–465 s |
+| first on the cache disk, fills it | 32 s | 77 s | 110 s | 221 s | 440 s |
+| warm, the 7 commits after | 2.4–2.9 s | 2.3–3.6 s | 29–53 s | 18–20 s | 52–74 s |
+
+fleetingd, last 8 commits (cross-build for 3 architectures):
+
+| Job | Image pull | Build | Steps |
+| --- | --- | --- | --- |
+| no cache disk | 16–17 s | 48–49 s | 64–66 s |
+| warm | 1.3 s | 3.5–5.2 s | 4.8–6.5 s |
+
+Every test time includes 20 s of one `internal/vmjob` test, which waits
+for a killed process that a container with no init never reaps; on
+runners, and with `docker run --init`, it passes in 3 s.
+
+The disk itself: an overlay takes 0.02 s to make, mounting it and moving
+Docker onto it 0.7–0.9 s. The first job fills 15 GB for fleetci (mostly
+GoReleaser's builds for every platform) and 2.4 GB for fleetingd; each
+warm job adds 33–330 MB and 11 MB. A job on a 10-layer chain ran as fast
+as on the merged file; merging 6 layers takes about 4 s. Cloud Hypervisor
+refuses a chain deeper than about 16 ("Maximum disk nesting depth
+exceeded"), so a chain has to be merged before that.
+
+caddy, on a 2-vCPU, 4 GB VM: the Docker build 79 s cold, 1.3 s warm, 6.1–6.7 s
+after a one-line change; the Go build 64 s cold, 4.5–5.2 s warm.
