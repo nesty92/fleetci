@@ -186,6 +186,9 @@ type cacheJob struct {
 	scope cachedisk.Scope
 	// paths are the container's paths kept on the disk.
 	paths []string
+	// inCheckout are those of paths in the project's checkout, from its
+	// top, which git clean must leave.
+	inCheckout []string
 }
 
 // cacheFor is the job's cache disk, or nil for none.
@@ -227,8 +230,32 @@ func (c *CacheDisk) cacheFor(build *common.Build, rc *common.RunnerConfig) (*cac
 			return nil, fmt.Errorf("%s: %q holds the project's checkout", cachePathsVariable, p)
 		}
 		job.paths = append(job.paths, p)
+		if rel, ok := strings.CutPrefix(p, dir+"/"); ok {
+			job.inCheckout = append(job.inCheckout, rel)
+		}
 	}
 	return job, nil
+}
+
+// keepFromClean has the job's git clean leave its kept paths in the
+// checkout, which its default -ffdx would empty after each fetch. It adds
+// them to GIT_CLEAN_FLAGS, unless the job set it to none.
+func (j *cacheJob) keepFromClean(build *common.Build) {
+	if len(j.inCheckout) == 0 {
+		return
+	}
+	flags := strings.TrimSpace(build.GetAllVariables().Value("GIT_CLEAN_FLAGS"))
+	switch flags {
+	case "none":
+		return
+	case "":
+		flags = "-ffdx"
+	}
+	for _, rel := range j.inCheckout {
+		flags += " -e /" + rel
+	}
+	build.Variables = append(build.Variables, spec.Variable{Key: "GIT_CLEAN_FLAGS", Value: flags})
+	build.RefreshAllVariables()
 }
 
 // projectDir is where the Docker executor will check the project out, as

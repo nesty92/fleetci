@@ -298,6 +298,7 @@ func (e *executor) attachCache(options common.ExecutorPrepareOptions, vm source.
 		msg += ": starting from " + strconv.Quote(st.From) + "'s"
 	}
 	options.BuildLogger.Println(msg)
+	job.keepFromClean(options.Build)
 	return job.volumes()
 }
 

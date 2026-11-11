@@ -212,3 +212,39 @@ func TestWithVolumes(t *testing.T) {
 		t.Fatalf("the runner's own config changed: %q", rc.Docker.Volumes)
 	}
 }
+
+func TestKeepFromClean(t *testing.T) {
+	var c *CacheDisk
+	for _, tc := range []struct {
+		flags, want string
+	}{
+		{"", "-ffdx -e /node_modules -e /.next/cache"},
+		{"-ffd", "-ffd -e /node_modules -e /.next/cache"},
+		{"none", "none"},
+	} {
+		v := []string{"FLEETCI_CACHE_PATHS", "node_modules .next/cache /root/.npm"}
+		if tc.flags != "" {
+			v = append(v, "GIT_CLEAN_FLAGS", tc.flags)
+		}
+		b := job("main", vars(v...))
+		j, err := c.cacheFor(b, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		j.keepFromClean(b)
+		got := strings.Join(b.GetGitCleanFlags(), " ")
+		if tc.flags == "none" {
+			got = b.GetAllVariables().Value("GIT_CLEAN_FLAGS")
+		}
+		if got != tc.want {
+			t.Errorf("GIT_CLEAN_FLAGS %q: git clean %q, want %q", tc.flags, got, tc.want)
+		}
+	}
+	// Paths outside the checkout leave git clean alone.
+	b := job("main", vars("FLEETCI_CACHE_PATHS", "/root/.npm"))
+	j, _ := c.cacheFor(b, nil)
+	j.keepFromClean(b)
+	if got := strings.Join(b.GetGitCleanFlags(), " "); got != "-ffdx" {
+		t.Errorf("git clean %q", got)
+	}
+}
