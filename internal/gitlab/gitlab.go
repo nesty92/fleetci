@@ -60,6 +60,10 @@ type Config struct {
 	// (concurrent, check_interval, shutdown_timeout...) apply unless set
 	// above.
 	ConfigFile string `json:"config_file" toml:"config_file"`
+	// GoCache gives each job a token for fleetci's shared Go build cache.
+	// It applies to jobs fleetci serve runs; a fleet's workers don't sign
+	// tokens yet.
+	GoCache *GoCache `json:"go_cache" toml:"go_cache"`
 
 	// HeldDir, set by fleetci's controller, keeps a note of each job taken
 	// and not yet on a worker, for the next start to place after a restart.
@@ -233,6 +237,9 @@ func New(ctx context.Context, c Config, capacity source.Capacity, log hclog.Logg
 	}
 
 	p := newProvider(docker.NewProvider(), capacityVMs{capacity}, func(rc *common.RunnerConfig) string { return classOf[rc] }, names, defaultClass)
+	if p.goCache, err = newGoCache(c.GoCache); err != nil {
+		return nil, err
+	}
 	providers := executors.NewProviderRegistry(map[string]common.ExecutorProvider{executorName: p})
 
 	// As gitlab-runner's main.go newClient, without a certificate

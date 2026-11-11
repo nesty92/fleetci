@@ -27,6 +27,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/sirupsen/logrus"
 
@@ -104,6 +105,8 @@ type provider struct {
 	// classes and defaultClass resolve FLEETCI_CLASS.
 	classes      []string
 	defaultClass string
+	// goCache, if set, gives each job a token for the Go build cache.
+	goCache *goCache
 }
 
 func newProvider(docker common.ExecutorProvider, vms vms, classOf func(*common.RunnerConfig) string, classes []string, defaultClass string) *provider {
@@ -213,6 +216,12 @@ type executor struct {
 
 func (e *executor) Prepare(options common.ExecutorPrepareOptions) (err error) {
 	options.Build.Log().Infoln("Preparing instance...")
+
+	// fleetci: the Go cache's token, before the job's variables reach
+	// the executor.
+	if err := e.p.goCache.addTo(options.Build, time.Now()); err != nil {
+		options.Build.Log().WithError(err).Warningln("No Go cache token")
+	}
 
 	acqRef, ok := options.Build.ExecutorData.(*acquisitionRef)
 	if !ok {
