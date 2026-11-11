@@ -14,8 +14,8 @@
 // and what it writes no other ref reads. A cache with nothing yet starts
 // from the shared caches its From names, the default branch's, say.
 //
-// Chains are flattened into one layer before cloud-hypervisor's nesting
-// limit (MaxDepth). The store keeps to a budget: past it, or with less than
+// Chains are flattened into one layer well before cloud-hypervisor's
+// nesting limit (MaxDepth, chainLimit). The store keeps to a budget: past it, or with less than
 // MinFree left on its filesystem, the least recently used caches go first,
 // never one a VM is using; a cache unused for MaxAge goes too.
 package cachedisk
@@ -116,6 +116,12 @@ type Config struct {
 	MaxDepth int
 }
 
+// chainLimit is the most layers a VM's disk may have, its own included:
+// cloud-hypervisor opens a qcow2 file and at most ten backing files below
+// it (MAX_NESTING_DEPTH in its block crate, v54), and fails the disk with
+// "Overflow" past that.
+const chainLimit = 11
+
 // Defaults fills in what c leaves unset.
 func (c Config) withDefaults() Config {
 	const gb = 1 << 30
@@ -134,9 +140,10 @@ func (c Config) withDefaults() Config {
 	if c.Size == 0 {
 		c.Size = 100 * gb
 	}
-	if c.MaxDepth == 0 {
-		// cloud-hypervisor refuses about 16.
-		c.MaxDepth = 10
+	if c.MaxDepth == 0 || c.MaxDepth >= chainLimit {
+		// Well short of chainLimit: the jobs that finish while a chain
+		// is flattened still add their layers.
+		c.MaxDepth = 6
 	}
 	return c
 }
@@ -245,6 +252,12 @@ func (s *Store) Begin(scope Scope) (*Lease, error) {
 	s.evict()
 	l := &Lease{scope: scope}
 	parent, from := s.readable(scope)
+	if parent != nil && len(parent.Chain) >= chainLimit {
+		// Its flattening failed, or is behind: this job goes without,
+		// and the next gets the flattened chain.
+		s.flattenLater(from.dir, parent.layer())
+		return nil, fmt.Errorf("cache: %s is %d layers, too deep for a VM; it is being flattened for the next job", parent.Scope.name(), len(parent.Chain))
+	}
 	if parent != nil {
 		l.chain, l.from = append(l.chain, parent.Chain...), from
 		parent.Used = s.now()
@@ -305,10 +318,8 @@ func (s *Store) Commit(l *Lease) error {
 		_ = os.Remove(l.Layer())
 		return err
 	}
-	if len(h.Chain) > s.cfg.MaxDepth && !s.flattening[key] {
-		s.flattening[key] = true
-		s.wg.Add(1)
-		go s.flatten(key, h.layer())
+	if len(h.Chain) > s.cfg.MaxDepth {
+		s.flattenLater(key, h.layer())
 	}
 	s.sweep()
 	s.evict()
@@ -327,8 +338,19 @@ func (s *Store) Abort(l *Lease) {
 	_ = os.Remove(l.Layer())
 }
 
+// flattenLater starts flattening a scope's chain up to layer, unless it is
+// already under way. s.mu is held.
+func (s *Store) flattenLater(key, layer string) {
+	if s.flattening[key] {
+		return
+	}
+	s.flattening[key] = true
+	s.wg.Add(1)
+	go s.flatten(key, layer)
+}
+
 // flatten writes a scope's chain into one layer, which becomes its head if
-// no job has committed since.
+// no job has committed since; if one has, it flattens the new head.
 func (s *Store) flatten(key, layer string) {
 	defer s.wg.Done()
 	dst := filepath.Join(s.dir, "scopes", key, randomName()+".qcow2")
@@ -349,9 +371,15 @@ func (s *Store) flatten(key, layer string) {
 	case err != nil:
 		s.log.Warn("cache: flattening failed", "err", err)
 		_ = os.Remove(dst)
-	case herr != nil || h.layer() != layer:
-		// Committed over or evicted meanwhile: the next commit flattens.
+	case herr != nil:
+		// Evicted meanwhile.
 		_ = os.Remove(dst)
+	case h.layer() != layer:
+		// Committed over meanwhile: the new head, if it is still deep.
+		_ = os.Remove(dst)
+		if len(h.Chain) > s.cfg.MaxDepth {
+			s.flattenLater(key, h.layer())
+		}
 	default:
 		h.Chain = []string{dst}
 		if err := s.writeHead(key, h); err != nil {

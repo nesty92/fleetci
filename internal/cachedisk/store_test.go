@@ -18,6 +18,8 @@ type fakeImages struct {
 	data    int // bytes each new layer gets, as if a job wrote them
 	flatten chan struct{}
 	fail    error
+	// flattenFail fails Flatten, as qemu-img did on a VM's locks.
+	flattenFail error
 }
 
 func (f *fakeImages) Create(path, parent string, _ int64) error {
@@ -39,6 +41,9 @@ func (f *fakeImages) Flatten(src, dst string) error {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.flattenFail != nil {
+		return f.flattenFail
+	}
 	f.parent[dst] = ""
 	return os.WriteFile(dst, nil, 0o600)
 }
@@ -189,6 +194,48 @@ func TestFlatten(t *testing.T) {
 	if l := run(t, s, main_); img.parent[l.Layer()] != h.Chain[0] {
 		t.Fatal("next layer isn't on the flattened one")
 	}
+}
+
+// A job that commits while the chain is flattened doesn't leave it deep:
+// the new head is flattened in turn.
+func TestFlattenAgainWhenCommittedOver(t *testing.T) {
+	img := &fakeImages{flatten: make(chan struct{})}
+	s := open(t, Config{MaxDepth: 2}, img)
+	run(t, s, main_)
+	run(t, s, main_)
+	run(t, s, main_) // starts flattening, which waits
+	run(t, s, main_) // commits over it
+	close(img.flatten)
+	s.Wait()
+	if h, _ := s.readHead(main_.key()); len(h.Chain) != 1 {
+		t.Fatalf("chain of %d after flattening", len(h.Chain))
+	}
+}
+
+// A chain too deep for a VM, its flattening having failed, is refused
+// once and flattened for the next job.
+func TestTooDeepIsFlattenedForTheNext(t *testing.T) {
+	img := &fakeImages{flattenFail: errors.New("Failed to lock byte 100")}
+	s := open(t, Config{}, img)
+	for range chainLimit {
+		run(t, s, main_)
+		s.Wait()
+	}
+	img.mu.Lock()
+	img.flattenFail = nil
+	img.mu.Unlock()
+	if l, err := s.Begin(main_); err == nil {
+		t.Fatalf("a VM got a chain of %d layers", len(l.chain))
+	}
+	s.Wait()
+	l, err := s.Begin(main_)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(l.chain) != 2 {
+		t.Fatalf("chain of %d after flattening; want the flattened layer and the job's", len(l.chain))
+	}
+	s.Abort(l)
 }
 
 func TestFlattenKeepsLeasedChain(t *testing.T) {

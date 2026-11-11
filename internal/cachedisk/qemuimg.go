@@ -38,7 +38,9 @@ func (q QemuImg) Create(path, parent string, size int64) error {
 	return q.run(time.Minute, append(args, path, strconv.FormatInt(size, 10))...)
 }
 
-// Flatten copies the whole chain into dst, which has no backing file.
+// Flatten copies the whole chain into dst, which has no backing file. The
+// chain's layers are never written once kept, so it reads them while VMs
+// have them open (-U): without it, qemu-img fails on their locks.
 func (q QemuImg) Flatten(src, dst string) error {
-	return q.run(time.Hour, "convert", "-q", "-O", "qcow2", src, dst)
+	return q.run(time.Hour, "convert", "-q", "-U", "-O", "qcow2", src, dst)
 }
