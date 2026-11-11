@@ -1,0 +1,16 @@
+# The language matrix: a real repo per language, pinned, replayed by
+# matrix.sh over its last <commits> commits with recipes/<name>.sh as its
+# CI. Run it again after a change to see the cache disk still pays:
+#
+#   hack/cachelab/up.sh <download dir> [name...]     on the host
+#   docker exec fleetci-cachelab sh /lab/matrix.sh [name...]
+#
+# name        repo                                       head                                      commits
+go           https://github.com/nesty92/fleetci         00bd7cd75a80af375e5b63ffdb333c8afd387b05   6
+node         https://github.com/expressjs/express       43fca52d28a422c8be48fd489cbd4f2d6152bab6   6
+typescript   https://github.com/pmndrs/zustand          9fed2eb2f3af672da9f7bf694b996df3831fc207   6
+php          https://github.com/thephpleague/commonmark 3164fa3d41d78857384a29e1c606c456cbab9600   6
+python       https://github.com/pallets/flask           49943b5a94413a530761350f04e896f76e8d620e   6
+rust         https://github.com/BurntSushi/ripgrep      178cc027e283fd965cb72d0a7395b219eada170c   6
+java         https://github.com/google/gson             a961b0fe088f8558d00cc1b56e506a3656907a91   6
+ruby         https://github.com/rack/rack               da90464e3fa93e3cb49dc2d4ede798e6c6b70b4f   6

@@ -7,11 +7,13 @@
 # The VM's cache disk is a qcow2 overlay, /data/cache-<n>.qcow2, on
 # <parent>; after the job it is kept as the next layer. The root disk is
 # thrown away. The source is /srcs/<repo>-<commit>.tar (prep.sh), and the
-# steps are the repo's CI: fleetci's go vet, go test -race and GoReleaser
-# snapshot, or fleetingd's cross-build.
+# steps are the repo's CI, recipes/<repo>.sh: each runs in the language's
+# image with the tool's cache directories under /cache.
 #
 # SLOT (0-9) runs several at once, each with its own address and files;
-# CPUS and MEM (MB) size the VM, 4 and 6144 by default.
+# CPUS and MEM (MB) size the VM, 4 and 6144 by default. MIRROR, host:port,
+# is a Docker Hub pull-through mirror the VM's docker uses, as fleetci's
+# registry mirror would be: cold jobs pull from it, not from Docker Hub.
 set -eu
 n=$1 parent=$2 repo=$3 commit=$4 usecache=${5:-yes}
 slot=${SLOT:-0} cpus=${CPUS:-4} mem=${MEM:-6144}
@@ -87,42 +89,42 @@ boot_t=$(el $t)
 
 # Mount the cache and put docker's and containerd's data on it, what
 # fleetci would do before the job. Both: docker keeps its image layers in
-# containerd's directory.
+# containerd's directory. With no cache disk, /cache is on the root disk,
+# thrown away. Either way docker is restarted to use the mirror.
 t=$(now)
-if [ "$usecache" = yes ]; then
-  ssh_ 'set -e
+ssh_ "set -e
+  if [ $usecache = yes ]; then
     blkid /dev/vdc >/dev/null || mkfs.ext4 -q -E lazy_itable_init=1,lazy_journal_init=1 /dev/vdc
     mkdir -p /cache && mount -o noatime /dev/vdc /cache
-    mkdir -p /cache/docker /cache/containerd /cache/go
-    systemctl stop docker.socket docker.service containerd.service
+  fi
+  mkdir -p /cache/docker /cache/containerd
+  systemctl stop docker.socket docker.service containerd.service
+  if [ $usecache = yes ]; then
     mount --bind /cache/docker /var/lib/docker
     mount --bind /cache/containerd /var/lib/containerd
-    systemctl start containerd docker'
-fi
+  fi
+  if [ -n '${MIRROR:-}' ]; then
+    printf '{\"registry-mirrors\": [\"http://%s\"], \"insecure-registries\": [\"%s\"]}\n' '${MIRROR:-}' '${MIRROR:-}' > /etc/docker/daemon.json
+  fi
+  systemctl start containerd docker"
 mount_t=$(el $t)
 
 # The commit's source, then its repo's CI. Each step's time; a failed
 # step is noted, not fatal.
-ssh_ 'rm -rf /src && mkdir -p /src /cache/go && tar -x -C /src && cd /src && git init -q && git add -A &&
+ssh_ 'rm -rf /src && mkdir -p /src && tar -x -C /src && cd /src && git init -q && git add -A &&
   git -c user.name=ci -c user.email=ci@example.invalid commit -qm ci' < /srcs/$repo-$commit.tar
-GO="docker run --rm --init -v /src:/src -v /cache/go:/cache/go -e GOCACHE=/cache/go/build -e GOMODCACHE=/cache/go/mod -e GOFLAGS=-buildvcs=false -w /src"
+RUN="docker run --rm --init -v /src:/src -v /cache:/cache -w /src"
 step() { # <label> <command in the VM>
   t=$(now); st=ok
-  ssh_ "$2" > $V/step.log 2>&1 || { st=FAILED; tail -n 5 $V/step.log | sed "s/^/  $1: /" >&2; }
+  ssh_ "$2" > $V/step-$1.log 2>&1 || { st=FAILED; tail -n 5 $V/step-$1.log | sed "s/^/  $1: /" >&2; }
   steps="$steps, $1 $(el $t)s${st#ok}"
 }
+pull() { # <image>...
+  step pull "for i in $*; do docker pull -q \$i >/dev/null || exit 1; done"
+}
 steps=""
-imgs=golang:1.27; [ "$repo" != fleetci ] || imgs="$imgs goreleaser/goreleaser:v2.14.0"
-step pull "for i in $imgs; do docker pull -q \$i >/dev/null || exit 1; done"
-if [ "$repo" = fleetci ]; then
-  step vet "$GO golang:1.27 go vet ./..."
-  step test "$GO golang:1.27 go test -race ./..."
-  # GoReleaser's image has Go 1.26; fleetci's go.mod asks for 1.27.
-  step release "$GO -e GOTOOLCHAIN=auto --entrypoint sh goreleaser/goreleaser:v2.14.0 -c 'git config --global --add safe.directory /src && goreleaser release --snapshot --clean'"
-else
-  # The CI's license step downloads a tool; LICENSE and the template stand in.
-  step build "$GO golang:1.27 sh -c 'cp LICENSE NOTICE.tpl cmd/fleeting-plugin-fleetingd/ && mv cmd/fleeting-plugin-fleetingd/NOTICE.tpl cmd/fleeting-plugin-fleetingd/NOTICE && go get . && for a in amd64 arm64 riscv64; do CGO_ENABLED=0 GOOS=linux GOARCH=\$a go build -o dist/x ./cmd/fleeting-plugin-fleetingd/ || exit 1; done'"
-fi
+recipe=$repo; [ "$repo" != fleetci ] || recipe=go
+. /lab/recipes/$recipe.sh
 
 # The job ends: the guest flushes and powers off, and its cache overlay
 # is the next layer.
