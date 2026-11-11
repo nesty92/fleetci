@@ -24,6 +24,9 @@ type Class struct {
 	Plugin string `json:"plugin" toml:"plugin"`
 	// PluginConfig is passed to the plugin as it is, as JSON.
 	PluginConfig RawConfig `json:"plugin_config" toml:"plugin_config"`
+	// CacheDisk gives each job's VM its project's and ref's caches on a
+	// disk kept across VMs. fleetingd only.
+	CacheDisk *CacheDisk `json:"cache_disk" toml:"cache_disk"`
 	// Connector is how to log in to this class's VMs.
 	Connector Connector `json:"connector_config" toml:"connector_config"`
 
@@ -211,6 +214,9 @@ func (c Class) validate(name string) error {
 	}
 	if c.CPUs < 0 || c.Memory < 0 {
 		return fmt.Errorf("class %q: cpus and memory can't be negative", name)
+	}
+	if err := c.validateCacheDisk(name); err != nil {
+		return err
 	}
 	if c.IdleCount < 0 || c.IdleCount > c.MaxInstances {
 		return fmt.Errorf("class %q: idle_count must be between 0 and max_instances", name)

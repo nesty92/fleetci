@@ -19,6 +19,7 @@ import (
 
 	"github.com/hashicorp/go-hclog"
 
+	"github.com/nesty92/fleetci/internal/cachedisk"
 	"github.com/nesty92/fleetci/internal/fleet"
 	"github.com/nesty92/fleetci/internal/proxy"
 )
@@ -43,6 +44,16 @@ type VM struct {
 	Class string `json:"class"`
 	// Instance is the fleeting plugin's id for the machine behind the VM.
 	Instance string `json:"instance"`
+}
+
+// CacheAttacher is a Capacity whose VMs can have a cache disk (see
+// package cachedisk): a source that knows a job's project and ref asks
+// for it once it has the job's VM. The VM gives it back when it is
+// Deleted.
+type CacheAttacher interface {
+	// AttachCache says what the disk starts from ("own", "default" or
+	// "empty"), or "" when the VM's class has no cache disk.
+	AttachCache(ctx context.Context, vm string, scope cachedisk.Scope) (string, error)
 }
 
 // Reservation is room for one VM, held until Acquire or Release.

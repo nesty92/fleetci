@@ -368,6 +368,35 @@ VMs. To reuse VMs for GitLab and serve GitHub too, split them: GitHub in a
 `fleetci serve` (or another runner) with single-use classes and groups of
 their own.
 
+### A cache disk per ref
+
+A fleetingd class can keep pulled images and caches without reusing VMs:
+each job's VM gets a disk of its project's and ref's caches, with Docker's
+and containerd's data on it, so the images, volumes and gitlab-runner's local
+`cache:` of the ref's last job are there. A runner's own S3 cache settings
+still apply. The disk is a new copy-on-write layer on the ref's last one,
+kept only if the VM gives it back whole, so a job never sees another's
+half-written disk.
+
+```toml
+[classes.small]
+plugin = "fleeting-plugin-fleetingd"
+plugin_config = { vm_cache_directory = "/var/lib/fleetci/cache" }  # with the rest
+
+[classes.small.cache_disk]
+budget = "100GB"        # all of the class's caches; least recently used go first
+min_free = "20GB"       # left free on that disk
+max_per_cache = "30GB"  # one ref's; past it, its next job starts empty
+max_age = "168h"        # a cache no job used for that long goes
+```
+
+A ref without a cache starts from its project's default branch's. Jobs on a
+protected ref write its cache; jobs on others (merge requests) only read the
+default branch's and write their own, so they can't change what protected
+pipelines read. GitLab for now. fleetci makes the layers with `qemu-img`, which must be on
+the host, and needs a fleetingd with the `disk` command.
+`hack/cachelab` measures it on real projects in several languages.
+
 ### Your machines first, the cloud for spikes
 
 `overflow` names a class that takes a class's jobs while all of its

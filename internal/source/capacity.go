@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/nesty92/fleetci/internal/cachedisk"
 	"github.com/nesty92/fleetci/internal/fleet"
 	"github.com/nesty92/fleetci/internal/proxy"
 )
@@ -147,6 +148,32 @@ func (c *capacity) Delete(ctx context.Context, id string) error {
 	delete(c.vms, id)
 	c.mu.Unlock()
 	return c.b.Delete(ctx, id)
+}
+
+// cacheBackend is a Backend that gives VMs cache disks.
+type cacheBackend interface {
+	AttachCache(ctx context.Context, vm fleet.VM, scope cachedisk.Scope) (string, error)
+}
+
+// AttachCache gives the VM its scope's cache disk, when its class has one.
+// It says what the disk starts from ("own", "default", "empty"), or "" for
+// no disk.
+func (c *capacity) AttachCache(ctx context.Context, id string, scope cachedisk.Scope) (string, error) {
+	fb, ok := c.b.(fleetBackend)
+	if !ok {
+		return "", nil
+	}
+	cb, ok := fb.Backend.(cacheBackend)
+	if !ok {
+		return "", nil
+	}
+	c.mu.Lock()
+	vm, ok := c.vms[id]
+	c.mu.Unlock()
+	if !ok {
+		return "", fmt.Errorf("no vm %q", id)
+	}
+	return cb.AttachCache(ctx, vm, scope)
 }
 
 func (c *capacity) HandOver(_ context.Context, id string) bool {

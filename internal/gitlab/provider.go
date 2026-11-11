@@ -24,7 +24,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -37,6 +39,7 @@ import (
 	"gitlab.com/gitlab-org/gitlab-runner/session/terminal"
 	"gitlab.com/gitlab-org/gitlab-runner/steps"
 
+	"github.com/nesty92/fleetci/internal/cachedisk"
 	"github.com/nesty92/fleetci/internal/proxy"
 	"github.com/nesty92/fleetci/internal/source"
 )
@@ -73,6 +76,14 @@ func (c capacityVMs) Reserve(class string) (reservation, error) {
 		return nil, err
 	}
 	return &capacityReservation{c: c.Capacity, r: r}, nil
+}
+
+// AttachCache gives the VM a cache disk, when the core can.
+func (c capacityVMs) AttachCache(ctx context.Context, vm string, scope cachedisk.Scope) (string, error) {
+	if a, ok := c.Capacity.(source.CacheAttacher); ok {
+		return a.AttachCache(ctx, vm, scope)
+	}
+	return "", nil
 }
 
 // capacityReservation is a source.Reservation, used once by Acquire or
@@ -245,8 +256,51 @@ func (e *executor) Prepare(options common.ExecutorPrepareOptions) (err error) {
 	options.Build.Log().WithField("vm", vm.ID).Trace("Acquired capacity...")
 
 	acqRef.vm = &vm
+	e.attachCache(options, vm)
 
 	return e.Executor.Prepare(options)
+}
+
+// attachCache gives the job's VM its project's and ref's cache disk, when
+// the VM's class has one. Without it the job runs all the same, from cold.
+// The scope comes from GitLab's job payload, which the job can't change.
+func (e *executor) attachCache(options common.ExecutorPrepareOptions, vm source.VM) {
+	a, ok := e.p.vms.(source.CacheAttacher)
+	if !ok {
+		return
+	}
+	scope, err := cacheScope(options.Build)
+	if err != nil {
+		options.BuildLogger.Warningln("No cache disk: " + err.Error())
+		return
+	}
+	from, err := a.AttachCache(options.Context, vm.ID, scope)
+	switch {
+	case err != nil:
+		options.BuildLogger.Warningln("No cache disk: " + err.Error())
+	case from == "own":
+		options.BuildLogger.Println("Cache disk: this ref's")
+	case from == "default":
+		options.BuildLogger.Println("Cache disk: from " + scope.Default + "'s")
+	case from == "empty":
+		options.BuildLogger.Println("Cache disk: empty, the first for this ref")
+	}
+}
+
+// cacheScope is whose cache a build uses.
+func cacheScope(build *common.Build) (cachedisk.Scope, error) {
+	u, err := url.Parse(build.Runner.URL)
+	if err != nil || u.Host == "" {
+		return cachedisk.Scope{}, fmt.Errorf("the runner's url %q", build.Runner.URL)
+	}
+	return cachedisk.Scope{
+		Forge:     "gitlab",
+		Instance:  u.Host,
+		Project:   strconv.FormatInt(build.JobInfo.ProjectID, 10),
+		Ref:       build.GitInfo.Ref,
+		Protected: build.IsProtected(),
+		Default:   build.GetAllVariables().Value("CI_DEFAULT_BRANCH"),
+	}, nil
 }
 
 // prepareByJob takes a VM of the class the job's FLEETCI_CLASS names: in

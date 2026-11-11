@@ -25,6 +25,7 @@ import (
 	"gitlab.com/gitlab-org/fleeting/taskscaler"
 	"gitlab.com/gitlab-org/fleeting/taskscaler/storage"
 
+	"github.com/nesty92/fleetci/internal/cachedisk"
 	"github.com/nesty92/fleetci/internal/proxy"
 	"github.com/nesty92/fleetci/internal/vmjob"
 )
@@ -62,6 +63,8 @@ type pool struct {
 	host    *host
 	size    Resources
 	dynamic bool
+	// cache keeps the class's VMs' cache disks, or is nil.
+	cache *cachedisk.Store
 
 	mu   sync.Mutex
 	jobs int // jobs on the class's VMs or waiting for one
@@ -161,6 +164,8 @@ type Backend struct {
 	instance map[string]string
 	handed   map[string]string
 	adopted  map[string]string
+	// caches are the VMs with a cache disk.
+	caches map[string]*cacheVM
 
 	stateDir string
 	// ctx ends when the backend stops, and with it adopted jobs' follows.
@@ -218,7 +223,8 @@ func New(ctx context.Context, classes map[string]Class, host *HostConfig, log hc
 		local := hq.hosts[localHost]
 		log.Info("host budget", "host", local.name, "budget", local.Budget.String(), "reserved", local.fixed.String(), "nominate_after", hq.NominateAfter.String(), "placement", hq.Placement)
 	}
-	groups := map[string]string{} // group id → class
+	groups := map[string]string{}           // group id → class
+	stores := map[string]*cachedisk.Store{} // vm_cache_directory → its store
 	for _, name := range slices.Sorted(maps.Keys(classes)) {
 		c := classes[name]
 		if err := c.validate(name); err != nil {
@@ -238,6 +244,12 @@ func New(ctx context.Context, classes map[string]Class, host *HostConfig, log hc
 		if hq != nil && c.OnHost() {
 			p.queue, p.host, p.dynamic = hq, hq.hosts[localHost], !c.Reuses()
 			p.size, _ = c.Size() // checked by newHostQueue
+		}
+		if c.CacheDisk != nil {
+			if p.cache, err = openCache(stores, c, log); err != nil {
+				_ = b.Shutdown(ctx)
+				return nil, fmt.Errorf("class %q: cache_disk: %w", name, err)
+			}
 		}
 		b.pools[name] = []*pool{p}
 	}
@@ -726,6 +738,8 @@ func (b *Backend) Delete(_ context.Context, id string) error {
 	if !ok {
 		return nil
 	}
+	// Before fleeting removes the VM: the disk is taken out whole.
+	b.detachCache(id)
 	p.ts.Release(id)
 	p.done()
 	b.notify()
