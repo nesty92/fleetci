@@ -448,8 +448,14 @@ otherwise. fleetci reads only what GitLab says of a job (its ref, whether it
 is protected, whether it is a merge request's), never variables the job
 could set.
 
-GitLab for now. fleetci makes the layers with `qemu-img`, which must be on
-the host, and needs a fleetingd with the `disk` command.
+GitHub jobs get a disk too, keyed by their repo and branch, with Docker's
+data on it; the same rules go in `[github.cache_disk]`, matching
+`owner/name`. A pull request's job never writes the shared cache unless the
+rule is `all`, and one from a fork never does. See
+[docs/cache-disk.md](docs/cache-disk.md#github-actions).
+
+fleetci makes the layers with `qemu-img`, which must be on the host, and
+needs a fleetingd with the `disk` command.
 `hack/cachelab` measures it on real projects in several languages.
 
 ### Your machines first, the cloud for spikes

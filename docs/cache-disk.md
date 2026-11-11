@@ -1,10 +1,10 @@
 # Cache disks
 
-A fleetingd class with `cache_disk` gives each GitLab job's VM a disk that
-outlives the VM. Docker's data is on it, so images the job pulled last time are
-still there, and so are the paths the job asks to keep. The README's "A cache
-disk per ref" section covers the setup; this page covers using it from
-`.gitlab-ci.yml`.
+A fleetingd class with `cache_disk` gives each job's VM a disk that outlives
+the VM. Docker's data is on it, so images the job pulled last time are still
+there, and so are the paths the job asks to keep. The README's "A cache disk
+per ref" section covers the setup; this page covers using it from
+`.gitlab-ci.yml`, and [from GitHub Actions](#github-actions).
 
 - [How it works](#how-it-works)
 - [Variables](#variables)
@@ -13,6 +13,7 @@ disk per ref" section covers the setup; this page covers using it from
 - [Keys](#keys)
 - [Things to know](#things-to-know)
 - [Who writes the shared caches](#who-writes-the-shared-caches)
+- [GitHub Actions](#github-actions)
 - [For coding agents](#for-coding-agents): a block for AGENTS.md or CLAUDE.md
 
 ## How it works
@@ -373,6 +374,50 @@ count, so a job can't make itself a writer by setting `CI_DEFAULT_BRANCH`.
 **Don't use `all`** unless everyone who can push a branch is trusted with
 what the default branch and the tags ship. It is there because some teams
 work that way. It is not a good default.
+
+## GitHub Actions
+
+A GitHub job on a class with `cache_disk` gets a disk keyed by its repo and
+branch, with Docker's data on it: images and service containers pulled by
+the branch's last job are there. Nothing changes in the workflow.
+
+GitHub gives a runner any queued job its labels fit, so fleetci learns
+which repo and branch the VM serves only when the job starts. The runner
+runs a hook before the job's first step. The hook waits while fleetci looks
+the job up on GitHub's API and attaches its disk, which takes a second or
+two, then prints the outcome in the job's log:
+
+```
+Cache disk "main" (shared with the project)
+Cache disk "feature/login" (this ref's own): starting from "main"'s
+```
+
+If fleetci doesn't answer within a minute, the job runs without a disk.
+
+Who writes is decided as on GitLab, from what GitHub says of the job: its
+branch, whether that branch is protected, and whether the run is a pull
+request's. The rules are the same, in their own table:
+
+```toml
+[github.cache_disk]
+writers = ["protected"]          # the default
+
+[[github.cache_disk.projects]]
+match = "my-org/trunk-app"       # owner/name, or "my-org/*"
+writers = ["default"]
+```
+
+A pull request's job reads its base's shared cache and writes one of its
+own; it writes the shared one only under `all`. A pull request from a fork
+never writes, even under `all`, and its cache is kept apart, under the
+fork's name.
+
+fleetci's GitHub App or token reads the run and the branch: it needs
+`Actions: read` and `Contents: read` on the repos it serves. The runner's
+image needs passwordless `sudo`, as for the rest of fleetci.
+
+Not yet on GitHub: choosing keys and paths to keep (the `FLEETCI_CACHE_*`
+variables are GitLab's), and serving `actions/cache` from the disk.
 
 ## For coding agents
 
