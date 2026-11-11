@@ -246,3 +246,64 @@ merge request that hasn't merged.
 Warm, a pipeline's tests took 3–63 s: Go reuses the results of packages a
 commit didn't touch. Filling main's cache took 12 min at 2 vCPU (13.4 GB);
 each merge request then added 9–335 MB.
+
+### Ten languages
+
+Six commits of a real project per language, oldest first, through one chain
+of cache layers ([hack/cachelab/matrix.sh](../hack/cachelab/matrix.sh),
+projects and commits in [matrix.txt](../hack/cachelab/matrix.txt)). Each job
+runs in a fresh 4-vCPU, 6 GB VM; images come from a pull-through mirror on
+the same host, so the pulls' gain is a lower bound. The times are the pull
+and the project's CI steps: cold is a job with no cache disk, cached the
+median of jobs 2–6.
+
+| Language | Project | Cold | Cached | Saved | Pull | Cache disk |
+| --- | --- | --- | --- | --- | --- | --- |
+| Go | fleetci | 434 s | 23 s | 94% | 13 → 2.7 s | 15.5 GB |
+| Node.js | express | 21 s | 6.9 s | 67% | 7.1 → 1.5 s | 1.8 GB |
+| Rust | ripgrep | 27 s | 9.3 s | 65% | 8.3 → 1.5 s | 3.9 GB |
+| Python | flask | 20 s | 9.0 s | 55% | 6.7 → 1.5 s | 2.1 GB |
+| PHP | commonmark | 11 s | 6.4 s | 53% | 3.0 → 1.5 s | 0.4 GB |
+| Ruby | rack | 28 s | 15 s | 46% | 7.0 → 1.5 s | 1.9 GB |
+| Java | gson | 69 s | 44 s | 35% | 4.1 → 1.5 s | 1.2 GB |
+| Next.js | vercel/chatbot | 45 s | 34 s | 28% | 6.8 → 1.5 s | 3.7 GB |
+| TypeScript | zustand | 34 s | 27 s | 23% | 6.9 → 1.5 s | 2.9 GB |
+| React | excalidraw | 200 s | 162 s | 19% | 7.5 → 1.8 s | 5.0 GB |
+
+The cache speeds up what downloads or compiles: installs (React 37 → 6.2 s,
+Node.js 11 → 2.3 s, Ruby 10 → 3.0 s), Rust's build (8.4 → 2.0 s), and Go's
+vet, tests and release (77 → 1.9 s, 118 → 5.5 s, 227 → 13 s), whose build
+cache keeps compiled packages and test results. It does nothing for steps
+that run the project's own code each time: linters, type checks and
+JavaScript test suites ran as long cached as cold. Next.js's build kept
+`.next/cache` on the disk and still took 25–26 s either way.
+
+flask's oldest commit fails its own tests, with a cache disk and without;
+its cold time is the newest commit's.
+
+### Deduplication and compression
+
+How much a worker's cache disks would shrink on a filesystem that
+deduplicates or compresses, from the ten languages' layers (38 GB, all
+six layers of each), with
+[hack/cachelab/dedup.py](../hack/cachelab/dedup.py):
+
+| Dedup block | Left | Saved | Of it, across projects |
+| --- | --- | --- | --- |
+| 4 KiB (btrfs with bees or duperemove) | 22.1 GB | 42% | 46% |
+| 64 KiB | 31.3 GB | 18% | 65% |
+| 128 KiB (ZFS's default record) | 34.3 GB | 11% | 67% |
+
+Compression (zlib level 1, a lower bound for zstd) takes 56% off what
+deduplication leaves. Half of what 4 KiB deduplication saves is between
+different projects: base images and packages they share. A worker with more
+projects on similar stacks would save more. The other half repeats within
+one project's chain of layers.
+
+Compression saves more than deduplication, and costs less: btrfs's
+`compress=zstd` needs no daemon and no memory for a block table. With both
+the 38 GB would be about 10 GB. ZFS deduplication finds little at its
+record size and keeps its table in memory. fleetci needs no change for
+either; `vm_cache_directory` goes on such a filesystem. Not measured yet:
+how jobs run with their layers on btrfs, where copy-on-write fragments
+files that VMs write to.
