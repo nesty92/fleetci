@@ -68,15 +68,15 @@ func run(t *testing.T, s *Store, sc Scope) *Lease {
 }
 
 var (
-	main_ = Scope{Forge: "gitlab", Instance: "gitlab.com", Project: "1", Ref: "main", Protected: true, Default: "main"}
-	mr    = Scope{Forge: "gitlab", Instance: "gitlab.com", Project: "1", Ref: "refs/merge-requests/7/head", Default: "main"}
+	main_ = Scope{Forge: "gitlab", Instance: "gitlab.com", Project: "1", Ref: "main", Writer: true, From: []string{"main"}}
+	mr    = Scope{Forge: "gitlab", Instance: "gitlab.com", Project: "1", Ref: "feature", From: []string{"main"}}
 )
 
 func TestChain(t *testing.T) {
 	img := &fakeImages{}
 	s := open(t, Config{}, img)
 	first := run(t, s, main_)
-	if first.From() != "empty" || img.parent[first.Layer()] != "" {
+	if first.From() != "" || img.parent[first.Layer()] != "" {
 		t.Fatalf("first layer from %s, parent %q", first.From(), img.parent[first.Layer()])
 	}
 	second := run(t, s, main_)
@@ -90,7 +90,7 @@ func TestMergeRequestReadsDefaultWritesOwn(t *testing.T) {
 	s := open(t, Config{}, img)
 	m := run(t, s, main_)
 	l := run(t, s, mr)
-	if l.From() != "default" || img.parent[l.Layer()] != m.Layer() {
+	if l.From() != "main" || img.parent[l.Layer()] != m.Layer() {
 		t.Fatalf("MR layer from %s, parent %q; want main's", l.From(), img.parent[l.Layer()])
 	}
 	// main's head is still main's own.
@@ -109,23 +109,23 @@ func TestMergeRequestReadsDefaultWritesOwn(t *testing.T) {
 	}
 }
 
-func TestUnprotectedMainIsNotTrusted(t *testing.T) {
+func TestNonWriterOnMainIsNotTrusted(t *testing.T) {
 	img := &fakeImages{}
 	s := open(t, Config{}, img)
 	run(t, s, main_)
 	fake := main_
-	fake.Protected = false
+	fake.Writer = false
 	l, _ := s.Begin(fake)
-	// Its own scope is empty; it may read the protected one.
-	if l.From() != "default" {
-		t.Fatalf("unprotected main from %s", l.From())
+	// Its own cache is empty; it may read the shared one.
+	if l.From() != "main" {
+		t.Fatalf("non-writer on main from %q", l.From())
 	}
 	if err := s.Commit(l); err != nil {
 		t.Fatal(err)
 	}
 	h, err := s.readHead(main_.key())
 	if err != nil || h.layer() == l.Layer() {
-		t.Fatalf("unprotected main wrote the protected head")
+		t.Fatalf("a non-writer wrote the shared cache")
 	}
 }
 
@@ -258,7 +258,7 @@ func TestMaxAge(t *testing.T) {
 	run(t, s, main_)
 	now = now.Add(2 * time.Hour)
 	l, _ := s.Begin(mr)
-	if l.From() != "empty" {
+	if l.From() != "" {
 		t.Fatalf("a cache past max_age was read (from %s)", l.From())
 	}
 }
@@ -269,7 +269,7 @@ func TestMaxPerCache(t *testing.T) {
 	run(t, s, main_)
 	run(t, s, main_)
 	l, _ := s.Begin(main_)
-	if l.From() != "empty" {
+	if l.From() != "" {
 		t.Fatalf("a cache over max_per_cache was read (from %s)", l.From())
 	}
 }
@@ -306,5 +306,59 @@ func TestOpenSweepsLeftovers(t *testing.T) {
 func TestOpenNeedsAbsolute(t *testing.T) {
 	if _, err := Open("cache", Config{}, &fakeImages{}, hclog.NewNullLogger()); err == nil {
 		t.Fatal("a relative directory was taken")
+	}
+}
+
+func TestKeys(t *testing.T) {
+	img := &fakeImages{}
+	s := open(t, Config{}, img)
+	deps := main_
+	deps.Key = "deps"
+	d := run(t, s, deps)
+	if d.From() != "" {
+		t.Fatalf("a new key started from %q", d.From())
+	}
+	// main's own cache is another one.
+	if m := run(t, s, main_); m.From() != "" {
+		t.Fatalf("main's cache started from %q; keys mixed", m.From())
+	}
+	// A merge request's job on key deps starts from the shared deps.
+	mrDeps := mr
+	mrDeps.Key = "deps"
+	l, _ := s.Begin(mrDeps)
+	if l.From() != "deps" || img.parent[l.Layer()] != d.Layer() {
+		t.Fatalf("MR deps from %q", l.From())
+	}
+	s.Abort(l)
+}
+
+func TestFromOrder(t *testing.T) {
+	img := &fakeImages{}
+	s := open(t, Config{}, img)
+	dev := main_
+	dev.Ref = "develop"
+	run(t, s, dev)
+	run(t, s, main_)
+	// A tag job that keeps one cache for all tags starts from develop's,
+	// the first of its From that exists.
+	tag := Scope{Forge: "gitlab", Instance: "gitlab.com", Project: "1", Ref: "v1.2.0", Key: "release", Writer: true, From: []string{"staging", "develop", "main"}}
+	l := run(t, s, tag)
+	if l.From() != "develop" {
+		t.Fatalf("tag from %q, want develop", l.From())
+	}
+	tag.Ref = "v1.3.0"
+	if l := run(t, s, tag); l.From() != "own" {
+		t.Fatalf("the next tag from %q, want the shared release cache", l.From())
+	}
+}
+
+func TestOtherProjectsDontMix(t *testing.T) {
+	img := &fakeImages{}
+	s := open(t, Config{}, img)
+	run(t, s, main_)
+	other := mr
+	other.Project = "2"
+	if l, _ := s.Begin(other); l.From() != "" {
+		t.Fatalf("another project read this one's main (from %q)", l.From())
 	}
 }

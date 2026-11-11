@@ -60,6 +60,9 @@ type Config struct {
 	// (concurrent, check_interval, shutdown_timeout...) apply unless set
 	// above.
 	ConfigFile string `json:"config_file" toml:"config_file"`
+	// CacheDisk says which jobs write their project's shared caches, on
+	// classes with a cache disk; by default, protected branches' and tags'.
+	CacheDisk *CacheDisk `json:"cache_disk" toml:"cache_disk"`
 
 	// HeldDir, set by fleetci's controller, keeps a note of each job taken
 	// and not yet on a worker, for the next start to place after a restart.
@@ -88,6 +91,9 @@ type Runner struct {
 func (c Config) Validate(classes []string) error {
 	if len(c.Runners) == 0 && c.ConfigFile == "" {
 		return errors.New("gitlab: no runners and no config_file")
+	}
+	if err := c.CacheDisk.validate(); err != nil {
+		return err
 	}
 	seen := map[string]bool{}
 	for i, r := range c.Runners {
@@ -233,6 +239,7 @@ func New(ctx context.Context, c Config, capacity source.Capacity, log hclog.Logg
 	}
 
 	p := newProvider(docker.NewProvider(), capacityVMs{capacity}, func(rc *common.RunnerConfig) string { return classOf[rc] }, names, defaultClass)
+	p.cacheDisk = c.CacheDisk
 	providers := executors.NewProviderRegistry(map[string]common.ExecutorProvider{executorName: p})
 
 	// As gitlab-runner's main.go newClient, without a certificate

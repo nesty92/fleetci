@@ -1,21 +1,23 @@
-// Package cachedisk keeps a disk of caches per project and ref across
-// single-use VMs: Docker's and containerd's data, and the tools' caches.
+// Package cachedisk keeps disks of caches across single-use VMs: Docker's
+// and containerd's data, and whatever else a job keeps on them.
 //
 // Each cache is a chain of qcow2 layers. A job's VM gets a new, empty layer
-// on the newest of its scope's (Begin); after the job, the layer is the
-// scope's newest (Commit), or is thrown away when the VM didn't give the
-// disk back whole (Abort). Two jobs of one scope at once each get a layer
+// on the newest of its cache's (Begin); after the job, the layer is the
+// cache's newest (Commit), or is thrown away when the VM didn't give the
+// disk back whole (Abort). Two jobs on one cache at once each get a layer
 // on the same parent, and the last to finish wins.
 //
-// A job reads its own scope, or, when that has none yet, its project's
-// default branch's; it only ever writes its own. A protected ref's scope
-// is its own: a job on an unprotected ref, such as a merge request's, can
-// read a protected one's cache but never write it.
+// A cache has a name, its key, within its project. A job its forge trusts
+// (a writer: by default one on a protected ref) reads and writes the
+// project's shared cache of that key. Any other job, such as a merge
+// request's, gets a cache of its own ref: it starts from the shared one,
+// and what it writes no other ref reads. A cache with nothing yet starts
+// from the shared caches its From names, the default branch's, say.
 //
 // Chains are flattened into one layer before cloud-hypervisor's nesting
 // limit (MaxDepth). The store keeps to a budget: past it, or with less than
-// MinFree left on its filesystem, the least recently used scopes go first,
-// never one a VM is using; a scope unused for MaxAge goes too.
+// MinFree left on its filesystem, the least recently used caches go first,
+// never one a VM is using; a cache unused for MaxAge goes too.
 package cachedisk
 
 import (
@@ -37,38 +39,63 @@ import (
 	"github.com/hashicorp/go-hclog"
 )
 
-// Scope says whose cache a job uses.
+// Scope says which cache a job uses.
 type Scope struct {
 	Forge    string `json:"forge"`    // gitlab, github
 	Instance string `json:"instance"` // the forge's host
-	Project  string `json:"project"`  // its id or path
-	Ref      string `json:"ref"`
-	// Protected: only trusted pipelines run on Ref, so its cache can be
-	// read by the project's other jobs.
-	Protected bool `json:"protected"`
-	// Default is the project's default branch, whose cache a ref without
-	// one starts from. Empty, a new ref starts empty.
-	Default string `json:"default,omitempty"`
+	Project  string `json:"project"`  // its id
+	// Ref is the job's ref. A job that isn't a writer has caches of its
+	// ref's own.
+	Ref string `json:"ref"`
+	// Key names the cache within the project; "" is Ref.
+	Key string `json:"key,omitempty"`
+	// Writer: the job writes the project's shared cache of Key.
+	Writer bool `json:"writer"`
+	// From are the shared caches a cache with nothing yet starts from, the
+	// first that exists.
+	From []string `json:"from,omitempty"`
 }
 
-// key names the scope's directory.
-func (s Scope) key() string {
-	trust := "u"
-	if s.Protected {
-		trust = "p"
+func (s Scope) name() string {
+	if s.Key == "" {
+		return s.Ref
 	}
-	h := sha256.Sum256([]byte(strings.Join([]string{s.Forge, s.Instance, s.Project, trust, s.Ref}, "\x00")))
+	return s.Key
+}
+
+func hashKey(parts ...string) string {
+	h := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return hex.EncodeToString(h[:12])
 }
 
-// fallback is the scope a new ref reads: its default branch's, protected.
-func (s Scope) fallback() (Scope, bool) {
-	if s.Default == "" || (s.Ref == s.Default && s.Protected) {
-		return Scope{}, false
+// shared is the directory of the project's shared cache of key.
+func (s Scope) shared(key string) string {
+	return hashKey(s.Forge, s.Instance, s.Project, "shared", key)
+}
+
+// key is the directory the job writes.
+func (s Scope) key() string {
+	if s.Writer {
+		return s.shared(s.name())
 	}
-	f := s
-	f.Ref, f.Protected, f.Default = s.Default, true, ""
-	return f, true
+	return hashKey(s.Forge, s.Instance, s.Project, "ref", s.Ref, s.name())
+}
+
+// source is a cache a job may start from: its directory and its name.
+type source struct{ dir, name string }
+
+// sources are the caches the job may start from, in order: its own, the
+// shared one of its key, then From's.
+func (s Scope) sources() []source {
+	out := []source{{s.key(), ""}}
+	seen := map[string]bool{s.key(): true}
+	for _, k := range append([]string{s.name()}, s.From...) {
+		if d := s.shared(k); k != "" && !seen[d] {
+			seen[d] = true
+			out = append(out, source{d, k})
+		}
+	}
+	return out
 }
 
 // Config sizes a store.
@@ -172,26 +199,46 @@ type Lease struct {
 	scope Scope
 	// chain is the new layer last; its parents came from from.
 	chain []string
-	from  string // the scope key the parents are of, or ""
+	from  *source // nil: it started empty
 	done  bool
 }
 
 // Layer is the file to attach to the VM.
 func (l *Lease) Layer() string { return l.chain[len(l.chain)-1] }
 
-// From says what the layer starts from: "own", "default" or "empty".
-func (l *Lease) From() string {
-	switch l.from {
-	case "":
-		return "empty"
-	case l.scope.key():
-		return "own"
-	}
-	return "default"
+// Start says what a job's cache disk starts from.
+type Start struct {
+	// Empty: it starts empty, its cache's first job.
+	Empty bool
+	// Own: it starts from the job's own cache's last layer.
+	Own bool
+	// From is otherwise the shared cache it starts from.
+	From string
 }
 
-// Begin makes the scope's next layer, on its newest or its default
-// branch's.
+// Start says what the layer starts from.
+func (l *Lease) Start() Start {
+	switch {
+	case l.from == nil:
+		return Start{Empty: true}
+	case l.from.dir == l.scope.key():
+		return Start{Own: true}
+	}
+	return Start{From: l.from.name}
+}
+
+// From is Start in a word: "" when empty, "own", or the shared cache's
+// name.
+func (l *Lease) From() string {
+	st := l.Start()
+	if st.Own {
+		return "own"
+	}
+	return st.From
+}
+
+// Begin makes the scope's next layer, on the newest of the first cache of
+// its sources that exists.
 func (s *Store) Begin(scope Scope) (*Lease, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -201,7 +248,7 @@ func (s *Store) Begin(scope Scope) (*Lease, error) {
 	if parent != nil {
 		l.chain, l.from = append(l.chain, parent.Chain...), from
 		parent.Used = s.now()
-		if err := s.writeHead(from, parent); err != nil {
+		if err := s.writeHead(from.dir, parent); err != nil {
 			s.log.Warn("cache: could not note a cache's use", "err", err)
 		}
 	}
@@ -225,25 +272,21 @@ func (s *Store) Begin(scope Scope) (*Lease, error) {
 	return l, nil
 }
 
-// readable is the head a scope's next layer goes on, and its key, or nil
-// for none.
-func (s *Store) readable(scope Scope) (*head, string) {
-	try := []Scope{scope}
-	if f, ok := scope.fallback(); ok {
-		try = append(try, f)
-	}
-	for _, sc := range try {
-		h, err := s.readHead(sc.key())
+// readable is the head a scope's next layer goes on, and where it is, or
+// nil for none.
+func (s *Store) readable(scope Scope) (*head, *source) {
+	for _, src := range scope.sources() {
+		h, err := s.readHead(src.dir)
 		if err != nil {
 			continue
 		}
 		if size := s.chainSize(h.Chain); size > s.cfg.MaxPerCache {
-			s.log.Info("cache: over max_per_cache, starting again", "ref", sc.Ref, "size", size)
+			s.log.Info("cache: over max_per_cache, starting again", "cache", h.Scope.name(), "size", size)
 			continue
 		}
-		return h, sc.key()
+		return h, &src
 	}
-	return nil, ""
+	return nil, nil
 }
 
 // Commit makes the lease's layer its scope's newest. The VM must have let
@@ -315,7 +358,7 @@ func (s *Store) flatten(key, layer string) {
 			_ = os.Remove(dst)
 			return
 		}
-		s.log.Info("cache: flattened", "ref", h.Scope.Ref, "took", s.now().Sub(start).Round(time.Second).String())
+		s.log.Info("cache: flattened", "cache", h.Scope.name(), "took", s.now().Sub(start).Round(time.Second).String())
 		s.sweep()
 	}
 }

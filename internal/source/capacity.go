@@ -152,26 +152,25 @@ func (c *capacity) Delete(ctx context.Context, id string) error {
 
 // cacheBackend is a Backend that gives VMs cache disks.
 type cacheBackend interface {
-	AttachCache(ctx context.Context, vm fleet.VM, scope cachedisk.Scope) (string, error)
+	AttachCache(ctx context.Context, vm fleet.VM, scope cachedisk.Scope) (*cachedisk.Start, error)
 }
 
-// AttachCache gives the VM its scope's cache disk, when its class has one.
-// It says what the disk starts from ("own", "default", "empty"), or "" for
-// no disk.
-func (c *capacity) AttachCache(ctx context.Context, id string, scope cachedisk.Scope) (string, error) {
+// AttachCache gives the VM its scope's cache disk, when its class has one,
+// and says what it starts from; nil, no disk.
+func (c *capacity) AttachCache(ctx context.Context, id string, scope cachedisk.Scope) (*cachedisk.Start, error) {
 	fb, ok := c.b.(fleetBackend)
 	if !ok {
-		return "", nil
+		return nil, nil
 	}
 	cb, ok := fb.Backend.(cacheBackend)
 	if !ok {
-		return "", nil
+		return nil, nil
 	}
 	c.mu.Lock()
 	vm, ok := c.vms[id]
 	c.mu.Unlock()
 	if !ok {
-		return "", fmt.Errorf("no vm %q", id)
+		return nil, fmt.Errorf("no vm %q", id)
 	}
 	return cb.AttachCache(ctx, vm, scope)
 }

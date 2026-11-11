@@ -51,9 +51,9 @@ type VM struct {
 // for it once it has the job's VM. The VM gives it back when it is
 // Deleted.
 type CacheAttacher interface {
-	// AttachCache says what the disk starts from ("own", "default" or
-	// "empty"), or "" when the VM's class has no cache disk.
-	AttachCache(ctx context.Context, vm string, scope cachedisk.Scope) (string, error)
+	// AttachCache says what the disk starts from, or nil when the VM's
+	// class has no cache disk.
+	AttachCache(ctx context.Context, vm string, scope cachedisk.Scope) (*cachedisk.Start, error)
 }
 
 // Reservation is room for one VM, held until Acquire or Release.

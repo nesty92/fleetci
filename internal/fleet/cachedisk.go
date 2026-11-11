@@ -98,36 +98,36 @@ type cacheVM struct {
 }
 
 // AttachCache gives the VM its scope's cache disk, mounted at /cache with
-// Docker's and containerd's data on it. It says what the disk starts from:
-// "own", "default" or "empty". A class without cache_disk returns "" and
-// no error. The VM gives the disk back in Delete.
-func (b *Backend) AttachCache(ctx context.Context, vm VM, scope cachedisk.Scope) (string, error) {
+// Docker's and containerd's data on it, and says what the disk starts
+// from. A class without cache_disk returns nil and no error. The VM gives
+// the disk back in Delete.
+func (b *Backend) AttachCache(ctx context.Context, vm VM, scope cachedisk.Scope) (*cachedisk.Start, error) {
 	id, inst := vm.ID, vm.Instance
 	b.mu.Lock()
 	p, ok := b.vms[id]
 	_, has := b.caches[id]
 	b.mu.Unlock()
 	if !ok {
-		return "", fmt.Errorf("no vm %q", id)
+		return nil, fmt.Errorf("no vm %q", id)
 	}
 	if p.cache == nil || has {
-		return "", nil
+		return nil, nil
 	}
 	lease, err := p.cache.Begin(scope)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	cv := &cacheVM{store: p.cache, lease: lease, class: p.class, inst: inst, conn: p.conns.get(inst)}
 	start := time.Now()
 	if err := pluginDisk(ctx, p.class, "attach", inst, lease.Layer()); err != nil {
 		p.cache.Abort(lease)
-		return "", err
+		return nil, err
 	}
 	if out, err := guest(ctx, cv.conn, mountScript); err != nil {
 		// The disk may be half-mounted: it goes with the VM, unused.
 		_ = pluginDisk(context.WithoutCancel(ctx), p.class, "detach", inst)
 		p.cache.Abort(lease)
-		return "", fmt.Errorf("mounting the cache: %w: %s", err, out)
+		return nil, fmt.Errorf("mounting the cache: %w: %s", err, out)
 	}
 	b.mu.Lock()
 	if b.caches == nil {
@@ -135,8 +135,9 @@ func (b *Backend) AttachCache(ctx context.Context, vm VM, scope cachedisk.Scope)
 	}
 	b.caches[id] = cv
 	b.mu.Unlock()
-	b.log.Info("cache attached", "vm", id, "ref", scope.Ref, "from", lease.From(), "took", time.Since(start).Round(time.Millisecond).String())
-	return lease.From(), nil
+	st := lease.Start()
+	b.log.Info("cache attached", "vm", id, "ref", scope.Ref, "key", scope.Key, "writer", scope.Writer, "from", lease.From(), "took", time.Since(start).Round(time.Millisecond).String())
+	return &st, nil
 }
 
 // detachCache takes the cache disk back from a VM whose job is over. The

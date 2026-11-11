@@ -390,10 +390,61 @@ max_per_cache = "30GB"  # one ref's; past it, its next job starts empty
 max_age = "168h"        # a cache no job used for that long goes
 ```
 
-A ref without a cache starts from its project's default branch's. Jobs on a
-protected ref write its cache; jobs on others (merge requests) only read the
-default branch's and write their own, so they can't change what protected
-pipelines read. GitLab for now. fleetci makes the layers with `qemu-img`, which must be on
+A job's `.gitlab-ci.yml` chooses what goes on the disk:
+
+| Variable | What it does |
+|---|---|
+| `FLEETCI_CACHE_KEY` | The cache's name; by default, the job's ref. Jobs with the same key share a cache: `deps`, `$CI_JOB_NAME`, `release`. |
+| `FLEETCI_CACHE_PATHS` | Paths in the job's container kept on the disk, separated by spaces or commas: `node_modules .next/cache /root/.npm`. Relative paths are in the project's directory. |
+| `FLEETCI_CACHE_FROM` | The caches a key with nothing yet starts from, the first that exists; by default, the default branch's. |
+| `FLEETCI_CACHE` | `off` runs the job without a disk. |
+
+```yaml
+build:
+  variables:
+    FLEETCI_CACHE_KEY: deps
+    FLEETCI_CACHE_PATHS: node_modules .next/cache
+```
+
+Who can change a cache that other jobs read is fleetci's to say, not the
+jobs'. A project's shared caches are written by its writers' jobs; any other
+job writes a cache of its ref's own, which starts from the shared one of the
+same key, so a merge request can't change what the default branch runs
+with. By default the writers are the jobs on protected branches and tags.
+Set `writers` for a project that works another way:
+
+| Rule | A job is a writer when it runs on |
+|---|---|
+| `protected` | a protected branch or tag (the default) |
+| `default` | the default branch, protected or not |
+| `branch:<glob>` | a branch that matches, `release/*` |
+| `tag:<glob>` | a tag that matches, `v*` or `staging-*` |
+| `all` | any branch, merge requests' too |
+
+```toml
+[gitlab.cache_disk]
+writers = ["protected"]          # the default; [] makes no job a writer
+
+[[gitlab.cache_disk.projects]]   # the first that matches applies
+match = "group/trunk-app"        # no protected branches; main deploys
+writers = ["default"]
+
+[[gitlab.cache_disk.projects]]
+match = "group/services/**"      # main deploys to one place, tags elsewhere
+writers = ["default", "tag:staging-*", "tag:v*"]
+```
+
+A tag pipeline per environment can keep one cache for all its tags with
+`FLEETCI_CACHE_KEY: release` and `FLEETCI_CACHE_FROM: main`.
+
+`all` lets anyone who can push a branch change what the default branch's
+and the tags' jobs run with: a poisoned `node_modules` or Docker image would
+ship. It is there for projects where every branch is trusted; don't use it
+otherwise. fleetci reads only what GitLab says of a job (its ref, whether it
+is protected, whether it is a merge request's), never variables the job
+could set.
+
+GitLab for now. fleetci makes the layers with `qemu-img`, which must be on
 the host, and needs a fleetingd with the `disk` command.
 `hack/cachelab` measures it on real projects in several languages.
 

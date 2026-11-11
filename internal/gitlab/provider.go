@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -79,11 +78,11 @@ func (c capacityVMs) Reserve(class string) (reservation, error) {
 }
 
 // AttachCache gives the VM a cache disk, when the core can.
-func (c capacityVMs) AttachCache(ctx context.Context, vm string, scope cachedisk.Scope) (string, error) {
+func (c capacityVMs) AttachCache(ctx context.Context, vm string, scope cachedisk.Scope) (*cachedisk.Start, error) {
 	if a, ok := c.Capacity.(source.CacheAttacher); ok {
 		return a.AttachCache(ctx, vm, scope)
 	}
-	return "", nil
+	return nil, nil
 }
 
 // capacityReservation is a source.Reservation, used once by Acquire or
@@ -115,6 +114,8 @@ type provider struct {
 	// classes and defaultClass resolve FLEETCI_CLASS.
 	classes      []string
 	defaultClass string
+	// cacheDisk says which jobs write their project's shared caches.
+	cacheDisk *CacheDisk
 }
 
 func newProvider(docker common.ExecutorProvider, vms vms, classOf func(*common.RunnerConfig) string, classes []string, defaultClass string) *provider {
@@ -232,7 +233,7 @@ func (e *executor) Prepare(options common.ExecutorPrepareOptions) (err error) {
 
 	// If we already have an acquisition just retry preparing it
 	if acqRef.vm != nil {
-		return e.Executor.Prepare(options)
+		return e.Executor.Prepare(withVolumes(options, acqRef.volumes))
 	}
 
 	// fleetci: the class's acquire_timeout bounds the wait.
@@ -256,51 +257,69 @@ func (e *executor) Prepare(options common.ExecutorPrepareOptions) (err error) {
 	options.Build.Log().WithField("vm", vm.ID).Trace("Acquired capacity...")
 
 	acqRef.vm = &vm
-	e.attachCache(options, vm)
+	acqRef.volumes = e.attachCache(options, vm)
 
-	return e.Executor.Prepare(options)
+	return e.Executor.Prepare(withVolumes(options, acqRef.volumes))
 }
 
-// attachCache gives the job's VM its project's and ref's cache disk, when
-// the VM's class has one. Without it the job runs all the same, from cold.
-// The scope comes from GitLab's job payload, which the job can't change.
-func (e *executor) attachCache(options common.ExecutorPrepareOptions, vm source.VM) {
+// attachCache gives the job's VM its cache disk, when the VM's class has
+// one, and returns the Docker volumes that keep the job's paths on it.
+// Without it the job runs all the same, from cold.
+func (e *executor) attachCache(options common.ExecutorPrepareOptions, vm source.VM) []string {
 	a, ok := e.p.vms.(source.CacheAttacher)
 	if !ok {
-		return
+		return nil
 	}
-	scope, err := cacheScope(options.Build)
+	job, err := e.p.cacheDisk.cacheFor(options.Build, options.Config)
 	if err != nil {
 		options.BuildLogger.Warningln("No cache disk: " + err.Error())
-		return
+		return nil
 	}
-	from, err := a.AttachCache(options.Context, vm.ID, scope)
-	switch {
-	case err != nil:
+	if job == nil {
+		return nil
+	}
+	st, err := a.AttachCache(options.Context, vm.ID, job.scope)
+	if err != nil {
 		options.BuildLogger.Warningln("No cache disk: " + err.Error())
-	case from == "own":
-		options.BuildLogger.Println("Cache disk: this ref's")
-	case from == "default":
-		options.BuildLogger.Println("Cache disk: from " + scope.Default + "'s")
-	case from == "empty":
-		options.BuildLogger.Println("Cache disk: empty, the first for this ref")
+		return nil
 	}
+	if st == nil {
+		return nil
+	}
+	whose := "this ref's own"
+	if job.scope.Writer {
+		whose = "shared with the project"
+	}
+	msg := "Cache disk " + strconv.Quote(cacheName(job.scope)) + " (" + whose + ")"
+	switch {
+	case st.Empty:
+		msg += ": empty, its first job"
+	case !st.Own:
+		msg += ": starting from " + strconv.Quote(st.From) + "'s"
+	}
+	options.BuildLogger.Println(msg)
+	return job.volumes()
 }
 
-// cacheScope is whose cache a build uses.
-func cacheScope(build *common.Build) (cachedisk.Scope, error) {
-	u, err := url.Parse(build.Runner.URL)
-	if err != nil || u.Host == "" {
-		return cachedisk.Scope{}, fmt.Errorf("the runner's url %q", build.Runner.URL)
+func cacheName(s cachedisk.Scope) string {
+	if s.Key != "" {
+		return s.Key
 	}
-	return cachedisk.Scope{
-		Forge:     "gitlab",
-		Instance:  u.Host,
-		Project:   strconv.FormatInt(build.JobInfo.ProjectID, 10),
-		Ref:       build.GitInfo.Ref,
-		Protected: build.IsProtected(),
-		Default:   build.GetAllVariables().Value("CI_DEFAULT_BRANCH"),
-	}, nil
+	return s.Ref
+}
+
+// withVolumes adds volumes to the job's Docker config, a copy of the
+// runner's.
+func withVolumes(options common.ExecutorPrepareOptions, volumes []string) common.ExecutorPrepareOptions {
+	if len(volumes) == 0 || options.Config == nil || options.Config.Docker == nil {
+		return options
+	}
+	cfg := *options.Config
+	d := *cfg.Docker
+	d.Volumes = append(slices.Clone(d.Volumes), volumes...)
+	cfg.Docker = &d
+	options.Config = &cfg
+	return options
 }
 
 // prepareByJob takes a VM of the class the job's FLEETCI_CLASS names: in
@@ -365,6 +384,8 @@ type acquisitionRef struct {
 	// tried: Prepare has used res, or given it back.
 	tried bool
 	vm    *source.VM
+	// volumes keep the job's FLEETCI_CACHE_PATHS on its cache disk.
+	volumes []string
 
 	// conn returns the connection to a VM's machine.
 	conn func(vm string) (*proxy.Conn, error)
