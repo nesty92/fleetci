@@ -188,3 +188,24 @@ The rest is GitHub's: 3 s for the runner to start and connect, 2.3 s for
 GitHub to hand it the job. Of the 3 s, 2 s is `run.sh` until it is
 connected, waiting on GitHub; reading the runner's files into the
 snapshot's page cache beforehand changed nothing.
+
+## Go build cache
+
+caddy v2.10.2 built with `go build ./cmd/caddy` (Go 1.25, 2,146 cache
+entries) in a fresh container each time, as on a single-use VM, after a
+one-line change to `caddy.go`. Modules come from a zstd tarball (1.3 s) in
+every case but the first. The cache server and S3 (RustFS) on the same
+host; "network" adds 5 ms each way and 1 Gbit/s between the job and them.
+
+| Cache | Job | Job, network | Read per job |
+|---|---|---|---|
+| none | 21–22 s | | |
+| GOCACHE as a zstd tarball, trimmed to what the last job used | 6.2 s | 7.8–9.2 s | 125 MB, all of it |
+| gobuildcache v1.9.0, GOCACHEPROG straight to S3 (LZ4) | 5.4 s | 6.2–6.3 s | 194 MB |
+| fleetci-gocache, through its server (S2) | 5.5–5.6 s | 6.6–7.0 s | 194 MB |
+
+A second build in the same container takes 1.2 s: the rest is fetching.
+The tarball also costs 0.6 s to save, every job; with GOCACHEPROG a job
+uploads only the entries it built, 1.5 MB here. fleetci-gocache's 0.4 s
+over gobuildcache on the network is its server's hop. Without compression
+it read 539 MB and took 7.2 s.

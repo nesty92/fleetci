@@ -22,6 +22,14 @@ builds:
     flags: [-trimpath]
     ldflags:
       - -s -w -X main.version={{ .Version }} -X main.revision={{ .ShortCommit }} -X main.builtAt={{ .Date }}
+  - id: gocache
+    main: ./cmd/fleetci-gocache
+    binary: fleetci-gocache
+    env: [CGO_ENABLED=0]
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags: [-s -w]
 
 # Plain binaries, named like fleeting-plugin-aws's releases, so a setup
 # script downloads one file: fleetci-linux-amd64, fleeting-plugin-fleetci-linux-arm64.

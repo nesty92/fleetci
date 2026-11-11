@@ -173,6 +173,41 @@ Install `zstd` on every image. The cache key includes the compression,
 so a VM without zstd (gzip) misses what a VM with it saved.
 `hack/cache/up.sh` runs the server on RustFS for [hack/local](hack/local).
 
+### Shared Go build cache (GitLab)
+
+A fresh VM builds Go from nothing. `fleetci-gocache` shares the go command's
+build cache between jobs, one entry at a time, through a server that holds
+the storage's credentials; jobs hold none. fleetci gives each job a token it
+signs, saying the job's project, ref and whether the ref is protected. Jobs
+on protected refs write the project's cache, which all its jobs read; other
+jobs, such as merge requests', write a cache of their own ref, so they can't
+plant entries in what `main` builds. Each job fetches only the entries its
+build needs ([measurements](docs/measurements.md#go-build-cache)).
+
+```sh
+fleetci-gocache keygen gocache.key gocache.pub
+fleetci-gocache serve -public-key gocache.pub -s3-region eu-north-1 -s3-bucket my-cache   # near the bucket, IAM role or -s3-access-key
+```
+
+```toml
+# fleetci.toml
+[gitlab.go_cache]
+url = "http://10.0.1.5:8091"
+key_file = "gocache.key"
+```
+
+```toml
+# the config_file's runner: the client on each VM image, in each job
+[[runners]]
+  environment = ["GOCACHEPROG=/usr/local/bin/fleetci-gocache"]
+  [runners.docker]
+    volumes = ["/usr/local/bin/fleetci-gocache:/usr/local/bin/fleetci-gocache:ro"]
+```
+
+Go 1.24 and later use it; older Go ignores `GOCACHEPROG`. Without the server
+the client is a local cache and the build goes on. Jobs run by a fleet's
+workers don't get tokens yet.
+
 ## Install
 
 On AWS, [terraform-aws-gitlab-runner-autoscaler](https://github.com/nesty92/terraform-aws-gitlab-runner-autoscaler)
