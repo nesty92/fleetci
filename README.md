@@ -199,7 +199,7 @@ such as [fleeting-plugin-aws](https://gitlab.com/gitlab-org/fleeting/plugins/aws
 
 ```sh
 curl -fsSL -o /usr/local/bin/fleeting-plugin-aws \
-  https://gitlab.com/gitlab-org/fleeting/plugins/aws/-/releases/v1.3.1/downloads/fleeting-plugin-aws-linux-amd64
+  https://gitlab.com/gitlab-org/fleeting/plugins/aws/-/releases/v1.3.2/downloads/fleeting-plugin-aws-linux-amd64
 chmod +x /usr/local/bin/fleeting-plugin-aws
 ```
 

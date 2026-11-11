@@ -75,7 +75,7 @@ The cloud plugins, only those you use:
 ```sh
 get() { curl -fsSL -o "/usr/local/bin/$1" "$2" && chmod 755 "/usr/local/bin/$1"; }
 get fleeting-plugin-aws \
-  https://gitlab.com/api/v4/projects/39457165/packages/generic/releases/v1.3.1/fleeting-plugin-aws-linux-amd64
+  https://gitlab.com/api/v4/projects/39457165/packages/generic/releases/v1.3.2/fleeting-plugin-aws-linux-amd64
 get fleeting-plugin-googlecloud \
   https://gitlab.com/api/v4/projects/39455486/packages/generic/releases/v1.3.1/fleeting-plugin-googlecloud-linux-amd64
 get fleeting-plugin-azure \

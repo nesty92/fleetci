@@ -8,7 +8,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 DATA=${FLEETCI_AWS_DATA:-$HOME/.local/share/fleetci-aws}
 TOKEN_FILE=${FLEETCI_LOCAL_TOKEN:-$HOME/.config/fleetci/runner.token}
-AWS_PLUGIN_VERSION=${AWS_PLUGIN_VERSION:-v1.3.1}
+AWS_PLUGIN_VERSION=${AWS_PLUGIN_VERSION:-v1.3.2}
 # GitHub Actions on the same classes: space-separated owner/name repos, and a
 # file holding a token that may register runners on them.
 GITHUB_REPOS=${FLEETCI_GITHUB_REPOS:-}
