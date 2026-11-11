@@ -96,22 +96,32 @@ func (d *Dispatcher) runnersJob(ctx context.Context, repo string, queued int64, 
 	hintRepo, run, _ := strings.Cut(hint, " ")
 	runID, _ := strconv.ParseInt(run, 10, 64)
 	// GitHub may name the runner on the job a moment after the runner has it.
+	var why error
 	for try := 0; ; try++ {
-		if j, err := d.gh.job(ctx, repo, queued); err == nil && j.RunnerName == runner {
+		j, err := d.gh.job(ctx, repo, queued)
+		if err == nil && j.RunnerName == runner {
 			return repo, j, nil
 		}
-		if runID > 0 && d.serves(hintRepo) {
+		why = err
+		switch {
+		case hint == "":
+			why = errors.Join(why, errors.New("the hook named no run"))
+		case runID <= 0 || !d.serves(hintRepo):
+			why = errors.Join(why, fmt.Errorf("the hook named %q, not a run fleetci serves", hint))
+		default:
 			jobs, err := d.gh.runJobs(ctx, hintRepo, runID)
-			if err == nil {
-				for _, j := range jobs {
-					if j.RunnerName == runner {
-						return hintRepo, j, nil
-					}
+			for _, j := range jobs {
+				if j.RunnerName == runner {
+					return hintRepo, j, nil
 				}
 			}
+			why = errors.Join(why, err)
 		}
 		if try == 4 {
-			return "", job{}, errors.New("GitHub does not say which job the runner took")
+			if why != nil {
+				return "", job{}, fmt.Errorf("GitHub does not say which job runner %s took: %w", runner, why)
+			}
+			return "", job{}, fmt.Errorf("GitHub does not say which job runner %s took", runner)
 		}
 		select {
 		case <-ctx.Done():
@@ -151,7 +161,7 @@ func (d *Dispatcher) cacheFacts(ctx context.Context, repo string, j job) (cacheF
 	if f.branch == "" {
 		return f, errors.New("the job's run has no branch")
 	}
-	if isReview(f.event) || isFork(f) {
+	if isReview(f.event) || isFork(f) || !needsRef(d.cfg.CacheDisk.Rules(repo)) {
 		return f, nil
 	}
 	f.protected, err = d.gh.branchProtected(ctx, repo, f.branch)
@@ -159,7 +169,21 @@ func (d *Dispatcher) cacheFacts(ctx context.Context, repo string, j job) (cacheF
 		// Not a branch: a tag's run names the tag.
 		f.tag, err = d.gh.tagExists(ctx, repo, f.branch)
 	}
+	if se := (statusError{}); errors.As(err, &se) && se.status == http.StatusForbidden {
+		err = fmt.Errorf("the writers' rules need the branch, which the app may not read (Contents: read): %w", err)
+	}
 	return f, err
+}
+
+// needsRef says whether the rules tell branches from tags, or protected
+// branches from others; "default" and "all" need neither.
+func needsRef(rules []string) bool {
+	for _, r := range rules {
+		if r != "default" && r != "all" {
+			return true
+		}
+	}
+	return false
 }
 
 func isReview(event string) bool { return strings.HasPrefix(event, "pull_request") }

@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -135,5 +136,42 @@ func TestCacheFacts(t *testing.T) {
 	d = cacheGitHub(t, nil)
 	if f, err = d.cacheFacts(context.Background(), "o/r", job{ID: 2, RunID: 70}); err != nil || f.protected || f.tag {
 		t.Fatalf("%+v %v", f, err)
+	}
+}
+
+// Rules that need no branch facts ask GitHub for none: an app that may not
+// read the branch still gets the default branch's disk.
+func TestCacheFactsAsksOnlyWhatTheRulesNeed(t *testing.T) {
+	d := cacheGitHub(t, nil)
+	branches := 0
+	d.gh = newClient(d.cfg.APIURL, staticToken("t"), &http.Client{Transport: roundTrip(func(r *http.Request) (*http.Response, error) {
+		if strings.Contains(r.URL.Path, "/branches/") {
+			branches++
+			return &http.Response{StatusCode: http.StatusForbidden, Body: io.NopCloser(strings.NewReader(`{"message":"Resource not accessible by integration"}`)), Header: http.Header{}, Request: r}, nil
+		}
+		return http.DefaultTransport.RoundTrip(r)
+	})})
+	d.cfg.CacheDisk = &cachedisk.Policy{Writers: &[]string{"default"}}
+	if _, err := d.cacheFacts(context.Background(), "o/r", job{ID: 2, RunID: 70}); err != nil || branches != 0 {
+		t.Fatalf("default: %d branch calls, %v", branches, err)
+	}
+	d.cfg.CacheDisk = nil // protected
+	_, err := d.cacheFacts(context.Background(), "o/r", job{ID: 2, RunID: 70})
+	if err == nil || !strings.Contains(err.Error(), "Contents: read") {
+		t.Fatalf("protected, refused: %v", err)
+	}
+}
+
+type roundTrip func(*http.Request) (*http.Response, error)
+
+func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestRunnersJobSaysWhy(t *testing.T) {
+	d := cacheGitHub(t, nil)
+	jobLookupWait = time.Millisecond
+	t.Cleanup(func() { jobLookupWait = time.Second })
+	_, _, err := d.runnersJob(context.Background(), "o/r", 1, "runner-z", "")
+	if err == nil || !strings.Contains(err.Error(), "runner-z") || !strings.Contains(err.Error(), "named no run") {
+		t.Fatalf("%v", err)
 	}
 }
