@@ -21,7 +21,7 @@ their own.
 `fleeting-plugin-fleetci`:
 
 ```sh
-v=0.7.0 arch=linux-amd64 # x-release-please-version
+v=0.7.1 arch=linux-amd64 # x-release-please-version
 base=https://github.com/nesty92/fleetci/releases/download/v$v
 curl -fsSLO "$base/fleetci-$arch" -fsSLO "$base/checksums.txt"
 sha256sum --ignore-missing -c checksums.txt

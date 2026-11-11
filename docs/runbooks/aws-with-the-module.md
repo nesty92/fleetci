@@ -146,7 +146,7 @@ removed after its job.
 ```yaml
 # GitLab
 include:
-  - remote: https://raw.githubusercontent.com/nesty92/fleetci/v0.7.0/templates/gitlab-ci.yml
+  - remote: https://raw.githubusercontent.com/nesty92/fleetci/v0.7.1/templates/gitlab-ci.yml
 
 lint:
   extends: .fleetci-1vcpu-2gb

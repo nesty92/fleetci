@@ -60,7 +60,7 @@ curl -fsSL https://github.com/nesty92/fleeting-plugin-fleetingd/releases/downloa
   | tar -xz -C /usr/local/bin fleeting-plugin-fleetingd
 
 # fleetci and its gitlab-runner plugin
-v=0.7.0 arch=linux-amd64 # x-release-please-version
+v=0.7.1 arch=linux-amd64 # x-release-please-version
 base=https://github.com/nesty92/fleetci/releases/download/v$v
 curl -fsSLO "$base/fleetci-$arch" -fsSLO "$base/fleeting-plugin-fleetci-$arch" -fsSLO "$base/checksums.txt"
 sha256sum --ignore-missing -c checksums.txt
