@@ -31,6 +31,7 @@ import (
 
 	"github.com/hashicorp/go-hclog"
 
+	"github.com/nesty92/fleetci/internal/cachedisk"
 	"github.com/nesty92/fleetci/internal/fleet"
 	"github.com/nesty92/fleetci/internal/proxy"
 	"github.com/nesty92/fleetci/internal/source"
@@ -50,6 +51,10 @@ type Config struct {
 	// "repo"), for Orgs "Self-hosted runners: write" on the org (classic:
 	// "admin:org"). Or authenticate as a GitHub App instead.
 	TokenFile string `json:"token_file" toml:"token_file"`
+	// CacheDisk says which jobs write the caches the rest of their repo
+	// reads, for classes with a cache disk (see cachedisk.Policy); repos
+	// match by "owner/name". Default: jobs on protected branches.
+	CacheDisk *cachedisk.Policy `json:"cache_disk" toml:"cache_disk"`
 	// AppID and AppPrivateKeyFile authenticate as a GitHub App, in place of
 	// TokenFile. The App is found installed on each owner, and its
 	// installation tokens are renewed as they expire.
@@ -143,6 +148,9 @@ type VM struct {
 	// Conn is the connection to the VM's machine, shared: never closed by
 	// a job.
 	Conn *proxy.Conn
+	// Cache says the VM's class has a cache disk: the runner's job waits
+	// at its start while fleetci attaches it (see jobStartedHook).
+	Cache bool
 }
 
 // StartFunc runs a just-in-time runner on the VM and returns when it exits.
@@ -259,6 +267,9 @@ func New(ctx context.Context, cfg Config, capacity source.Capacity, start StartF
 	}
 	if strings.ContainsAny(cfg.RunnerVersion, "'\"\\ $`/") {
 		return nil, fmt.Errorf("github runner_version %q: want a release such as %s", cfg.RunnerVersion, DefaultRunnerVersion)
+	}
+	if err := cfg.CacheDisk.Validate(); err != nil {
+		return nil, fmt.Errorf("github: cache_disk %w", err)
 	}
 	if cfg.RunnerGroupID == 0 {
 		cfg.RunnerGroupID = 1
@@ -917,6 +928,9 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 		return
 	}
 	vm := VM{VM: created, Conn: conn}
+	if ca, ok := d.capacity.(source.CacheAttacher); ok && ca.HasCache(created.ID) {
+		vm.Cache = true
+	}
 
 	if reg.err != nil {
 		log.Error("registering runner; retrying", "err", reg.err)
@@ -929,13 +943,23 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 	log.Info("runner starting", "runner", reg.name, "runner_id", strconv.FormatInt(runnerID, 10), "labels", labels, "waited", time.Since(start).Round(time.Second).String())
 
 	rctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	// The cache disk is attached, or given up, before the VM goes.
+	var attaching sync.WaitGroup
+	defer func() { cancel(); attaching.Wait() }()
 	go d.watchIdle(rctx, cancel, scope, runnerID, log)
 
 	var took atomic.Pointer[string]
 	err = d.start(rctx, vm, jit, func(job string) {
+		first := took.Load() == nil
 		took.Store(&job)
 		log.Info("runner took a job", "job", job)
+		if vm.Cache && first {
+			attaching.Add(1)
+			go func() {
+				defer attaching.Done()
+				d.attachCache(rctx, vm, repo, j.ID, reg.name, log.With("job", job))
+			}()
+		}
 	})
 	if job := took.Load(); job != nil {
 		log = log.With("job", *job)

@@ -153,6 +153,17 @@ func (c *capacity) Delete(ctx context.Context, id string) error {
 // cacheBackend is a Backend that gives VMs cache disks.
 type cacheBackend interface {
 	AttachCache(ctx context.Context, vm fleet.VM, scope cachedisk.Scope) (*cachedisk.Start, error)
+	HasCache(vm string) bool
+}
+
+// HasCache says whether the VM's class has a cache disk.
+func (c *capacity) HasCache(id string) bool {
+	fb, ok := c.b.(fleetBackend)
+	if !ok {
+		return false
+	}
+	cb, ok := fb.Backend.(cacheBackend)
+	return ok && cb.HasCache(id)
 }
 
 // AttachCache gives the VM its scope's cache disk, when its class has one,

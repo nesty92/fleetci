@@ -31,6 +31,8 @@ type job struct {
 	Name   string   `json:"name"`
 	Status string   `json:"status"`
 	Labels []string `json:"labels"`
+	// RunnerName is the runner that took it, once one has.
+	RunnerName string `json:"runner_name"`
 	// CreatedAt is when GitHub queued it.
 	CreatedAt time.Time `json:"created_at"`
 }

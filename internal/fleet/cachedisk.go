@@ -140,6 +140,14 @@ func (b *Backend) AttachCache(ctx context.Context, vm VM, scope cachedisk.Scope)
 	return &st, nil
 }
 
+// HasCache says whether the VM's class has a cache disk.
+func (b *Backend) HasCache(id string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	p, ok := b.vms[id]
+	return ok && p.cache != nil
+}
+
 // detachCache takes the cache disk back from a VM whose job is over. The
 // layer is kept only when the guest unmounted it cleanly and the plugin
 // took it out; otherwise it is thrown away and the cache stays as it was.

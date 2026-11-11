@@ -19,36 +19,11 @@ import (
 
 // CacheDisk is the [gitlab.cache_disk] table: which jobs write the caches
 // the rest of their project reads, for classes with a cache disk (see
-// fleet.CacheDisk). It is fleetci's, not the jobs': a job's .gitlab-ci.yml
-// can choose its caches' names and what to keep, but not who it trusts.
-type CacheDisk struct {
-	// Writers are the jobs that write the project's shared caches; other
-	// jobs get caches of their ref's own, which start from the shared
-	// ones. A job is a writer when any rule matches it:
-	//
-	//	"protected"       a job on a protected branch or tag (the default)
-	//	"default"         a job on the default branch, protected or not
-	//	"branch:<glob>"   a job on a branch that matches, "release/*" say
-	//	"tag:<glob>"      a job on a tag that matches, "v*" say
-	//	"all"             every job, merge requests' too
-	//
-	// A merge request's pipeline matches only "protected" when GitLab
-	// protects it, and "all". "all" lets any branch change what the
-	// default branch's jobs run with: use it only where every pushed
-	// branch is trusted. Writers = [] makes no job a writer.
-	Writers *[]string `json:"writers" toml:"writers"`
-	// Projects set Writers for some projects: the first whose Match fits
-	// the project's path applies.
-	Projects []CacheDiskProject `json:"projects" toml:"projects"`
-}
+// fleet.CacheDisk and cachedisk.Policy). Projects match by path.
+type CacheDisk = cachedisk.Policy
 
 // CacheDiskProject is one [[gitlab.cache_disk.projects]].
-type CacheDiskProject struct {
-	// Match is a project's path, "group/app", a glob, "group/*", or a
-	// group and everything under it, "group/**".
-	Match   string   `json:"match" toml:"match"`
-	Writers []string `json:"writers" toml:"writers"`
-}
+type CacheDiskProject = cachedisk.ProjectPolicy
 
 // Job variables a .gitlab-ci.yml sets to choose its cache disk.
 const (
@@ -66,107 +41,20 @@ const (
 	cachePathsVariable = "FLEETCI_CACHE_PATHS"
 )
 
-var defaultWriters = []string{"protected"}
-
-func (c *CacheDisk) validate() error {
-	if c == nil {
-		return nil
-	}
-	check := func(where string, rules []string) error {
-		for _, r := range rules {
-			if err := checkRule(r); err != nil {
-				return fmt.Errorf("gitlab: cache_disk %s: %w", where, err)
-			}
-		}
-		return nil
-	}
-	if c.Writers != nil {
-		if err := check("writers", *c.Writers); err != nil {
-			return err
-		}
-	}
-	for i, p := range c.Projects {
-		where := fmt.Sprintf("projects %d", i+1)
-		if p.Match == "" {
-			return fmt.Errorf("gitlab: cache_disk %s: match is required", where)
-		}
-		if _, err := path.Match(strings.TrimSuffix(p.Match, "/**"), ""); err != nil {
-			return fmt.Errorf("gitlab: cache_disk %s: match %q: %w", where, p.Match, err)
-		}
-		if err := check(where, p.Writers); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func checkRule(r string) error {
-	switch r {
-	case "protected", "default", "all":
-		return nil
-	}
-	kind, glob, ok := strings.Cut(r, ":")
-	if !ok || (kind != "branch" && kind != "tag") || glob == "" {
-		return fmt.Errorf("writer %q: want protected, default, all, branch:<glob> or tag:<glob>", r)
-	}
-	if _, err := path.Match(glob, ""); err != nil {
-		return fmt.Errorf("writer %q: %w", r, err)
-	}
-	return nil
-}
-
-// writers are the rules for a project.
-func (c *CacheDisk) writers(project string) []string {
-	if c != nil {
-		for _, p := range c.Projects {
-			if matchProject(p.Match, project) {
-				return p.Writers
-			}
-		}
-		if c.Writers != nil {
-			return *c.Writers
-		}
-	}
-	return defaultWriters
-}
-
-func matchProject(pattern, project string) bool {
-	if group, ok := strings.CutSuffix(pattern, "/**"); ok {
-		return strings.HasPrefix(project, group+"/")
-	}
-	ok, _ := path.Match(pattern, project)
-	return ok
-}
-
 // writer says whether a job writes its project's shared caches. It reads
 // only what GitLab's payload says of the job, which its .gitlab-ci.yml
 // can't change.
 func writer(rules []string, build *common.Build) bool {
-	mr := slices.ContainsFunc(build.GitInfo.Refspecs, func(s string) bool {
-		return strings.Contains(s, "refs/merge-requests/")
+	ref := build.GitInfo.Ref
+	return cachedisk.IsWriter(rules, cachedisk.Job{
+		Ref:       ref,
+		Tag:       build.GitInfo.RefType == spec.RefTypeTag,
+		Protected: build.IsProtected(),
+		Default:   ref == gitlabDefaultBranch(build),
+		Review: slices.ContainsFunc(build.GitInfo.Refspecs, func(s string) bool {
+			return strings.Contains(s, "refs/merge-requests/")
+		}),
 	})
-	ref, tag := build.GitInfo.Ref, build.GitInfo.RefType == spec.RefTypeTag
-	for _, r := range rules {
-		kind, glob, _ := strings.Cut(r, ":")
-		switch {
-		case r == "all":
-			return true
-		case r == "protected" && build.IsProtected():
-			return true
-		case r == "default" && !mr && !tag && ref != "" && ref == gitlabDefaultBranch(build):
-			return true
-		case kind == "branch" && !mr && !tag && globMatch(glob, ref):
-			return true
-		case kind == "tag" && tag && globMatch(glob, ref):
-			return true
-		}
-	}
-	return false
-}
-
-func globMatch(glob, s string) bool {
-	ok, _ := path.Match(glob, s)
-	return ok
 }
 
 // gitlabDefaultBranch is CI_DEFAULT_BRANCH as GitLab set it. A job's own
@@ -192,7 +80,7 @@ type cacheJob struct {
 }
 
 // cacheFor is the job's cache disk, or nil for none.
-func (c *CacheDisk) cacheFor(build *common.Build, rc *common.RunnerConfig) (*cacheJob, error) {
+func cacheFor(c *CacheDisk, build *common.Build, rc *common.RunnerConfig) (*cacheJob, error) {
 	vars := build.GetAllVariables()
 	if v := strings.ToLower(vars.Value(cacheVariable)); v == "off" || v == "false" || v == "0" {
 		return nil, nil
@@ -208,7 +96,7 @@ func (c *CacheDisk) cacheFor(build *common.Build, rc *common.RunnerConfig) (*cac
 		Project:  strconv.FormatInt(build.JobInfo.ProjectID, 10),
 		Ref:      build.GitInfo.Ref,
 		Key:      strings.TrimSpace(vars.ExpandValue(vars.Value(cacheKeyVariable))),
-		Writer:   writer(c.writers(project), build),
+		Writer:   writer(c.Rules(project), build),
 		From:     fields(vars.ExpandValue(vars.Value(cacheFromVariable))),
 	}
 	if len(scope.Key) > 200 {

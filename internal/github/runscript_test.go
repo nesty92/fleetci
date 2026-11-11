@@ -56,7 +56,7 @@ func TestRunScriptPicksTheRunner(t *testing.T) {
 			_ = os.WriteFile(filepath.Join(bin, "dnf"), []byte("#!/bin/sh\n"), 0o755)
 			_ = os.WriteFile(filepath.Join(bin, "sudo"), []byte("#!/bin/sh\nexec \"$@\"\n"), 0o755)
 
-			cmd := exec.Command("sh", "-c", fmt.Sprintf(runScript, tc.asked, "", DefaultRunnerVersion))
+			cmd := exec.Command("sh", "-c", fmt.Sprintf(runScript, tc.asked, "", DefaultRunnerVersion, jobStartedHook))
 			cmd.Env = []string{"HOME=" + home, "PATH=" + bin + ":" + os.Getenv("PATH")}
 			cmd.Stdin = strings.NewReader("the-jit\n")
 			out, err := cmd.CombinedOutput()
@@ -86,5 +86,46 @@ func TestRunnerVersionIsChecked(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "runner_version") {
 			t.Errorf("%q: %v", v, err)
 		}
+	}
+}
+
+// The job-started hook in a real shell, sleep a no-op: it says which run
+// the job is in, prints fleetci's answer, and gives up only when fleetci
+// has not begun.
+func TestJobStartedHook(t *testing.T) {
+	for name, tc := range map[string]struct {
+		done    string // fleetci's answer, "" for none
+		decided bool   // fleetci began before the hook gave up
+		out     string
+	}{
+		"answered":     {done: "Cache disk \"main\" (shared with the project)\n", out: "Cache disk \"main\" (shared with the project)"},
+		"no answer":    {out: "No cache disk: fleetci did not answer"},
+		"not finished": {decided: true, out: "No cache disk: fleetci did not finish attaching it"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			d, bin := t.TempDir(), t.TempDir()
+			_ = os.WriteFile(filepath.Join(bin, "sleep"), []byte("#!/bin/sh\n"), 0o755)
+			if tc.done != "" {
+				_ = os.WriteFile(filepath.Join(d, "done"), []byte(tc.done), 0o600)
+			}
+			if tc.decided {
+				_ = os.Mkdir(filepath.Join(d, "decided"), 0o700)
+			}
+			cmd := exec.Command("sh", "-c", strings.ReplaceAll(jobStartedHook, "/run/fleetci", d))
+			cmd.Env = []string{"PATH=" + bin + ":" + os.Getenv("PATH"), "GITHUB_REPOSITORY=o/r", "GITHUB_RUN_ID=77"}
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("%v: %s", err, out)
+			}
+			if strings.TrimSpace(string(out)) != tc.out {
+				t.Errorf("output %q, want %q", out, tc.out)
+			}
+			if job, _ := os.ReadFile(filepath.Join(d, "job")); string(job) != "o/r 77\n" {
+				t.Errorf("job file %q", job)
+			}
+			if _, err := os.Stat(filepath.Join(d, "decided")); (err == nil) != (tc.done == "") {
+				t.Errorf("decided: %v", err)
+			}
+		})
 	}
 }

@@ -54,6 +54,9 @@ type CacheAttacher interface {
 	// AttachCache says what the disk starts from, or nil when the VM's
 	// class has no cache disk.
 	AttachCache(ctx context.Context, vm string, scope cachedisk.Scope) (*cachedisk.Start, error)
+	// HasCache says whether the VM's class has a cache disk: a source
+	// that learns the job only once it runs prepares the VM to wait.
+	HasCache(vm string) bool
 }
 
 // Reservation is room for one VM, held until Acquire or Release.

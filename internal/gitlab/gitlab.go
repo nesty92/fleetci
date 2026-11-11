@@ -92,8 +92,8 @@ func (c Config) Validate(classes []string) error {
 	if len(c.Runners) == 0 && c.ConfigFile == "" {
 		return errors.New("gitlab: no runners and no config_file")
 	}
-	if err := c.CacheDisk.validate(); err != nil {
-		return err
+	if err := c.CacheDisk.Validate(); err != nil {
+		return fmt.Errorf("gitlab: cache_disk %w", err)
 	}
 	seen := map[string]bool{}
 	for i, r := range c.Runners {

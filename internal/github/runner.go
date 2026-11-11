@@ -16,9 +16,11 @@ import (
 // stdin, which keeps it out of the SSH command line. The runner takes one
 // job and exits. It is the version asked for (%[1]s), or with none the
 // newest in the image's ~/actions-runner-<version>, or else %[3]s;
-// one the image lacks is downloaded.
+// one the image lacks is downloaded. A second line "cache" has each job
+// wait at its start while fleetci gives it its cache disk (jobStartedHook).
 const runScript = `set -eu
 read -r jit
+read -r hook || hook=
 case $(uname -m) in
   x86_64) arch=x64 ;;
   aarch64|arm64) arch=arm64 ;;
@@ -63,7 +65,37 @@ if ! ls /usr/lib*/libicuuc.so.* /usr/lib/*/libicuuc.so.* 2>/dev/null | grep -q .
   else sudo ./bin/installdependencies.sh >/dev/null
   fi
 fi
+if [ "$hook" = cache ] && sudo -n true 2>/dev/null; then
+  sudo mkdir -p /run/fleetci && sudo chown "$(id -u):$(id -g)" /run/fleetci
+  cat > fleetci-job-started.sh <<'HOOK'
+%[4]s
+HOOK
+  export ACTIONS_RUNNER_HOOK_JOB_STARTED="$dir/fleetci-job-started.sh"
+fi
 exec ./run.sh --jitconfig "$jit"
+`
+
+// jobStartedHook runs before the job's first step: it says which run the
+// job is in, and waits while fleetci gives the job its cache disk
+// (Dispatcher.attachCache). fleetci or the hook, whichever makes "decided"
+// first, decides: the hook gives up after a minute only if fleetci has not
+// begun, so fleetci never stops Docker under a job that has started.
+const jobStartedHook = `d=/run/fleetci
+printf '%s %s\n' "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > "$d/job.new" && mv "$d/job.new" "$d/job"
+i=0
+until [ -e "$d/done" ]; do
+  i=$((i+1))
+  if [ $i -ge 600 ] && mkdir "$d/decided" 2>/dev/null; then
+    echo "No cache disk: fleetci did not answer"
+    exit 0
+  fi
+  if [ $i -ge 6000 ]; then
+    echo "No cache disk: fleetci did not finish attaching it"
+    exit 0
+  fi
+  sleep 0.1
+done
+cat "$d/done"
 `
 
 // SSHStart runs the runner on the VM over SSH and logs its output. An
@@ -75,7 +107,7 @@ exec ./run.sh --jitconfig "$jit"
 // stopping, leaves it running. A VM handed over to the next fleetci is
 // followed by that one to the job's end.
 func SSHStart(version, cacheURL string, log hclog.Logger) StartFunc {
-	return sshStart(fmt.Sprintf(runScript, version, cacheURL, DefaultRunnerVersion), log)
+	return sshStart(fmt.Sprintf(runScript, version, cacheURL, DefaultRunnerVersion, jobStartedHook), log)
 }
 
 // followTries is how many times in a row following the runner may fail
@@ -91,7 +123,11 @@ func sshStart(script string, log hclog.Logger) StartFunc {
 		if err != nil {
 			return err
 		}
-		if err := vmjob.Start(ctx, client, vm.ID, script, []byte(jit+"\n")); err != nil {
+		stdin := jit + "\n"
+		if vm.Cache {
+			stdin += "cache\n"
+		}
+		if err := vmjob.Start(ctx, client, vm.ID, script, []byte(stdin)); err != nil {
 			return err
 		}
 		log := log.With("vm", vm.ID)

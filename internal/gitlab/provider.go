@@ -25,7 +25,6 @@ import (
 	"io"
 	"net"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -270,7 +269,7 @@ func (e *executor) attachCache(options common.ExecutorPrepareOptions, vm source.
 	if !ok {
 		return nil
 	}
-	job, err := e.p.cacheDisk.cacheFor(options.Build, options.Config)
+	job, err := cacheFor(e.p.cacheDisk, options.Build, options.Config)
 	if err != nil {
 		options.BuildLogger.Warningln("No cache disk: " + err.Error())
 		return nil
@@ -286,27 +285,9 @@ func (e *executor) attachCache(options common.ExecutorPrepareOptions, vm source.
 	if st == nil {
 		return nil
 	}
-	whose := "this ref's own"
-	if job.scope.Writer {
-		whose = "shared with the project"
-	}
-	msg := "Cache disk " + strconv.Quote(cacheName(job.scope)) + " (" + whose + ")"
-	switch {
-	case st.Empty:
-		msg += ": empty, its first job"
-	case !st.Own:
-		msg += ": starting from " + strconv.Quote(st.From) + "'s"
-	}
-	options.BuildLogger.Println(msg)
+	options.BuildLogger.Println(cachedisk.Describe(job.scope, *st))
 	job.keepFromClean(options.Build)
 	return job.volumes()
-}
-
-func cacheName(s cachedisk.Scope) string {
-	if s.Key != "" {
-		return s.Key
-	}
-	return s.Ref
 }
 
 // withVolumes adds volumes to the job's Docker config, a copy of the
