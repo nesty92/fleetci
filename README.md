@@ -406,6 +406,10 @@ build:
     FLEETCI_CACHE_PATHS: node_modules .next/cache
 ```
 
+[docs/cache-disk.md](docs/cache-disk.md) has recipes for npm, pnpm, Yarn,
+Next.js, Go, Rust, Python, PHP, Ruby and Java, and a block to paste into a
+project's AGENTS.md or CLAUDE.md for coding agents.
+
 Who can change a cache that other jobs read is fleetci's to say, not the
 jobs'. A project's shared caches are written by its writers' jobs; any other
 job writes a cache of its ref's own, which starts from the shared one of the
