@@ -49,13 +49,17 @@ it through fleeting's connector.
 
 fleetci's provider follows that code:
 
-- `Acquire` reserves room for one VM of the runner's class in fleetci's
-  host queue, without waiting. No room: `NoFreeExecutorError`, no job is
-  requested, and the job stays pending in GitLab.
-- `Prepare` creates the VM from the reservation and gives the job a
-  `connector.Client` on the VM's one SSH connection, which the job shares
-  with the VM's other jobs and its reclaim watch (`docs/design/spot.md`).
-- `Release` gives the VM, or the unused reservation, back.
+- `Acquire` checks for room for one VM of the runner's class in fleetci's
+  host queue, behind the jobs already waiting, without waiting itself. No
+  room: `NoFreeExecutorError`, no job is requested, and the job stays
+  pending in GitLab. The room isn't held: GitLab keeps a request open for
+  up to a minute when it has no job, and held room would be kept from
+  the GitHub jobs that come meanwhile.
+- `Prepare` waits for the VM in the host queue, as any job does, and
+  gives the job a `connector.Client` on the VM's one SSH connection,
+  which the job shares with the VM's other jobs and its reclaim watch
+  (`docs/design/spot.md`).
+- `Release` gives the VM back.
 
 There is no plugin process, no gateway and no nesting socket on this path.
 
@@ -117,10 +121,10 @@ problems:
 What answers them:
 
 - Ask for a job only while some class has room (1, 2; done). The runner
-  reserves room in the first class that has some, the default class first,
-  before it asks; a job of that class takes it, a job of another gives it
-  back and waits for its own. A full host takes no jobs, and a nominated
-  job's held room stops new ones.
+  checks the classes for room, the default class first, before it asks,
+  and doesn't hold it; the job then waits for a VM of its own class in the
+  host queue. A full host takes no jobs, and a nominated job's held room
+  stops new ones.
 - Place the job on any machine (3; [ha.md](ha.md)). With several
   machines only the leader asks GitLab, and only while some worker has
   room for the largest class. Once it has the job, and so its class, it

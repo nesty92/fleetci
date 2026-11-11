@@ -168,3 +168,23 @@ func TestNoJobLeavesNoRoomReserved(t *testing.T) {
 		})
 	}
 }
+
+// While GitLab keeps a request for a job open, the room it was asked for
+// is free for the jobs that come meanwhile.
+func TestRoomNotHeldWhileAsking(t *testing.T) {
+	vms := newRoom()
+	l, err := New(t.Context(), Config{Runners: []Runner{{Class: "1vcpu-2gb", TokenFile: tokenFile(t)}}},
+		vms, hclog.NewNullLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	held := -1
+	l.mr.network = &jobNetwork{request: func(context.Context) (*spec.Job, bool) {
+		held, _ = vms.held()
+		return nil, true
+	}}
+	_ = l.mr.processRunner(1, l.mr.config.Runners[0], make(chan *common.RunnerConfig, 1))
+	if vms.reserves != 1 || held != 0 {
+		t.Fatalf("%d rooms checked, %d held while asking; want 1, 0", vms.reserves, held)
+	}
+}

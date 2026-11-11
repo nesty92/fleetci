@@ -3,18 +3,19 @@
 // acquisition.go; MIT, see LICENSE.gitlab-runner), with fleetci's host queue
 // in place of taskscaler and without nesting, suspend and resume:
 //
-//   - provider.Acquire reserves room for one VM of the runner's class before
-//     the job is requested, or fails with NoFreeExecutorError;
-//   - executor.Prepare, once a job has arrived, takes the VM;
+//   - provider.Acquire checks for room for one VM of the runner's class
+//     before the job is requested, or fails with NoFreeExecutorError; it
+//     doesn't hold the room;
+//   - executor.Prepare, once a job has arrived, takes the VM, waiting in
+//     the same queue as every other job;
 //   - acquisitionRef.Prepare is the executors.Environment the Docker
 //     executor runs the job on: it dials the VM with fleeting's connector.
 //
 // A runner of gitlab-runner's config.toml has no class of its own: the
 // job's FLEETCI_CLASS names it, as with fleetci's plugin. Its Acquire
-// reserves room for a VM of the first class that has some, the default
-// class first, so it asks for no job while the host is full; Prepare uses
-// the reservation when the job's class is the reserved one, and otherwise
-// gives it back and waits for room in the job's class.
+// checks for room for a VM of the first class that has some, the default
+// class first, so it asks for no job while the host is full; Prepare waits
+// for a VM of the job's class.
 
 package gitlab
 
@@ -68,12 +69,20 @@ type vms interface {
 // capacityVMs is vms over source.Capacity.
 type capacityVMs struct{ source.Capacity }
 
+// Reserve checks for room for a VM of the class, behind the jobs already
+// waiting, and gives it straight back: a job is asked of GitLab only when
+// there is room, and once it arrives it waits for its VM in the same queue
+// as every other job. Held instead, the room was kept from the other jobs
+// for as long as GitLab kept the request open, up to a minute with no job.
 func (c capacityVMs) Reserve(class string) (reservation, error) {
 	r, err := c.Capacity.Reserve(context.Background(), class)
 	if err != nil {
 		return nil, err
 	}
-	return &capacityReservation{c: c.Capacity, r: r}, nil
+	if err := c.Capacity.Release(context.Background(), r); err != nil {
+		return nil, err
+	}
+	return &roomSeen{c: c.Capacity, class: class}, nil
 }
 
 // AttachCache gives the VM a cache disk, when the core can.
@@ -93,25 +102,23 @@ func (c capacityVMs) HasCache(vm string) bool {
 // capacityVMs passes cache disks through.
 var _ source.CacheAttacher = capacityVMs{}
 
-// capacityReservation is a source.Reservation, used once by Acquire or
-// Release.
-type capacityReservation struct {
-	c    source.Capacity
-	r    source.Reservation
-	once sync.Once
+// roomSeen is room a class had when the job was asked for, not held:
+// Acquire waits for a VM of the class with the other jobs. Used once.
+type roomSeen struct {
+	c     source.Capacity
+	class string
+	once  sync.Once
 }
 
-func (r *capacityReservation) Class() string { return r.r.Class }
+func (r *roomSeen) Class() string { return r.class }
 
-func (r *capacityReservation) Acquire(ctx context.Context) (source.VM, error) {
+func (r *roomSeen) Acquire(ctx context.Context) (source.VM, error) {
 	vm, err := source.VM{}, errors.New("reservation already used")
-	r.once.Do(func() { vm, err = r.c.Acquire(ctx, r.r) })
+	r.once.Do(func() { vm, err = r.c.Create(ctx, r.class) })
 	return vm, err
 }
 
-func (r *capacityReservation) Release() {
-	r.once.Do(func() { _ = r.c.Release(context.Background(), r.r) })
-}
+func (r *roomSeen) Release() { r.once.Do(func() {}) }
 
 type provider struct {
 	common.ExecutorProvider
@@ -309,9 +316,8 @@ func withVolumes(options common.ExecutorPrepareOptions, volumes []string) common
 	return options
 }
 
-// prepareByJob takes a VM of the class the job's FLEETCI_CLASS names: in
-// the reserved room when it is that class's, else after the room is given
-// back, waiting for the job's class.
+// prepareByJob takes a VM of the class the job's FLEETCI_CLASS names,
+// waiting in the host queue for it.
 func (e *executor) prepareByJob(options common.ExecutorPrepareOptions, res reservation) (source.VM, error) {
 	class, err := e.p.jobClass(options.Build)
 	if err != nil {
