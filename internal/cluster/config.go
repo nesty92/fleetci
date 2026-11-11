@@ -87,6 +87,9 @@ type ClassSpec struct {
 	MaxInstances int `toml:"max_instances" json:"max_instances,omitempty"`
 	// On limits the class to workers with these labels.
 	On map[string]string `toml:"on" json:"on,omitempty"`
+	// RegistryMirror is a Docker Hub mirror for the class's VMs; see
+	// fleet.Class.
+	RegistryMirror string `toml:"registry_mirror" json:"registry_mirror,omitempty"`
 }
 
 // LoadController reads controller.toml.
@@ -135,6 +138,11 @@ func LoadController(path string) (*ControllerConfig, error) {
 		}
 		cl.Image = cmp.Or(cl.Image, DefaultImageURL)
 		cl.Arch = cmp.Or(cl.Arch, "amd64")
+		if cl.RegistryMirror != "" {
+			if _, err := fleet.CheckMirror(cl.RegistryMirror); err != nil {
+				return nil, fmt.Errorf("%s: class %s: %w", path, name, err)
+			}
+		}
 		if cl.Overflow != "" && c.Classes[cl.Overflow] == nil {
 			return nil, fmt.Errorf("%s: class %s: overflow %q is no class", path, name, cl.Overflow)
 		}

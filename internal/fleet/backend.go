@@ -690,7 +690,11 @@ func (b *Backend) acquire(actx context.Context, p *pool, class string, start tim
 
 	// The instance's one connection: every job on it, and its reclaim
 	// watch, share it.
-	return VM{ID: id, Class: p.name, Instance: acq.InstanceID(), Conn: p.conns.get(acq.InstanceID())}, nil
+	conn := p.conns.get(acq.InstanceID())
+	if m, err := CheckMirror(p.class.RegistryMirror); err == nil {
+		setMirror(actx, conn, m, b.log.With("vm", id))
+	}
+	return VM{ID: id, Class: p.name, Instance: acq.InstanceID(), Conn: conn}, nil
 }
 
 // full says why a job of the class found no room. held is the class of the

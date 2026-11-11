@@ -53,6 +53,21 @@ the two are alike. Its CI kernel lacks the iptables raw table, so Docker's
 bridge fails there. Cloud Hypervisor won: Ubuntu's own kernel and image,
 qcow2 overlays.
 
+## Docker Hub mirror
+
+`docker pull python:3.13` (about 400 MB compressed) on a fresh dockerd, the
+mirror (`hack/cache/up.sh`'s registry on RustFS) on the same machine, over a
+home connection:
+
+| | Pull |
+| --- | --- |
+| no mirror | 18.4 s |
+| mirror, first pull of the image | 17.7 s |
+| mirror, any later pull | 5.7 s |
+
+What is left is unpacking. Behind one NAT, only the mirror's first pull of
+each image counts against Docker Hub's limit.
+
 ## Real-sized jobs
 
 The playground's `heavy` workflow (GitHub) and `HEAVY=1` pipeline (GitLab),
