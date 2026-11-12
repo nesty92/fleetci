@@ -224,10 +224,18 @@ without anything passing through a controller or another network (see
 [docs/cache-disk.md](../cache-disk.md#on-a-fleet-of-machines)). For that,
 each worker first finds which of the others it reaches:
 
-- **Each worker answers its peers** on its own port, `peer_listen` in
-  `worker.toml` (`:9483` by default; `"off"` for none). It tells the
-  controllers where in its report: `peer_advertise`, or by default every
-  address it has but loopback and link-local.
+- **One network.** Workers reach each other, and copy caches, over one
+  network only: by default the one of the interface the default route
+  leaves by. If that interface looks like a VPN (point to point, without
+  a hardware address, or named as tunnels are: `tun`, `tap`, `wg`,
+  `tailscale`, `zt`, `ppp`, …), the worker reaches no peers, and says so,
+  until `peer_network` in `worker.toml` names the network: a CIDR or an
+  interface, which is then used as it is.
+- **Each worker answers its peers** on its own port, `peer_listen`
+  (`:9483` by default; `"off"` for none), at its addresses in that
+  network, which it tells the controllers in its report. It takes
+  connections only from that network, and dials only peers' addresses
+  in it, so nothing goes through a router, a VPN or a container's bridge.
 - **The controllers name the peers.** Each status answer lists the other
   workers that report, answer peers and aren't revoked: their ids, their
   certificates' serials and their addresses.

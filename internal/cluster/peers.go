@@ -69,35 +69,15 @@ func (c *Controller) peerHintsLocked(self string) []PeerHint {
 }
 
 // peerAddrs are the addresses a worker listening at lis tells its peers:
-// advertise's, or every address of its own but loopback and link-local.
-func peerAddrs(lis net.Addr, advertise []string) []string {
-	_, port, _ := net.SplitHostPort(lis.String())
-	if len(advertise) > 0 {
-		var out []string
-		for _, a := range advertise {
-			if _, _, err := net.SplitHostPort(a); err != nil {
-				a = net.JoinHostPort(a, port)
-			}
-			out = append(out, a)
-		}
-		return out
-	}
-	if host, _, _ := net.SplitHostPort(lis.String()); host != "" {
-		if ip := net.ParseIP(host); ip != nil && !ip.IsUnspecified() {
-			return []string{lis.String()}
-		}
-	}
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		return nil
+// the one it listens at, or its own in the network.
+func peerAddrs(lis net.Addr, pn *peerNet) []string {
+	host, port, _ := net.SplitHostPort(lis.String())
+	if ip := net.ParseIP(host); ip != nil && !ip.IsUnspecified() {
+		return []string{lis.String()}
 	}
 	var out []string
-	for _, a := range addrs {
-		n, ok := a.(*net.IPNet)
-		if !ok || !n.IP.IsGlobalUnicast() {
-			continue
-		}
-		out = append(out, net.JoinHostPort(n.IP.String(), port))
+	for _, ip := range pn.addrs {
+		out = append(out, net.JoinHostPort(ip.String(), port))
 	}
 	return out
 }
@@ -321,6 +301,10 @@ func (w *Worker) peerLoop(ctx context.Context, lis net.Listener, pool *x509.Cert
 		found := make([]Neighbour, len(hints))
 		errs := make([]error, len(hints))
 		var wg sync.WaitGroup
+		for i := range hints {
+			// Only their addresses in this worker's network.
+			hints[i].Addrs = w.peerNet.within(hints[i].Addrs)
+		}
 		for i, h := range hints {
 			wg.Go(func() {
 				pctx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -377,7 +361,8 @@ func (w *Worker) peerLoop(ctx context.Context, lis net.Listener, pool *x509.Cert
 	}
 }
 
-// listenPeers opens the peer listener, nil when peer_listen is "off".
+// listenPeers finds the peer network and opens the peer listener, which
+// takes connections only from it; nil when peer_listen is "off".
 func (w *Worker) listenPeers() (net.Listener, error) {
 	addr := w.cfg.PeerListen
 	switch addr {
@@ -386,5 +371,23 @@ func (w *Worker) listenPeers() (net.Listener, error) {
 	case "":
 		addr = ":" + DefaultPeerPort
 	}
-	return net.Listen("tcp", addr)
+	ifs, err := localIfaces()
+	if err != nil {
+		return nil, err
+	}
+	pn, err := resolvePeerNet(w.cfg.PeerNetwork, ifs, routeIPs())
+	if err != nil {
+		return nil, err
+	}
+	if host, _, err := net.SplitHostPort(addr); err == nil && host != "" {
+		if ip := net.ParseIP(host); ip == nil || (!ip.IsUnspecified() && !pn.contains(ip)) {
+			return nil, fmt.Errorf("peer_listen %s is not in the peer network %s", addr, pn)
+		}
+	}
+	lis, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	w.peerNet = pn
+	return netListener{lis, pn}, nil
 }

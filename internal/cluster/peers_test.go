@@ -131,21 +131,15 @@ func TestProbePeer(t *testing.T) {
 	}
 }
 
-// TestPeerAddrs: a worker tells its peers the addresses it was told to,
-// with its port, or its own.
+// TestPeerAddrs: a worker tells its peers the address it listens at, or
+// its own in the peer network, with its port.
 func TestPeerAddrs(t *testing.T) {
-	lis := &net.TCPAddr{IP: net.IPv4zero, Port: 9483}
-	got := peerAddrs(lis, []string{"10.1.2.3", "w1.example:7000"})
-	if len(got) != 2 || got[0] != "10.1.2.3:9483" || got[1] != "w1.example:7000" {
-		t.Fatalf("advertised: %v", got)
+	pn := &peerNet{addrs: []net.IP{net.ParseIP("192.168.1.5"), net.ParseIP("2001:db8::5")}}
+	got := peerAddrs(&net.TCPAddr{IP: net.IPv4zero, Port: 9483}, pn)
+	if len(got) != 2 || got[0] != "192.168.1.5:9483" || got[1] != "[2001:db8::5]:9483" {
+		t.Fatalf("own addresses: %v", got)
 	}
-	if got := peerAddrs(&net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9484}, nil); len(got) != 1 || got[0] != "127.0.0.1:9484" {
+	if got := peerAddrs(&net.TCPAddr{IP: net.ParseIP("192.168.1.5"), Port: 9484}, pn); len(got) != 1 || got[0] != "192.168.1.5:9484" {
 		t.Fatalf("a listener on one address: %v", got)
-	}
-	for _, a := range peerAddrs(lis, nil) {
-		host, port, _ := net.SplitHostPort(a)
-		if ip := net.ParseIP(host); ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() || port != "9483" {
-			t.Fatalf("own address %s", a)
-		}
 	}
 }

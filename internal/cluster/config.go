@@ -188,9 +188,11 @@ type WorkerConfig struct {
 	// PeerListen is where this worker answers other workers, which check
 	// which of them reach each other. Default ":9483"; "off" for none.
 	PeerListen string `toml:"peer_listen,omitempty"`
-	// PeerAdvertise are the addresses other workers reach it at; by
-	// default its own, but loopback and link-local.
-	PeerAdvertise []string `toml:"peer_advertise,omitempty"`
+	// PeerNetwork is the network it reaches other workers over, and copies
+	// caches over: a CIDR ("192.168.10.0/24") or an interface ("eth1").
+	// Default the network of the interface the default route leaves by,
+	// unless that looks like a VPN.
+	PeerNetwork string `toml:"peer_network,omitempty"`
 	// ShareCaches copies the shared caches, those writers make, to and from
 	// the other workers it reaches. Default true.
 	ShareCaches *bool `toml:"share_caches,omitempty"`

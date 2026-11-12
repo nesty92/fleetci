@@ -480,7 +480,12 @@ merge request's or another ref's own cache.
 # worker.toml
 share_caches = false     # neither copy caches to others nor from them
 share_compress = false   # copy them uncompressed: on links faster than 10 Gbit
+peer_network = "eth1"    # or "192.168.10.0/24": copy over this network
 ```
+
+Copies go over one network, by default the default route's, never one
+that looks like a VPN (see
+[Neighbours](design/ha.md#neighbours-which-workers-reach-each-other)).
 
 A worker that runs any branch's jobs as writers (see the controllers'
 `writers`) shares what they write too: one more reason to keep writers to

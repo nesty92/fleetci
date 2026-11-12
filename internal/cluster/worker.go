@@ -71,6 +71,8 @@ type Worker struct {
 	stop     context.CancelFunc // ends Run
 	exitErr  error              // what Run returns: ErrRestart for an update
 	peers    *neighbourState
+	// peerNet is the network it reaches its peers over; nil for none.
+	peerNet *peerNet
 	// shareKick has the worker look at its neighbours' caches now.
 	shareKick chan struct{}
 }
@@ -218,11 +220,11 @@ func (w *Worker) Run(ctx context.Context) error {
 	w.mu.Unlock()
 	lis, err := w.listenPeers()
 	if err != nil {
-		w.log.Warn("not answering other workers", "err", err)
+		w.log.Warn("not reaching other workers, nor copying caches with them", "err", err)
 	}
 	if lis != nil {
-		w.facts.PeerAddrs = peerAddrs(lis.Addr(), w.cfg.PeerAdvertise)
-		w.log.Info("answering other workers", "listen", lis.Addr().String(), "addrs", w.facts.PeerAddrs)
+		w.facts.PeerAddrs = peerAddrs(lis.Addr(), w.peerNet)
+		w.log.Info("answering other workers", "network", w.peerNet.String(), "addrs", w.facts.PeerAddrs)
 	}
 	var wg sync.WaitGroup
 	if lis != nil {
