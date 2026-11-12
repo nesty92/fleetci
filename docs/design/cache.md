@@ -1,0 +1,139 @@
+# Caches behind the cache disk
+
+Status: the cache disk is built, with GitHub's cache or the GitLab runner's
+S3 cache behind it, saved through (#18). What comes behind the disk next,
+and when it is written, is open. This page keeps what the reference
+projects and our own tests found, so it isn't learned twice.
+
+## What the reference projects do
+
+| Project | What it does | What fleetci takes |
+|---|---|---|
+| [falcondev-oss/github-actions-cache-server](https://github.com/falcondev-oss/github-actions-cache-server) (MIT, ideas, read at `a13ebc8`) | A server that speaks GitHub's cache protocol (v2, Twirp) from its own storage: a local folder, S3, GCS or Azure, with the metadata in SQLite, PostgreSQL or MySQL. Runners are pointed at it with a patched runner. Calls it doesn't serve, artifacts', go to GitHub | The protocol details below; the runner patch fleetci already applies (`[github] cache_url`); how to scope caches from the job's token |
+| GitHub's cache service | Takes an entry's upload and finalize only while its job runs | Nothing can be saved to GitHub after the job: measured below |
+| [useblacksmith/stickydisk](https://github.com/useblacksmith/stickydisk) | A disk per key and path, mounted into the job and committed after it | The disk that outlives the VM; fleetci's is one per job, with every cache step's paths on it |
+| gitlab-runner (MIT) | `[runners.cache]`: the runner itself uploads `cache:` to S3, GCS or Azure after the job's script | GitLab's L2 stays as it is; the runner, which is fleetci, can upload after the job |
+
+## What falcondev found
+
+The server is about 11,000 lines of Rust; these are the parts a cache
+behind fleetci's disk has to get right too.
+
+### Scoping comes from the job's token
+
+- `ACTIONS_RUNTIME_TOKEN` is a JWT. Its `ac` claim is a JSON list of
+  `{"Scope": "refs/heads/main", "Permission": 3}`: bit 1 lets the job
+  restore from that ref's caches, bit 2 lets it save to them. Its
+  `repository_id` claim is the repo.
+- A save goes to the first scope the job may write. A restore searches the
+  scopes it may read by descending permission, so its own ref first, then
+  the base and default branches.
+- The token's signature is checked against the issuer's keys, found
+  through OIDC discovery (`/.well-known/openid-configuration`, then its
+  `jwks_uri`), cached 10 minutes and fetched again at most every 30 s for an
+  unknown key. On GHES the issuer can carry an enterprise path while the
+  keys sit at the host.
+- So a cache of fleetci's own can apply exactly GitHub's rules, not a copy
+  of them from the ref, and needs no GitHub API calls.
+
+### Matching
+
+GitHub's order, pinned by their tests
+(`matches_scopes_then_keys_then_exact_before_prefix`):
+
+1. Scopes in order. Within a scope, the primary key, then each restore key.
+2. For each key, an exact match, else the newest entry it prefixes.
+3. So the newest entry the primary key prefixes beats an exact restore key,
+   and an exact restore key beats a newer entry it prefixes.
+4. Keys compare byte for byte: case, accents and trailing spaces all count,
+   and `%`, `_` and `\` in a restore key are literal, not patterns.
+
+fleetci's `local_match` (internal/github/l1cache.py) doesn't follow 2 and 3
+yet: it never tries the primary key as a prefix, and it takes the newest
+entry a restore key prefixes even when one equals it. It decides only when
+GitHub can't be reached today, but decides every restore with GitHub's
+cache off. Fix it with their cases as tests.
+
+### The protocol's corners
+
+- **A save of a key that exists is a 409** (`already_exists`), not
+  `ok: false`; that's what GitHub answers.
+- **Uploads answer with `x-ms-request-id`.** Without it, BuildKit's client
+  (`tonistiigi/go-actions-cache`, used by `cache-to: type=gha`)
+  intermittently fails with EOF.
+- **Block ids come in two shapes.** `@actions/cache` sends base64 of a
+  36-character UUID and the block's index (48 bytes); buildx sends 64 bytes
+  with a big-endian index at byte 16. Decoding accepts padded and unpadded,
+  standard and URL-safe base64. An upload with no block id is one block.
+- **The upload URL looks like Azure's** (`/devstoreaccount1/upload/<id>?sig=…`),
+  so the Azure SDK in `@actions/cache` takes it. The `sig` is a random
+  capability; only its hash is stored, and a block without it is a 403.
+- **Calls come as JSON or as protobuf.** The request types carry a
+  `metadata` field the server doesn't declare, which it must ignore.
+  fleetci's service only reads JSON; which clients send protobuf is to
+  check.
+- **A download URL is a promise.** BuildKit fails the build on a 404 after
+  a hit; it can't fall back to a miss. So before answering a hit, check the
+  data is there, and drop the entry and match again if it isn't.
+- **Ranges.** Serve `Range` on a whole object; clients go by the status
+  (206 or 200), not `Accept-Ranges`.
+- **Passthrough** forwards everything else byte for byte: drop hop-by-hop
+  headers and `Accept-Encoding`, buffer the body so a 307 can replay it,
+  and never log the query, which carries signatures.
+
+### Storage
+
+- Each block is stored as it comes; the entry becomes one object on its
+  first download, or at finalize with `EAGER_MERGE`. On S3 that merge
+  reads every byte back once. fleetci's in-VM service has the whole archive
+  on the disk when the job saves, so it can upload one object and skip
+  merging.
+- Objects never change once written, so "it exists" is cached for a minute.
+- Above 5 GiB an S3 upload must be multipart, in parts of 5 MiB or more.
+  Unfinished multipart uploads are billed until aborted: a bucket rule with
+  `AbortIncompleteMultipartUpload` after a day.
+- Least permissions on S3: `s3:ListBucket` on the bucket; `s3:GetObject`,
+  `s3:PutObject`, `s3:AbortMultipartUpload` and `s3:DeleteObject` on the
+  prefix.
+
+### Eviction and cleanup
+
+- Last used is the last download, else the last save. Over the budget,
+  evict least recently used until usage is 90 % of it; never an entry being
+  read (a lease, renewed while the download runs).
+- Entries unused for 90 days go; uploads idle for a minute go; data no
+  entry points at goes after a grace period (24 h).
+- Recency needs somewhere to record each download: a database. Without
+  one, a bucket can only expire by age. fleetci's disks already keep
+  recency per node, where it matters most.
+
+### Their measurements
+
+On one host (Ryzen 9 5950X, NVMe, filesystem storage): uploads of
+8 × 128 MiB at 2.3 GiB/s, a first download at 7.9 GiB/s, 34,000 lookups a
+second. On RustFS on the same host: uploads at about 1.1 GiB/s.
+
+## What our tests found
+
+### GitHub refuses a save after the job ends
+
+`hack/cachelab/deferred`: a job created two entries and handed its token
+and upload URLs to the lab's host, which uploaded and finalized them after
+the job ended.
+
+| After the job | Upload | Finalize |
+|---|---|---|
+| 1 min | 201 | 403 `permission_denied`: "workflow job run completed" |
+| 10 min | 201 | 403, the same |
+
+The token itself was still valid for about 6 hours. Neither entry was ever
+listed. So GitHub's cache can only be written during the job, and a save to
+it costs the job its upload time (about 100 s for 1 GB in the train).
+GitLab's has no such limit: the runner uploads it.
+
+## Open
+
+- Uploading after the job, which needs a store fleetci writes itself on
+  GitHub, the way the GitLab runner writes S3.
+- A setting that turns the cache behind the disk off, for both forges.
+- Fixing `local_match`'s order, the 409, and `x-ms-request-id`.

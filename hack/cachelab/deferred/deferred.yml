@@ -1,0 +1,35 @@
+# Does GitHub's cache take an entry's upload and finalize after its job
+# has ended? The job creates two entries, as actions/cache's save does,
+# and hands their upload links and its token to deferred.py on the lab's
+# host, which uploads and finalizes one a minute after the job ends and
+# the other ten. Only JavaScript actions get the token, so github-script.
+name: deferred
+on:
+  push:
+    branches: ["exp/deferred"]
+jobs:
+  save:
+    runs-on: fleetci-plain
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const crypto = require('crypto')
+            const results = process.env.ACTIONS_RESULTS_URL
+            const token = process.env.ACTIONS_RUNTIME_TOKEN
+            const svc = results.replace(/\/$/, '') + '/twirp/github.actions.results.api.v1.CacheService/'
+            const out = { results, token, entries: [] }
+            for (const delay of [60, 600]) {
+              const key = `deferred-${process.env.GITHUB_RUN_ID}-${delay}`
+              const version = crypto.createHash('sha256').update(key).digest('hex')
+              const r = await fetch(svc + 'CreateCacheEntry', {
+                method: 'POST',
+                headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ key, version }),
+              })
+              const j = await r.json()
+              core.info(`created ${key}: ${r.status} ok=${j.ok}`)
+              out.entries.push({ key, version, delay, url: j.signed_upload_url })
+            }
+            const r = await fetch('http://10.231.29.1:9599/deferred', { method: 'POST', body: JSON.stringify(out) })
+            core.info(`handed over: ${r.status}`)
