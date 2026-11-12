@@ -10,7 +10,7 @@
 # GitHub: WireZone/fleetci-playground, branch matrix/<name>, workflow
 # matrix.yml; fleetci-cache has the disk, fleetci-plain not. GitLab:
 # Nesty92/fleetci-playground, branch matrix, a pipeline per job from a
-# push with options; FLEETCI_CACHE_KEY=matrix-<name>, or FLEETCI_CACHE=off.
+# push with options; cache: keyed matrix-<name>, or FLEETCI_CACHE=off.
 # The jobs post to the sink (sink.py); each job's line goes to
 # $OUT/<forge>.log. A job that doesn't start in time stops the matrix.
 set -eu
@@ -48,8 +48,7 @@ job() { # <name> <url> <commit> <with disk: yes|no> <tag>
     git -C "$GL" push -q origin HEAD:matrix \
       -o ci.variable="MATRIX_ID=$id" -o ci.variable="MATRIX_LANG=$name" \
       -o ci.variable="MATRIX_URL=$url" -o ci.variable="MATRIX_COMMIT=$commit" \
-      -o ci.variable="MATRIX_IMAGE=$image" -o ci.variable="FLEETCI_CACHE=$off" \
-      -o ci.variable="FLEETCI_CACHE_KEY=matrix-$name" -o ci.variable="FLEETCI_CACHE_PATHS=/fleetci"
+      -o ci.variable="MATRIX_IMAGE=$image" -o ci.variable="FLEETCI_CACHE=$off"
     ;;
   esac
   t=$(date +%s)

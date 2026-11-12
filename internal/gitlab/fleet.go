@@ -119,7 +119,7 @@ func (mr *RunCommand) dispatchBuild(runner *common.RunnerConfig, runners chan *c
 	n := heldJob{ID: job.ID, Token: job.Token, URL: runner.URL, Class: class, Job: jobJSON, Runner: runnerJSON}
 	// The leader decides the job's cache, which only it has the policy
 	// for: the worker attaches it, and the fleet places the VM by it.
-	if cj, err := cacheFor(d.cacheDisk, &common.Build{Job: *job, Runner: &rc}, &rc); err != nil {
+	if cj, err := cacheFor(d.cacheDisk, &common.Build{Job: *job, Runner: &rc}); err != nil {
 		log.Warn("no cache disk", "err", err)
 	} else if cj != nil {
 		n.Cache = &cj.scope

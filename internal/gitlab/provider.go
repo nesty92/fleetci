@@ -292,7 +292,7 @@ func (e *executor) attachCache(options common.ExecutorPrepareOptions, vm source.
 		}
 		return nil
 	}
-	job, err := cacheFor(e.p.cacheDisk, options.Build, options.Config)
+	job, err := cacheFor(e.p.cacheDisk, options.Build)
 	if err != nil {
 		options.BuildLogger.Warningln("No cache disk: " + err.Error())
 		return nil
@@ -311,8 +311,7 @@ func (e *executor) attachCache(options common.ExecutorPrepareOptions, vm source.
 		return nil
 	}
 	options.BuildLogger.Println(msg)
-	job.keepFromClean(options.Build)
-	return append(job.volumes(), cacheDirVolume(options.Config)...)
+	return cacheDirVolume(options.Config)
 }
 
 // cacheDirVolume keeps the runner's cache directory, where the job's
@@ -420,7 +419,7 @@ type acquisitionRef struct {
 	// tried: Prepare has used res, or given it back.
 	tried bool
 	vm    *source.VM
-	// volumes keep the job's FLEETCI_CACHE_PATHS on its cache disk.
+	// volumes keep the runner's cache directory on the cache disk.
 	volumes []string
 
 	// conn returns the connection to a VM's machine.

@@ -27,7 +27,7 @@ func (testImages) Create(path, _ string, _ int64) error {
 	return os.WriteFile(path, b, 0o600)
 }
 func (testImages) Flatten(_, _, dst string) error { return os.WriteFile(dst, nil, 0o600) }
-func (testImages) Rebase(string, string) error { return nil }
+func (testImages) Rebase(string, string) error    { return nil }
 
 func testStore(t *testing.T) *cachedisk.Store {
 	t.Helper()

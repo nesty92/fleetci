@@ -377,13 +377,13 @@ VMs. To reuse VMs for GitLab and serve GitHub too, split them: GitHub in a
 `fleetci serve` (or another runner) with single-use classes and groups of
 their own.
 
-### A cache disk per ref
+### A cache disk per job
 
 A fleetingd class can keep pulled images and caches without reusing VMs:
-each job's VM gets a disk of its project's and ref's caches, with Docker's
-and containerd's data on it, so the images, volumes and gitlab-runner's local
-`cache:` of the ref's last job are there. A runner's own S3 cache settings
-still apply. The disk is a new copy-on-write layer on the ref's last one,
+each job's VM gets a disk of that job's caches, with Docker's and
+containerd's data on it, so the images, volumes and gitlab-runner's local
+`cache:` of the job's last run are there. A runner's own S3 cache settings
+still apply. The disk is a new copy-on-write layer on the job's last one,
 kept only if the VM gives it back whole, so a job never sees another's
 half-written disk.
 
@@ -395,34 +395,24 @@ plugin_config = { vm_cache_directory = "/var/lib/fleetci/cache" }  # with the re
 [classes.small.cache_disk]
 budget = "100GB"        # all of the class's caches; least recently used go first
 min_free = "20GB"       # left free on that disk
-max_per_cache = "30GB"  # one ref's; past it, its next job starts empty
+max_per_cache = "30GB"  # one job's; past it, its next run starts empty
 max_age = "168h"        # a cache no job used for that long goes
+reader_max_age = "48h"  # sooner for merge and pull requests' own
 ```
 
-A job's `.gitlab-ci.yml` chooses what goes on the disk:
+Each job has its own disk, by its ref and name; its first run on a branch
+starts from the same job's disk on the default branch. Nothing changes in
+`.gitlab-ci.yml`: the job's `cache:` archives are kept on the disk and
+restored from it before S3. `FLEETCI_CACHE: "off"` runs a job without one.
 
-| Variable | What it does |
-|---|---|
-| `FLEETCI_CACHE_KEY` | The cache's name; by default, the job's ref. Jobs with the same key share a cache: `deps`, `$CI_JOB_NAME`, `release`. |
-| `FLEETCI_CACHE_PATHS` | Paths in the job's container kept on the disk, separated by spaces or commas: `node_modules .next/cache /root/.npm`. Relative paths are in the project's directory. |
-| `FLEETCI_CACHE_FROM` | The caches a key with nothing yet starts from, the first that exists; by default, the default branch's. |
-| `FLEETCI_CACHE` | `off` runs the job without a disk. |
-
-```yaml
-build:
-  variables:
-    FLEETCI_CACHE_KEY: deps
-    FLEETCI_CACHE_PATHS: node_modules .next/cache
-```
-
-[docs/cache-disk.md](docs/cache-disk.md) has recipes for npm, pnpm, Yarn,
-Next.js, Go, Rust, Python, PHP, Ruby and Java, and a block to paste into a
-project's AGENTS.md or CLAUDE.md for coding agents.
+[docs/cache-disk.md](docs/cache-disk.md) has `cache:` recipes for npm,
+pnpm, Yarn, Next.js, Go, Rust, Python, PHP, Ruby and Java, and a block to
+paste into a project's AGENTS.md or CLAUDE.md for coding agents.
 
 Who can change a cache that other jobs read is fleetci's to say, not the
 jobs'. A project's shared caches are written by its writers' jobs; any other
-job writes a cache of its ref's own, which starts from the shared one of the
-same key, so a merge request can't change what the default branch runs
+job writes a disk of its ref's own, which starts from the same job's
+shared one, so a merge request can't change what the default branch runs
 with. By default the writers are the jobs on protected branches and tags.
 Set `writers` for a project that works another way:
 
@@ -446,9 +436,6 @@ writers = ["default"]
 match = "group/services/**"      # main deploys to one place, tags elsewhere
 writers = ["default", "tag:staging-*", "tag:v*"]
 ```
-
-A tag pipeline per environment can keep one cache for all its tags with
-`FLEETCI_CACHE_KEY: release` and `FLEETCI_CACHE_FROM: main`.
 
 `all` lets anyone who can push a branch change what the default branch's
 and the tags' jobs run with: a poisoned `node_modules` or Docker image would

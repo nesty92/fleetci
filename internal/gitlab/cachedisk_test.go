@@ -2,7 +2,6 @@ package gitlab
 
 import (
 	"slices"
-	"strings"
 	"testing"
 
 	"gitlab.com/gitlab-org/gitlab-runner/common"
@@ -145,61 +144,25 @@ func TestCacheDiskValidate(t *testing.T) {
 
 func TestCacheFor(t *testing.T) {
 	var c *CacheDisk
-	j, err := cacheFor(c, job("feature"), nil)
+	j, err := cacheFor(c, job("feature"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := j.scope
-	if s.Instance != "gitlab.example.com" || s.Project != "42" || s.Ref != "feature" || s.Key != "" || s.Writer || !slices.Equal(s.From, []string{"main"}) || len(j.paths) != 0 {
+	if s.Instance != "gitlab.example.com" || s.Project != "42" || s.Ref != "feature" || s.Key != "" || s.Writer || !slices.Equal(s.From, []string{"main"}) {
 		t.Fatalf("default job: %+v", j)
 	}
-
-	b := job("v1.2.0", tag, protected, vars(
-		"FLEETCI_CACHE_KEY", "release-$CI_COMMIT_REF_SLUG",
-		"FLEETCI_CACHE_FROM", "staging, main",
-		"FLEETCI_CACHE_PATHS", "node_modules .next/cache\n/root/.npm",
-	))
-	b.Variables = append(b.Variables, spec.Variable{Key: "CI_COMMIT_REF_SLUG", Value: "v1-2-0", Public: true})
-	j, err = cacheFor(c, b, nil)
-	if err != nil {
-		t.Fatal(err)
+	// Variables don't choose the disk: it is the job's own.
+	j, _ = cacheFor(c, job("feature", vars("FLEETCI_CACHE_KEY", "mine", "FLEETCI_CACHE_FROM", "other")))
+	if j.scope.Key != "" || !slices.Equal(j.scope.From, []string{"main"}) {
+		t.Fatalf("variables chose the disk: %+v", j.scope)
 	}
-	if j.scope.Key != "release-v1-2-0" || !j.scope.Writer || !slices.Equal(j.scope.From, []string{"staging", "main"}) {
-		t.Fatalf("scope %+v", j.scope)
-	}
-	want := []string{"/builds/group/app/node_modules", "/builds/group/app/.next/cache", "/root/.npm"}
-	if !slices.Equal(j.paths, want) {
-		t.Fatalf("paths %q, want %q", j.paths, want)
-	}
-	vols := j.volumes()
-	if len(vols) != 3 || !strings.HasPrefix(vols[0], "/cache/paths/") || !strings.HasSuffix(vols[0], "-node_modules:/builds/group/app/node_modules") || vols[0] == vols[1] {
-		t.Fatalf("volumes %q", vols)
-	}
-
-	// builds_dir and GIT_CLONE_PATH move relative paths with the checkout.
-	j, _ = cacheFor(c, job("main", vars("FLEETCI_CACHE_PATHS", "vendor")), &common.RunnerConfig{RunnerSettings: common.RunnerSettings{BuildsDir: "/b"}})
-	if !slices.Equal(j.paths, []string{"/b/group/app/vendor"}) {
-		t.Fatalf("builds_dir paths %q", j.paths)
-	}
-	j, _ = cacheFor(c, job("main", vars("GIT_CLONE_PATH", "/builds/x", "FLEETCI_CACHE_PATHS", "vendor")), nil)
-	if !slices.Equal(j.paths, []string{"/builds/x/vendor"}) {
-		t.Fatalf("GIT_CLONE_PATH paths %q", j.paths)
-	}
-
-	if j, err := cacheFor(c, job("main", vars("FLEETCI_CACHE", "off")), nil); j != nil || err != nil {
+	if j, err := cacheFor(c, job("main", vars("FLEETCI_CACHE", "off"))); j != nil || err != nil {
 		t.Fatalf("FLEETCI_CACHE=off: %+v, %v", j, err)
 	}
-	for _, p := range []string{".", "/", "/builds", "..", "/builds/group"} {
-		if _, err := cacheFor(c, job("main", vars("FLEETCI_CACHE_PATHS", p)), nil); err == nil {
-			t.Errorf("FLEETCI_CACHE_PATHS=%s kept the checkout", p)
-		}
-	}
-	if _, err := cacheFor(c, job("main", vars("FLEETCI_CACHE_KEY", strings.Repeat("k", 201))), nil); err == nil {
-		t.Error("a 201-character key passed")
-	}
-	b = job("main")
+	b := job("main")
 	b.Runner.URL = "not a url"
-	if _, err := cacheFor(c, b, nil); err == nil {
+	if _, err := cacheFor(c, b); err == nil {
 		t.Error("a runner without a host made a scope")
 	}
 }
@@ -237,41 +200,5 @@ func TestCacheDirVolume(t *testing.T) {
 	}
 	if got := cacheDirVolume(nil); got != nil {
 		t.Errorf("no config: %q", got)
-	}
-}
-
-func TestKeepFromClean(t *testing.T) {
-	var c *CacheDisk
-	for _, tc := range []struct {
-		flags, want string
-	}{
-		{"", "-ffdx -e /node_modules -e /.next/cache"},
-		{"-ffd", "-ffd -e /node_modules -e /.next/cache"},
-		{"none", "none"},
-	} {
-		v := []string{"FLEETCI_CACHE_PATHS", "node_modules .next/cache /root/.npm"}
-		if tc.flags != "" {
-			v = append(v, "GIT_CLEAN_FLAGS", tc.flags)
-		}
-		b := job("main", vars(v...))
-		j, err := cacheFor(c, b, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		j.keepFromClean(b)
-		got := strings.Join(b.GetGitCleanFlags(), " ")
-		if tc.flags == "none" {
-			got = b.GetAllVariables().Value("GIT_CLEAN_FLAGS")
-		}
-		if got != tc.want {
-			t.Errorf("GIT_CLEAN_FLAGS %q: git clean %q, want %q", tc.flags, got, tc.want)
-		}
-	}
-	// Paths outside the checkout leave git clean alone.
-	b := job("main", vars("FLEETCI_CACHE_PATHS", "/root/.npm"))
-	j, _ := cacheFor(c, b, nil)
-	j.keepFromClean(b)
-	if got := strings.Join(b.GetGitCleanFlags(), " "); got != "-ffdx" {
-		t.Errorf("git clean %q", got)
 	}
 }

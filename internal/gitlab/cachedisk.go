@@ -1,12 +1,8 @@
 package gitlab
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"net/url"
-	"path"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -25,21 +21,9 @@ type CacheDisk = cachedisk.Policy
 // CacheDiskProject is one [[gitlab.cache_disk.projects]].
 type CacheDiskProject = cachedisk.ProjectPolicy
 
-// Job variables a .gitlab-ci.yml sets to choose its cache disk.
-const (
-	// cacheVariable "off" runs the job without one.
-	cacheVariable = "FLEETCI_CACHE"
-	// cacheKeyVariable names the job's cache; default, its ref. Jobs that
-	// share a key share a cache: "deps", "$CI_JOB_NAME", "release".
-	cacheKeyVariable = "FLEETCI_CACHE_KEY"
-	// cacheFromVariable are the shared caches a cache with nothing yet
-	// starts from, the first that exists; default, the default branch's.
-	cacheFromVariable = "FLEETCI_CACHE_FROM"
-	// cachePathsVariable are paths in the job's container kept on the
-	// disk, such as node_modules or .next/cache. Relative ones are in the
-	// project's directory.
-	cachePathsVariable = "FLEETCI_CACHE_PATHS"
-)
+// cacheVariable "off", set by a .gitlab-ci.yml, runs the job without a
+// cache disk.
+const cacheVariable = "FLEETCI_CACHE"
 
 // gitlabJob is what GitLab's payload says of a job, which its
 // .gitlab-ci.yml can't change.
@@ -69,18 +53,15 @@ func gitlabDefaultBranch(build *common.Build) string {
 	return ""
 }
 
-// cacheJob is what a job asks of its cache disk.
+// cacheJob is the job's cache disk.
 type cacheJob struct {
 	scope cachedisk.Scope
-	// paths are the container's paths kept on the disk.
-	paths []string
-	// inCheckout are those of paths in the project's checkout, from its
-	// top, which git clean must leave.
-	inCheckout []string
 }
 
-// cacheFor is the job's cache disk, or nil for none.
-func cacheFor(c *CacheDisk, build *common.Build, rc *common.RunnerConfig) (*cacheJob, error) {
+// cacheFor is the job's cache disk, or nil for none. It is the job's own,
+// by its ref and name, and starts from the same job's on the default
+// branch.
+func cacheFor(c *CacheDisk, build *common.Build) (*cacheJob, error) {
 	vars := build.GetAllVariables()
 	if v := strings.ToLower(vars.Value(cacheVariable)); v == "off" || v == "false" || v == "0" {
 		return nil, nil
@@ -95,93 +76,9 @@ func cacheFor(c *CacheDisk, build *common.Build, rc *common.RunnerConfig) (*cach
 		Project:  strconv.FormatInt(build.JobInfo.ProjectID, 10),
 		Path:     build.JobInfo.ProjectFullPath,
 		Job:      gitlabJob(build),
-		Key:      strings.TrimSpace(vars.ExpandValue(vars.Value(cacheKeyVariable))),
-		From:     fields(vars.ExpandValue(vars.Value(cacheFromVariable))),
 	}
-	if len(req.Key) > 200 {
-		return nil, fmt.Errorf("%s is longer than 200 characters", cacheKeyVariable)
+	if d := gitlabDefaultBranch(build); d != "" {
+		req.From = []string{d}
 	}
-	if len(req.From) == 0 {
-		if d := vars.Value("CI_DEFAULT_BRANCH"); d != "" {
-			req.From = []string{d}
-		}
-	}
-	job := &cacheJob{scope: c.Scope(req)}
-	dir := projectDir(build, rc)
-	for _, p := range fields(vars.ExpandValue(vars.Value(cachePathsVariable))) {
-		if !path.IsAbs(p) {
-			p = path.Join(dir, p)
-		}
-		p = path.Clean(p)
-		if p == "/" || p == dir || strings.HasPrefix(dir, p+"/") {
-			return nil, fmt.Errorf("%s: %q holds the project's checkout", cachePathsVariable, p)
-		}
-		job.paths = append(job.paths, p)
-		if rel, ok := strings.CutPrefix(p, dir+"/"); ok {
-			job.inCheckout = append(job.inCheckout, rel)
-		}
-	}
-	return job, nil
-}
-
-// keepFromClean has the job's git clean leave its kept paths in the
-// checkout, which its default -ffdx would empty after each fetch. It adds
-// them to GIT_CLEAN_FLAGS, unless the job set it to none.
-func (j *cacheJob) keepFromClean(build *common.Build) {
-	if len(j.inCheckout) == 0 {
-		return
-	}
-	flags := strings.TrimSpace(build.GetAllVariables().Value("GIT_CLEAN_FLAGS"))
-	switch flags {
-	case "none":
-		return
-	case "":
-		flags = "-ffdx"
-	}
-	for _, rel := range j.inCheckout {
-		flags += " -e /" + rel
-	}
-	build.Variables = append(build.Variables, spec.Variable{Key: "GIT_CLEAN_FLAGS", Value: flags})
-	build.RefreshAllVariables()
-}
-
-// projectDir is where the Docker executor will check the project out, as
-// its Prepare works it out. The cache disk is attached before Prepare, so
-// fleetci works it out the same way: GIT_CLONE_PATH, or the builds_dir
-// (/builds by default) and the project's path. A builds_dir mounted from
-// the host adds the job's concurrency to it; jobs there give absolute
-// paths.
-func projectDir(build *common.Build, rc *common.RunnerConfig) string {
-	if d := build.Settings().GitClonePath; d != "" {
-		return path.Clean(d)
-	}
-	root := "/builds"
-	if rc != nil && rc.BuildsDir != "" {
-		root = rc.BuildsDir
-	}
-	return path.Join(root, build.ProjectUniqueDir(false))
-}
-
-// fields splits a list on commas and spaces.
-func fields(s string) []string {
-	return strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' || r == '\n' || r == '\t' })
-}
-
-// volumes are the job's paths as Docker volumes from the VM's cache disk.
-func (j *cacheJob) volumes() []string {
-	var out []string
-	for _, p := range j.paths {
-		h := sha256.Sum256([]byte(p))
-		out = append(out, filepath.Join("/cache/paths", hex.EncodeToString(h[:6])+"-"+safeName(path.Base(p)))+":"+p)
-	}
-	return out
-}
-
-func safeName(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r == '-' || r == '_' || r == '.' || ('a' <= r && r <= 'z') || ('A' <= r && r <= 'Z') || ('0' <= r && r <= '9') {
-			return r
-		}
-		return '_'
-	}, s)
+	return &cacheJob{scope: c.Scope(req)}, nil
 }

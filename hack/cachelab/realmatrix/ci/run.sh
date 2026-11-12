@@ -6,7 +6,7 @@
 #   run.sh github   on the VM; each step in the recipe's image, docker run,
 #                   with the tools' caches under /cache, the cache disk
 #   run.sh gitlab   in the job's container, the recipe's image; the
-#                   caches under /fleetci, kept by FLEETCI_CACHE_PATHS
+#                   caches in .matrix-cache, kept by the job's cache:
 #
 # MATRIX_ID, MATRIX_LANG, MATRIX_URL and MATRIX_COMMIT say which job.
 set -u
@@ -35,8 +35,11 @@ github)
   sudo chmod 777 /cache
   ;;
 gitlab)
-  C=/fleetci
-  if grep -q " $C " /proc/mounts; then disk=yes; else disk=no; mkdir -p $C; fi
+  # cache: paths are in the checkout; the runner's cache directory,
+  # where its archives land, is on the disk when there is one.
+  C=$PWD/.matrix-cache
+  mkdir -p "$C"
+  if grep -q " /cache " /proc/mounts; then disk=yes; else disk=no; fi
   ;;
 esac
 post "$id start $mode $lang $MATRIX_COMMIT disk=$disk runner=${RUNNER_NAME:-$(hostname)}"
