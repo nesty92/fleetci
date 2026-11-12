@@ -402,8 +402,9 @@ the second run on the same branch:
 | In a job container | 160 s | 17 s | 1 restored from the cache disk (100 MB) |
 | BuildKit, `type=gha` | 138 s | 25 s | layer restored from the disk, `#6 CACHED` |
 
-¹ The job ran on the other worker, which had a copy of its disk from the
-first run: the restore itself took about 2 s, the rest was the runner.
+¹ Both runs on w1. The restore itself took about 2 s; the rest of the
+second run's time was outside the cache steps, and one run doesn't say
+where.
 
 Restores from the disk took 1–2 s for 100–200 MB. Before each job had its
 own disk, jobs of one run on one branch shared one: on the second run the
