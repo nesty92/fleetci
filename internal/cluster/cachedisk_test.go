@@ -2,6 +2,8 @@ package cluster
 
 import (
 	"context"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -122,5 +124,35 @@ func TestCacheRelay(t *testing.T) {
 	f.report(t, ready)
 	if n := <-told; n != "Cache disk: main" {
 		t.Fatalf("told %q", n)
+	}
+}
+
+// TestWorkerConfigCacheDisk: worker.toml keeps a [cache_disk] set, and
+// fleetci join writes none when it isn't, which an operator then adds.
+func TestWorkerConfigCacheDisk(t *testing.T) {
+	path := t.TempDir() + "/worker.toml"
+	c := &WorkerConfig{ID: "w1", Controllers: []string{"ctl"}, File: path}
+	if err := c.Save(); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(path)
+	if strings.Contains(string(b), "cache_disk") {
+		t.Fatalf("an unset cache_disk is written:\n%s", b)
+	}
+	if err := os.WriteFile(path, append(b, "\n[cache_disk]\nbudget = \"10GB\"\n"...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadWorker(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CacheDisk.Budget != 10*1024 {
+		t.Fatalf("budget %v", got.CacheDisk.Budget)
+	}
+	if err := got.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if again, err := LoadWorker(path); err != nil || again.CacheDisk.Budget != 10*1024 {
+		t.Fatalf("after saving again: %v %v", again, err)
 	}
 }

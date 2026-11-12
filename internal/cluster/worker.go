@@ -393,8 +393,10 @@ func (w *Worker) fleetClass(c Class, egress, images, subnet string) (fleet.Class
 			return fleet.Class{}, err
 		}
 		pc["vm_cache_directory"] = dir
-		cd := w.cfg.CacheDisk
-		cache = &cd
+		cache = &fleet.CacheDisk{}
+		if w.cfg.CacheDisk != nil {
+			*cache = *w.cfg.CacheDisk
+		}
 	}
 	raw, err := json.Marshal(pc)
 	if err != nil {

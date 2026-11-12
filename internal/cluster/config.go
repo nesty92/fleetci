@@ -187,7 +187,7 @@ type WorkerConfig struct {
 	Update UpdateConfig `toml:"update,omitempty"`
 	// CacheDisk sizes this worker's cache disks, for the classes with
 	// cache_disk; they are kept under StateDir/cache.
-	CacheDisk fleet.CacheDisk `toml:"cache_disk"`
+	CacheDisk *fleet.CacheDisk `toml:"cache_disk,omitempty"`
 
 	File string `toml:"-"`
 }
