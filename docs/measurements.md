@@ -281,6 +281,48 @@ JavaScript test suites ran as long cached as cold. Next.js's build kept
 flask's oldest commit fails its own tests, with a cache disk and without;
 its cold time is the newest commit's.
 
+### Ten languages, as real CI jobs
+
+The same projects and commits as real jobs on both forges
+([hack/cachelab/realmatrix.sh](../hack/cachelab/realmatrix.sh)): a
+`workflow_dispatch` on GitHub, a pipeline started by a push on GitLab, each
+picked up by fleetci, run by GitHub's runner or gitlab-runner in a fresh
+12-vCPU, 12 GB VM, one job at a time. Per language: the oldest commit with
+no cache disk, the six with it, the newest with none again. Cold is the
+mean of the two with none, warm the median of the last five with the
+disk; the first one with it fills it, and the second still fills some.
+Every job's line is in [results](../hack/cachelab/realmatrix/results), and
+[summary.py](../hack/cachelab/realmatrix/summary.py) makes these tables
+from them.
+
+| Language | GitHub cold | GitHub warm | Saved | GitLab cold | GitLab warm | Saved |
+| --- | --- | --- | --- | --- | --- | --- |
+| Go (fleetci) | 268 s | 31 s | 89% | 132 s | 8.2 s | 94% |
+| Node.js (express) | 24 s | 8.0 s | 67% | 13 s | 5.8 s | 54% |
+| Rust (ripgrep) | 30 s | 12 s | 60% | 17 s | 10 s | 40% |
+| Python (flask) | 23 s | 11 s | 53% | 13 s | 8.9 s | 29% |
+| Ruby (rack) | 31 s | 17 s | 46% | 22 s | 15 s | 31% |
+| PHP (commonmark) | 14 s | 7.5 s | 45% | 9.2 s | 5.8 s | 38% |
+| TypeScript (zustand) | 37 s | 27 s | 28% | 23 s | 22 s | 3% |
+| Next.js (vercel/chatbot) | 47 s | 35 s | 25% | 35 s | 32 s | 8% |
+| React (excalidraw) | 155 s | 117 s | 25% | 141 s | 115 s | 18% |
+| Java (gson) | 74 s | 58 s | 22% | 65 s | 48 s | 26% |
+
+On GitHub a job's steps pull their images, timed in its total: 3–15 s cold,
+1.3–2.6 s warm, from Docker's data on the cache disk. On GitLab the job's
+image is pulled by gitlab-runner before the script and isn't in the total,
+so the totals are smaller and the saving too. GitLab's Go job has no
+GoReleaser step, which runs in its own image (on GitHub it builds two
+binaries at a time; one per vCPU outgrew 12 GB). flask's two oldest
+commits fail their own tests on both forges, the first with a cache disk
+included.
+
+From the job queued to its first step: 14–26 s on GitHub, most of it
+GitHub's poll and its runner registering and connecting; 9–25 s on GitLab,
+where fleetci asks for a job while a VM can take it. The VM itself was
+ready in 1–2 s. Before fleetci stopped holding room for a GitLab request
+for a job, a GitHub job could wait 40 s more behind it.
+
 ### Deduplication and compression
 
 How much a worker's cache disks would shrink on a filesystem that
