@@ -66,6 +66,11 @@ type ControllerTable struct {
 	WorkerUpdate string `toml:"worker_update"`
 	// UpdateParallel is how many workers may update at once. Default 1.
 	UpdateParallel int `toml:"update_parallel"`
+	// CacheWait is how long a job of a class with cache_disk waits for
+	// room on the worker that has its cache, before it goes to another,
+	// where it starts from the cache it falls back on or from nothing.
+	// Default 30s.
+	CacheWait fleet.Duration `toml:"cache_wait"`
 }
 
 // ClassSpec is a class as the controllers define it, once for the fleet:
@@ -87,6 +92,11 @@ type ClassSpec struct {
 	MaxInstances int `toml:"max_instances" json:"max_instances,omitempty"`
 	// On limits the class to workers with these labels.
 	On map[string]string `toml:"on" json:"on,omitempty"`
+	// CacheDisk gives each job's VM a disk of its project's and ref's
+	// caches, kept on the worker (see fleet.CacheDisk). Each worker sizes
+	// its own in its [cache_disk]; jobs go to a worker that has their
+	// cache when it has room.
+	CacheDisk bool `toml:"cache_disk" json:"cache_disk,omitempty"`
 }
 
 // LoadController reads controller.toml.
@@ -123,6 +133,10 @@ func LoadController(path string) (*ControllerConfig, error) {
 		}
 	}
 	t.UpdateParallel = cmp.Or(t.UpdateParallel, 1)
+	t.CacheWait = cmp.Or(t.CacheWait, fleet.Duration(30*time.Second))
+	if t.CacheWait < 0 {
+		return nil, fmt.Errorf("%s: cache_wait can't be negative", path)
+	}
 	if len(c.Classes) == 0 {
 		return nil, fmt.Errorf("%s: no [classes]", path)
 	}
@@ -171,6 +185,9 @@ type WorkerConfig struct {
 	FleetingdPlugin string `toml:"fleetingd_plugin"`
 	// Update is how the worker updates itself; off by default.
 	Update UpdateConfig `toml:"update,omitempty"`
+	// CacheDisk sizes this worker's cache disks, for the classes with
+	// cache_disk; they are kept under StateDir/cache.
+	CacheDisk fleet.CacheDisk `toml:"cache_disk"`
 
 	File string `toml:"-"`
 }

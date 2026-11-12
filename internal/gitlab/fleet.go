@@ -25,6 +25,7 @@ import (
 	"gitlab.com/gitlab-org/moa/value"
 	"gitlab.com/gitlab-org/step-runner/pkg/api/expression"
 
+	"github.com/nesty92/fleetci/internal/cachedisk"
 	"github.com/nesty92/fleetci/internal/proxy"
 	"github.com/nesty92/fleetci/internal/source"
 )
@@ -32,7 +33,9 @@ import (
 // Remote runs a job on the worker that owns vm and returns when the job
 // ends there. job is the job as GitLab gave it; runner the [[runners]]
 // table without its token.
-type Remote func(ctx context.Context, vm source.VM, job, runner []byte) error
+// cache is the job's cache disk, nil for none: the worker attaches it when
+// the VM's class has one.
+type Remote func(ctx context.Context, vm source.VM, job, runner []byte, cache *cachedisk.Scope) error
 
 // NewDispatch is New for a fleet's leader: each job taken goes to a VM of
 // its class from capacity, and remote runs it there.
@@ -48,7 +51,7 @@ func NewDispatch(ctx context.Context, c Config, capacity source.Capacity, remote
 	p := l.mr.executorProviders.GetByName(executorName).(*provider)
 	l.mr.dispatch = &dispatcher{ctx: ctx, capacity: capacity, remote: remote, log: log,
 		classes: source.Names(classes), defaultClass: defaultClass, classOf: p.classOf,
-		held: held(c.HeldDir), resume: c.Held, exiting: c.Exiting}
+		held: held(c.HeldDir), resume: c.Held, exiting: c.Exiting, cacheDisk: c.CacheDisk}
 	if c.Concurrent == 0 {
 		// The fleet grows as workers join; room, not this, holds jobs back.
 		l.mr.config.Concurrent = 256
@@ -67,6 +70,7 @@ type dispatcher struct {
 	held         held
 	resume       *Held       // the jobs the last process left waiting
 	exiting      func() bool // whether the controller exits, not only stops leading
+	cacheDisk    *CacheDisk  // which jobs write their project's shared caches
 }
 
 // dispatchBuild takes one job from GitLab and runs it on a worker. It
@@ -113,6 +117,13 @@ func (mr *RunCommand) dispatchBuild(runner *common.RunnerConfig, runners chan *c
 		return mr.failJob(rc, creds, err, log)
 	}
 	n := heldJob{ID: job.ID, Token: job.Token, URL: runner.URL, Class: class, Job: jobJSON, Runner: runnerJSON}
+	// The leader decides the job's cache, which only it has the policy
+	// for: the worker attaches it, and the fleet places the VM by it.
+	if cj, err := cacheFor(d.cacheDisk, &common.Build{Job: *job, Runner: &rc}, &rc); err != nil {
+		log.Warn("no cache disk", "err", err)
+	} else if cj != nil {
+		n.Cache = &cj.scope
+	}
 	d.held.put(n, log)
 	return mr.place(rc, n, log)
 }
@@ -124,6 +135,9 @@ func (mr *RunCommand) place(rc common.RunnerConfig, n heldJob, log hclog.Logger)
 	d := mr.dispatch
 	creds := &common.JobCredentials{ID: n.ID, Token: n.Token}
 	ctx, cancel := context.WithTimeout(d.ctx, defaultAcquireWait)
+	if n.Cache != nil {
+		ctx = source.WithCaches(ctx, n.Cache.Dirs())
+	}
 	vm, err := d.capacity.Create(ctx, n.Class)
 	cancel()
 	if err != nil {
@@ -139,7 +153,7 @@ func (mr *RunCommand) place(rc common.RunnerConfig, n heldJob, log hclog.Logger)
 	}
 	log.Info("job placed", "class", n.Class, "vm", vm.ID)
 	d.held.drop(n.ID) // the worker has it now, and ends it
-	if err := d.remote(d.ctx, vm, n.Job, n.Runner); err != nil {
+	if err := d.remote(d.ctx, vm, n.Job, n.Runner, n.Cache); err != nil {
 		if d.ctx.Err() != nil {
 			return nil // the leader stops; the job goes on on its worker
 		}
@@ -241,8 +255,9 @@ const defaultAcquireWait = 50 * time.Minute
 
 // RunJob runs a job the leader placed on this worker's VM, with the job's
 // token, to its end: gitlab-runner's requestJob after the request, then
-// the build with the Docker executor on the VM.
-func RunJob(ctx context.Context, vm source.VM, conn *proxy.Conn, jobJSON, runnerJSON []byte, log hclog.Logger) error {
+// the build with the Docker executor on the VM. cache is the cache disk
+// the worker attached, nil for none, and note what to tell the job of it.
+func RunJob(ctx context.Context, vm source.VM, conn *proxy.Conn, jobJSON, runnerJSON []byte, cache *cachedisk.Scope, note string, log hclog.Logger) error {
 	rc := &common.RunnerConfig{}
 	if err := json.Unmarshal(runnerJSON, rc); err != nil {
 		return fmt.Errorf("the runner: %w", err)
@@ -270,6 +285,7 @@ func RunJob(ctx context.Context, vm source.VM, conn *proxy.Conn, jobJSON, runner
 
 	single := &oneVM{vm: vm, conn: conn}
 	p := newProvider(docker.NewProvider(), single, func(*common.RunnerConfig) string { return vm.Class }, []string{vm.Class}, vm.Class)
+	p.attached = &attachedCache{scope: cache, note: note}
 	netw := network.NewGitLabClient(network.WithExecutorProviderFunc(func(string) common.ExecutorProvider { return p }))
 
 	creds := &common.JobCredentials{ID: job.ID, Token: job.Token}

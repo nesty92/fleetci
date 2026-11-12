@@ -131,6 +131,9 @@ type provider struct {
 	defaultClass string
 	// cacheDisk says which jobs write their project's shared caches.
 	cacheDisk *CacheDisk
+	// attached is, on a fleet's worker, the cache disk the worker gave
+	// the VM before the job: the job only keeps its paths on it.
+	attached *attachedCache
 }
 
 func newProvider(docker common.ExecutorProvider, vms vms, classOf func(*common.RunnerConfig) string, classes []string, defaultClass string) *provider {
@@ -281,6 +284,12 @@ func (e *executor) Prepare(options common.ExecutorPrepareOptions) (err error) {
 // one, and returns the Docker volumes that keep the job's paths on it.
 // Without it the job runs all the same, from cold.
 func (e *executor) attachCache(options common.ExecutorPrepareOptions, vm source.VM) []string {
+	if a := e.p.attached; a != nil && a.scope == nil {
+		if a.note != "" {
+			options.BuildLogger.Warningln(a.note)
+		}
+		return nil
+	}
 	job, err := cacheFor(e.p.cacheDisk, options.Build, options.Config)
 	if err != nil {
 		options.BuildLogger.Warningln("No cache disk: " + err.Error())
@@ -289,8 +298,10 @@ func (e *executor) attachCache(options common.ExecutorPrepareOptions, vm source.
 	if job == nil {
 		return nil
 	}
-	msg, err := source.AttachCache(options.Context, e.p.vms, vm.ID, job.scope)
-	if err != nil {
+	var msg string
+	if a := e.p.attached; a != nil {
+		msg = a.note // the leader's scope, which the worker attached
+	} else if msg, err = source.AttachCache(options.Context, e.p.vms, vm.ID, job.scope); err != nil {
 		options.BuildLogger.Warningln("No cache disk: " + err.Error())
 		return nil
 	}
@@ -300,6 +311,13 @@ func (e *executor) attachCache(options common.ExecutorPrepareOptions, vm source.
 	options.BuildLogger.Println(msg)
 	job.keepFromClean(options.Build)
 	return job.volumes()
+}
+
+// attachedCache is the cache disk a fleet's worker attached, and what to
+// tell the job of it.
+type attachedCache struct {
+	scope *cachedisk.Scope
+	note  string
 }
 
 // withVolumes adds volumes to the job's Docker config, a copy of the

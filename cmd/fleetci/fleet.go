@@ -281,7 +281,7 @@ func runWorker(ctx context.Context, wc *cluster.WorkerConfig) error {
 		return err
 	}
 	w.GitLab = func(ctx context.Context, vm fleet.VM, job cluster.GitLabJob) error {
-		return gitlab.RunJob(ctx, source.VM{ID: vm.ID, Class: vm.Class, Instance: vm.Instance}, vm.Conn, job.Job, job.Runner, log.Named("gitlab"))
+		return gitlab.RunJob(ctx, source.VM{ID: vm.ID, Class: vm.Class, Instance: vm.Instance}, vm.Conn, job.Job, job.Runner, job.Cache, job.CacheNote, log.Named("gitlab"))
 	}
 	self, err := os.Executable() // before an update replaces it
 	if err != nil {

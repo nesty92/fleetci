@@ -3,6 +3,8 @@ package cluster
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/nesty92/fleetci/internal/cachedisk"
 )
 
 // Facts are what a worker has, as it reports them on joining and on each
@@ -68,6 +70,9 @@ type Report struct {
 	// lately.
 	Assignments []AssignmentStatus `json:"assignments,omitempty"`
 	Update      *UpdateStatus      `json:"update,omitempty"`
+	// Caches are the cache disks it keeps (cachedisk.Scope.Dirs' names):
+	// the controllers place a job where its cache is.
+	Caches []string `json:"caches,omitempty"`
 }
 
 // VMInfo is one of a worker's VMs.
@@ -174,6 +179,9 @@ type GitHubRun struct {
 type GitLabRun struct {
 	Job    json.RawMessage `json:"job"`    // the job as GitLab gave it
 	Runner json.RawMessage `json:"runner"` // the [[runners]] table, without its token
+	// Cache is the job's cache disk, which the worker attaches when the
+	// VM's class has one; nil for none.
+	Cache *cachedisk.Scope `json:"cache,omitempty"`
 }
 
 // An assignment's phases.

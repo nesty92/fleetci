@@ -15,6 +15,7 @@ import (
 
 	"gitlab.com/gitlab-org/gitlab-runner/common"
 
+	"github.com/nesty92/fleetci/internal/cachedisk"
 	"github.com/nesty92/fleetci/internal/source"
 )
 
@@ -142,7 +143,7 @@ func TestResumeHeldPlacesTheJob(t *testing.T) {
 		capacity: fakeCapacity{create: func(_ context.Context, class string) (source.VM, error) {
 			return source.VM{ID: "vm-1", Class: class}, nil
 		}},
-		remote: func(_ context.Context, vm source.VM, job, runner []byte) error {
+		remote: func(_ context.Context, vm source.VM, job, runner []byte, _ *cachedisk.Scope) error {
 			if _, err := os.Stat(held(dir).path(7)); err == nil {
 				t.Error("the note outlived the job's placing")
 			}

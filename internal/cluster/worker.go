@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/hashicorp/go-hclog"
 
+	"github.com/nesty92/fleetci/internal/cachedisk"
 	"github.com/nesty92/fleetci/internal/fleet"
 	"github.com/nesty92/fleetci/internal/github"
 	"github.com/nesty92/fleetci/internal/source"
@@ -106,6 +108,11 @@ func (t *task) reportable(now time.Time) bool {
 type GitLabJob struct {
 	Job    json.RawMessage // as GitLab gave it
 	Runner json.RawMessage // the [[runners]] table, without its token
+	// Cache is the cache disk the worker attached to the VM, nil for
+	// none; CacheNote says what it got, or why it has none, for the
+	// job's log.
+	Cache     *cachedisk.Scope
+	CacheNote string
 }
 
 type workerVM struct {
@@ -375,6 +382,16 @@ func (w *Worker) fleetClass(c Class, egress, images, subnet string) (fleet.Class
 		"vm_snapshot":              true,
 		"vm_image_url":             c.Image,
 	}
+	var cache *fleet.CacheDisk
+	if c.CacheDisk {
+		dir := filepath.Join(w.cfg.StateDir, "cache")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return fleet.Class{}, err
+		}
+		pc["vm_cache_directory"] = dir
+		cd := w.cfg.CacheDisk
+		cache = &cd
+	}
 	raw, err := json.Marshal(pc)
 	if err != nil {
 		return fleet.Class{}, err
@@ -391,10 +408,11 @@ func (w *Worker) fleetClass(c Class, egress, images, subnet string) (fleet.Class
 		MaxInstances: max(n, 1),
 		// Each VM takes one job, so one idle is never worth keeping: it
 		// holds room the budget can't give a job.
-		IdleTime: fleet.Duration(idleSpare),
-		Host:     &yes,
-		CPUs:     c.CPUs,
-		Memory:   c.Memory,
+		IdleTime:  fleet.Duration(idleSpare),
+		Host:      &yes,
+		CPUs:      c.CPUs,
+		Memory:    c.Memory,
+		CacheDisk: cache,
 	}, nil
 }
 
@@ -492,8 +510,15 @@ func (w *Worker) idleVMs(class string) int {
 
 func (w *Worker) report() Report {
 	w.mu.Lock()
+	b := w.backend
+	w.mu.Unlock()
+	var caches []string
+	if b != nil {
+		caches = slices.Sorted(maps.Keys(b.HeldCaches())) // off the lock: it reads the disk
+	}
+	w.mu.Lock()
 	defer w.mu.Unlock()
-	r := Report{Room: w.roomLocked(), UsedCPUs: w.used.CPUs, UsedMemory: w.used.MemoryMB, Checks: map[string]string{}}
+	r := Report{Room: w.roomLocked(), UsedCPUs: w.used.CPUs, UsedMemory: w.used.MemoryMB, Checks: map[string]string{}, Caches: caches}
 	for name := range w.classes {
 		if k := w.idleVMs(name); k > 0 {
 			if r.Idle == nil {
@@ -764,7 +789,11 @@ func (w *Worker) run(ctx context.Context, t *task) {
 		})
 	case run.GitLab != nil && w.GitLab != nil:
 		w.setJob(v, "gitlab")
-		err = w.GitLab(rctx, v.vm, GitLabJob{Job: run.GitLab.Job, Runner: run.GitLab.Runner})
+		job := GitLabJob{Job: run.GitLab.Job, Runner: run.GitLab.Runner}
+		if run.GitLab.Cache != nil {
+			job.Cache, job.CacheNote = w.attachCache(rctx, v, *run.GitLab.Cache, log)
+		}
+		err = w.GitLab(rctx, v.vm, job)
 	case run.GitLab != nil:
 		err = errors.New("this worker can't run GitLab jobs")
 	default:
@@ -920,6 +949,27 @@ func (w *Worker) runGitHub(ctx context.Context, cancel context.CancelFunc, v *wo
 		once.Do(func() { close(tookc) })
 		took(job)
 	})
+}
+
+// attachCache gives the VM its job's cache disk, when its class has one.
+// It returns the scope attached, or nil, and what to tell the job.
+func (w *Worker) attachCache(ctx context.Context, v *workerVM, scope cachedisk.Scope, log hclog.Logger) (*cachedisk.Scope, string) {
+	w.mu.Lock()
+	b := w.backend
+	w.mu.Unlock()
+	if b == nil || !b.HasCache(v.vm.ID) {
+		return nil, ""
+	}
+	st, err := b.AttachCache(ctx, v.vm, scope)
+	switch {
+	case err != nil:
+		log.Warn("no cache disk", "err", err)
+		return nil, "No cache disk: " + err.Error()
+	case st == nil:
+		return nil, ""
+	}
+	w.poke() // the report's caches change
+	return &scope, cachedisk.Describe(scope, *st)
 }
 
 // idleVM is how long a VM may wait for the job it was made for; one a

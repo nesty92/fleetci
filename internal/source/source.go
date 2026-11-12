@@ -59,6 +59,21 @@ type CacheAttacher interface {
 	HasCache(vm string) bool
 }
 
+type cachesKey struct{}
+
+// WithCaches says, to a Capacity that places VMs across machines, which
+// caches the VM's job would start from, the best first (cachedisk.Scope's
+// Dirs): it boots the VM where they are when it can.
+func WithCaches(ctx context.Context, dirs []string) context.Context {
+	return context.WithValue(ctx, cachesKey{}, dirs)
+}
+
+// Caches are what WithCaches put in ctx.
+func Caches(ctx context.Context) []string {
+	dirs, _ := ctx.Value(cachesKey{}).([]string)
+	return dirs
+}
+
 // AttachCache gives the VM the scope's cache disk when capacity can, and
 // says what it got, for the job's log: "" when the VM's class has none.
 // Every source attaches this way; only when differs.

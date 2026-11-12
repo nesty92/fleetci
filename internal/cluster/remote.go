@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nesty92/fleetci/internal/cachedisk"
 	"github.com/nesty92/fleetci/internal/fleet"
 	"github.com/nesty92/fleetci/internal/github"
 	"github.com/nesty92/fleetci/internal/proxy"
@@ -129,10 +130,23 @@ func (f fleetCapacity) Create(ctx context.Context, class string) (source.VM, err
 	if spec.Overflow != "" {
 		try = append(try, spec.Overflow)
 	}
+	dirs := source.Caches(ctx)
+	waitTill := time.Now().Add(time.Duration(c.cfg.Controller.CacheWait))
+	waiting := false
 	for {
 		wake := c.changed()
-		for _, cl := range try {
-			for _, w := range c.candidates(cl) {
+		for i, cl := range try {
+			ws, better := c.byCache(c.candidates(cl), cl, dirs)
+			if i == 0 && better && time.Now().Before(waitTill) {
+				// The worker with the job's cache is full: wait for it a
+				// while, rather than start the job cold elsewhere.
+				if !waiting {
+					c.log.Info("waiting for room on the worker with the job's cache", "class", cl, "for", time.Until(waitTill).Round(time.Second).String())
+					waiting = true
+				}
+				break
+			}
+			for _, w := range ws {
 				vm, err := c.createOn(ctx, w, cl)
 				if err == nil {
 					return vm, nil
@@ -149,13 +163,50 @@ func (f fleetCapacity) Create(ctx context.Context, class string) (source.VM, err
 				}
 			}
 		}
+		next := 5 * time.Second
+		if w := time.Until(waitTill); waiting && w > 0 {
+			next = min(next, w)
+		}
 		select {
 		case <-ctx.Done():
 			return source.VM{}, ctx.Err()
 		case <-wake:
-		case <-time.After(5 * time.Second):
+		case <-time.After(next):
 		}
 	}
+}
+
+// byCache puts first the workers that have the best of the caches a job
+// starts from (dirs, the best first), keeping the order otherwise. better
+// says a worker without room has a better one than any of ws.
+func (c *Controller) byCache(ws []*workerConn, class string, dirs []string) (_ []*workerConn, better bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if spec := c.cfg.Classes[class]; spec == nil || !spec.CacheDisk || len(dirs) == 0 {
+		return ws, false
+	}
+	rank := func(w *workerConn) int {
+		for i, d := range dirs {
+			if _, ok := slices.BinarySearch(w.report.Caches, d); ok {
+				return i
+			}
+		}
+		return len(dirs)
+	}
+	best := len(dirs) // over the workers that run the class
+	for _, w := range c.workers {
+		if _, runs := w.report.Room[class]; runs && w.state() == Ready {
+			best = min(best, rank(w))
+		}
+	}
+	ranks := map[*workerConn]int{}
+	here := len(dirs)
+	for _, w := range ws {
+		ranks[w] = rank(w)
+		here = min(here, ranks[w])
+	}
+	slices.SortStableFunc(ws, func(a, b *workerConn) int { return ranks[a] - ranks[b] })
+	return ws, best < here
 }
 
 // bootWait is how long a worker may take to boot an assignment's VM.
@@ -255,9 +306,9 @@ func (c *Controller) GitHubStart(cfg github.Config) github.StartFunc {
 
 // GitLabRemote puts a GitLab job on its VM's assignment, to run with the
 // job's own token, and follows it.
-func (c *Controller) GitLabRemote() func(ctx context.Context, vm source.VM, job, runner []byte) error {
-	return func(ctx context.Context, vm source.VM, job, runner []byte) error {
-		return c.runOn(ctx, vm.ID, RunSpec{GitLab: &GitLabRun{Job: job, Runner: runner}}, nil)
+func (c *Controller) GitLabRemote() func(ctx context.Context, vm source.VM, job, runner []byte, cache *cachedisk.Scope) error {
+	return func(ctx context.Context, vm source.VM, job, runner []byte, cache *cachedisk.Scope) error {
+		return c.runOn(ctx, vm.ID, RunSpec{GitLab: &GitLabRun{Job: job, Runner: runner, Cache: cache}}, nil)
 	}
 }
 

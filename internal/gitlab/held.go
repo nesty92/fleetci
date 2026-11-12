@@ -15,6 +15,8 @@ import (
 
 	"gitlab.com/gitlab-org/gitlab-runner/common"
 	"gitlab.com/gitlab-org/gitlab-runner/network"
+
+	"github.com/nesty92/fleetci/internal/cachedisk"
 )
 
 // A job the leader took from GitLab is known only to it until a worker has
@@ -42,6 +44,8 @@ type heldJob struct {
 	Class  string          `json:"class,omitempty"`
 	Job    json.RawMessage `json:"job,omitempty"`
 	Runner json.RawMessage `json:"runner,omitempty"`
+	// Cache is the job's cache disk, as the leader decided it.
+	Cache *cachedisk.Scope `json:"cache,omitempty"`
 }
 
 // held is the directory of notes; "" keeps none.

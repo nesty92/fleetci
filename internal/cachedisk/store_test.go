@@ -409,3 +409,24 @@ func TestOtherProjectsDontMix(t *testing.T) {
 		t.Fatalf("another project read this one's main (from %q)", l.From())
 	}
 }
+
+// TestHeldNamesDirs: what a store holds goes by the names Dirs gives a
+// job's caches, so a fleet can place the job where they are.
+func TestHeldNamesDirs(t *testing.T) {
+	s := open(t, Config{}, &fakeImages{})
+	if len(s.Held()) != 0 {
+		t.Fatalf("new store holds %v", s.Held())
+	}
+	run(t, s, main_)
+	held := s.Held()
+	dirs := mr.Dirs() // the MR's own, a shared one of its ref, then main's
+	if len(dirs) != 3 || dirs[0] != mr.key() {
+		t.Fatalf("dirs %v", dirs)
+	}
+	if _, ok := held[dirs[0]]; ok {
+		t.Fatal("holds the MR's cache before its job")
+	}
+	if _, ok := held[dirs[2]]; !ok || len(held) != 1 {
+		t.Fatalf("held %v; want main's, %s", held, dirs[2])
+	}
+}

@@ -518,6 +518,31 @@ func allocated(d fs.DirEntry) int64 {
 	return info.Size()
 }
 
+// Held are the caches the store has, by the name Dirs gives them, and when
+// a job last used each: what a node tells the controllers, which place a
+// job where its cache is.
+func (s *Store) Held() map[string]time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := map[string]time.Time{}
+	for _, key := range s.keys() {
+		if h, err := s.readHead(key); err == nil {
+			out[key] = h.Used
+		}
+	}
+	return out
+}
+
+// Dirs are the caches a job of the scope may start from, the best first,
+// by the names Held gives them.
+func (s Scope) Dirs() []string {
+	var out []string
+	for _, src := range s.sources() {
+		out = append(out, src.dir)
+	}
+	return out
+}
+
 func (s *Store) keys() []string {
 	entries, _ := os.ReadDir(filepath.Join(s.dir, "scopes"))
 	var keys []string

@@ -140,6 +140,32 @@ func (b *Backend) AttachCache(ctx context.Context, vm VM, scope cachedisk.Scope)
 	return &st, nil
 }
 
+// HeldCaches are the caches this backend's stores have, and when a job
+// last used each (cachedisk.Store.Held).
+func (b *Backend) HeldCaches() map[string]time.Time {
+	b.mu.Lock()
+	seen := map[*cachedisk.Store]bool{}
+	var stores []*cachedisk.Store
+	for _, ps := range b.pools {
+		for _, p := range ps {
+			if p.cache != nil && !seen[p.cache] {
+				seen[p.cache] = true
+				stores = append(stores, p.cache)
+			}
+		}
+	}
+	b.mu.Unlock()
+	out := map[string]time.Time{}
+	for _, s := range stores {
+		for k, t := range s.Held() {
+			if t.After(out[k]) {
+				out[k] = t
+			}
+		}
+	}
+	return out
+}
+
 // HasCache says whether the VM's class has a cache disk.
 func (b *Backend) HasCache(id string) bool {
 	b.mu.Lock()
