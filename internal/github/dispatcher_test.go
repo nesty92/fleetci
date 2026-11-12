@@ -126,8 +126,9 @@ func (g *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/actions/runs":
 		g.polls.Add(1)
-		if r.URL.Query().Get("status") == "queued" {
-			fmt.Fprint(w, `{"workflow_runs":[{"id":7}]}`)
+		// The status filter misses the queued run, as GitHub's can.
+		if r.URL.Query().Get("status") == "" {
+			fmt.Fprint(w, `{"workflow_runs":[{"id":7,"status":"queued"},{"id":6,"status":"completed"}]}`)
 		} else {
 			fmt.Fprint(w, `{"workflow_runs":[]}`)
 		}

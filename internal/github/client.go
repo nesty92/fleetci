@@ -176,23 +176,39 @@ func (c *client) do(ctx context.Context, method, path string, body, out any) err
 // queuedJobs lists the repo's jobs waiting for a runner. A job can wait in
 // a queued run or in one that has already started other jobs.
 //
+// The queued runs are the newest runs not completed, not those the status
+// filter finds: GitHub's filter can miss a queued run for many minutes,
+// while the unfiltered list has it at once. The newest 100 hold every
+// queued run but on a repo with a longer backlog, whose older runs come
+// into the list as the newer complete. Runs in progress, which can be
+// older, are listed by the filter.
+//
 // A run whose jobs cannot be listed does not hold up the others: the jobs
 // that could be listed come back with the error.
 func (c *client) queuedJobs(ctx context.Context, repo string) ([]job, error) {
 	var jobs []job
 	var errs []error
-	for _, status := range []string{"queued", "in_progress"} {
+	seen := map[int64]bool{}
+	for _, status := range []string{"", "in_progress"} {
 		var runs struct {
 			Runs []struct {
-				ID int64 `json:"id"`
+				ID     int64  `json:"id"`
+				Status string `json:"status"`
 			} `json:"workflow_runs"`
 		}
-		q := url.Values{"status": {status}, "per_page": {"100"}}
+		q := url.Values{"per_page": {"100"}}
+		if status != "" {
+			q.Set("status", status)
+		}
 		if err := c.do(ctx, http.MethodGet, "/repos/"+repo+"/actions/runs?"+q.Encode(), nil, &runs); err != nil {
 			errs = append(errs, err)
 			continue
 		}
 		for _, r := range runs.Runs {
+			if r.Status == "completed" || seen[r.ID] {
+				continue
+			}
+			seen[r.ID] = true
 			var page struct {
 				Jobs []job `json:"jobs"`
 			}

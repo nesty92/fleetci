@@ -105,13 +105,14 @@ func (f *forge) route(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, job{ID: id, Status: "completed"})
 	case r.Method == http.MethodGet && path == "/repos/o/r/actions/runs":
-		var runs []map[string]int64
-		if r.URL.Query().Get("status") == "queued" {
+		// The newest runs, unfiltered: the queued ones and no others.
+		var runs []map[string]any
+		if r.URL.Query().Get("status") == "" {
 			seen := map[int64]bool{}
 			for _, j := range f.queued {
 				if !seen[j.RunID] {
 					seen[j.RunID] = true
-					runs = append(runs, map[string]int64{"id": j.RunID})
+					runs = append(runs, map[string]any{"id": j.RunID, "status": "queued"})
 				}
 			}
 		}
