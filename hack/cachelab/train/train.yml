@@ -1,0 +1,32 @@
+# A merge train's car, or main once a car merges (hack/cachelab/train.sh
+# commits it with @LABEL@ and @RUN@ filled in). Each job keeps its tools'
+# caches with actions/cache, as a project would.
+name: train
+on:
+  push:
+    branches: [main, "train/**"]
+jobs:
+  go:
+    runs-on: @LABEL@
+    container: golang:1.27
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: .tcache
+          key: train-@RUN@-go-${{ github.sha }}
+          restore-keys: train-@RUN@-go-
+      - run: sh ci/job.sh go
+  web:
+    runs-on: @LABEL@
+    container: node:24
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: .tcache
+          key: train-@RUN@-web-${{ github.sha }}
+          restore-keys: train-@RUN@-web-
+      - run: sh ci/job.sh web
