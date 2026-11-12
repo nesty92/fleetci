@@ -40,9 +40,44 @@ cat "$d/job"`
 // answerScript gives the hook its answer, from stdin.
 const answerScript = `cat > /run/fleetci/done.new && mv /run/fleetci/done.new /run/fleetci/done`
 
+// factsAhead is what GitHub says of the job a runner was started for,
+// asked while its VM and runner start, so its disk is attached as soon as
+// the runner has the job, if it is that one.
+type factsAhead struct {
+	done  chan struct{}
+	facts cacheFacts
+	err   error
+}
+
+func (d *Dispatcher) factsAhead(ctx context.Context, repo string, j job) *factsAhead {
+	if j.RunID <= 0 {
+		return nil
+	}
+	a := &factsAhead{done: make(chan struct{})}
+	go func() {
+		defer close(a.done)
+		a.facts, a.err = d.cacheFacts(ctx, repo, j)
+	}()
+	return a
+}
+
+// get is the facts, if they came without error.
+func (a *factsAhead) get(ctx context.Context) (cacheFacts, bool) {
+	if a == nil {
+		return cacheFacts{}, false
+	}
+	select {
+	case <-a.done:
+		return a.facts, a.err == nil
+	case <-ctx.Done():
+		return cacheFacts{}, false
+	}
+}
+
 // attachCache gives the VM's job its cache disk, and the hook its answer.
-// queued is the job the runner was started for; runner is its name.
-func (d *Dispatcher) attachCache(ctx context.Context, vm VM, repo string, queued int64, runner string, log hclog.Logger) {
+// queued is the job the runner was started for; runner is its name; ahead,
+// if not nil, the facts of the queued job.
+func (d *Dispatcher) attachCache(ctx context.Context, vm VM, repo string, queued int64, runner string, ahead *factsAhead, log hclog.Logger) {
 	ca, ok := d.capacity.(source.CacheAttacher)
 	if !ok {
 		return
@@ -59,24 +94,29 @@ func (d *Dispatcher) attachCache(ctx context.Context, vm VM, repo string, queued
 		log.Warn("no cache disk: the job's hook did not say which job it is", "err", err)
 		return
 	}
-	msg := d.cacheDisk(ctx, ca, vm, repo, queued, runner, strings.TrimSpace(out), log)
+	msg := d.cacheDisk(ctx, ca, vm, repo, queued, runner, strings.TrimSpace(out), ahead, log)
 	if _, err := onVM(context.WithoutCancel(ctx), vm.Conn, answerScript, msg+"\n"); err != nil {
 		log.Warn("the job's hook got no answer; it goes on after ten minutes", "err", err)
 	}
 }
 
 // cacheDisk attaches the job's disk and says what it got, for the job's log.
-func (d *Dispatcher) cacheDisk(ctx context.Context, ca source.CacheAttacher, vm VM, repo string, queued int64, runner, hint string, log hclog.Logger) string {
-	repo, j, err := d.runnersJob(ctx, repo, queued, runner, hint)
+func (d *Dispatcher) cacheDisk(ctx context.Context, ca source.CacheAttacher, vm VM, repo string, queued int64, runner, hint string, ahead *factsAhead, log hclog.Logger) string {
+	jobRepo, j, err := d.runnersJob(ctx, repo, queued, runner, hint)
 	if err != nil {
 		log.Warn("no cache disk", "err", err)
 		return "No cache disk: " + err.Error()
 	}
 	log = log.With("job_id", strconv.FormatInt(j.ID, 10))
-	f, err := d.cacheFacts(ctx, repo, j)
-	if err != nil {
-		log.Warn("no cache disk", "err", err)
-		return "No cache disk: " + err.Error()
+	f, ok := cacheFacts{}, false
+	if jobRepo == repo && j.ID == queued {
+		f, ok = ahead.get(ctx)
+	}
+	if !ok {
+		if f, err = d.cacheFacts(ctx, jobRepo, j); err != nil {
+			log.Warn("no cache disk", "err", err)
+			return "No cache disk: " + err.Error()
+		}
 	}
 	msg, err := source.AttachCache(ctx, ca, vm.ID, cacheScope(d.cfg.CacheDisk, d.instance(), f))
 	if err != nil {
@@ -117,7 +157,7 @@ func (d *Dispatcher) runnersJob(ctx context.Context, repo string, queued int64, 
 			}
 			why = errors.Join(why, err)
 		}
-		if try == 4 {
+		if try == jobLookupTries-1 {
 			if why != nil {
 				return "", job{}, fmt.Errorf("GitHub does not say which job runner %s took: %w", runner, why)
 			}
@@ -131,8 +171,12 @@ func (d *Dispatcher) runnersJob(ctx context.Context, repo string, queued int64, 
 	}
 }
 
-// jobLookupWait is how long runnersJob waits between tries.
-var jobLookupWait = time.Second
+// jobLookupWait is how long runnersJob waits between tries, and
+// jobLookupTries how many it makes: GitHub names the runner on the job
+// within a second or so, and the job's steps wait for its disk.
+var jobLookupWait = 250 * time.Millisecond
+
+const jobLookupTries = 17
 
 // cacheFacts is what GitHub says of a job, for its cache disk.
 type cacheFacts struct {

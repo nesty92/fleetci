@@ -175,3 +175,27 @@ func TestRunnersJobSaysWhy(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 }
+
+// The facts asked while the VM starts come once, and only for a job in a run.
+func TestFactsAhead(t *testing.T) {
+	d := cacheGitHub(t, nil)
+	ctx := context.Background()
+	runs := 0
+	d.gh = newClient(d.cfg.APIURL, staticToken("t"), &http.Client{Transport: roundTrip(func(r *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(r.URL.Path, "/actions/runs/70") {
+			runs++
+		}
+		return http.DefaultTransport.RoundTrip(r)
+	})})
+	ahead := d.factsAhead(ctx, "o/r", job{ID: 2, RunID: 70})
+	if f, ok := ahead.get(ctx); !ok || f.branch != "feature/x" || runs != 1 {
+		t.Fatalf("ahead: %+v %v, %d run calls", f, ok, runs)
+	}
+	if d.factsAhead(ctx, "o/r", job{ID: 1}) != nil {
+		t.Fatal("asked ahead for a job with no run")
+	}
+	var none *factsAhead
+	if _, ok := none.get(ctx); ok {
+		t.Fatal("nil ahead gave facts")
+	}
+}

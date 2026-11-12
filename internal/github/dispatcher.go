@@ -947,6 +947,10 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 	var attaching sync.WaitGroup
 	defer func() { cancel(); attaching.Wait() }()
 	go d.watchIdle(rctx, cancel, scope, runnerID, log)
+	var ahead *factsAhead
+	if vm.Cache {
+		ahead = d.factsAhead(rctx, repo, j)
+	}
 
 	var took atomic.Pointer[string]
 	err = d.start(rctx, vm, jit, func(job string) {
@@ -957,7 +961,7 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 			attaching.Add(1)
 			go func() {
 				defer attaching.Done()
-				d.attachCache(rctx, vm, repo, j.ID, reg.name, log.With("job", job))
+				d.attachCache(rctx, vm, repo, j.ID, reg.name, ahead, log.With("job", job))
 			}()
 		}
 	})
