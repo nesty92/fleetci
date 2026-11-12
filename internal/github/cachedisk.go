@@ -169,6 +169,15 @@ func (d *Dispatcher) jobScope(ctx context.Context, repo string, queued int64, ru
 			return nil, "No cache disk: " + err.Error()
 		}
 	}
+	// The runner's word on the ref counts for the run it names.
+	hintRepo, hintRun, ref := parseHint(hint)
+	if !strings.EqualFold(hintRepo, jobRepo) || hintRun != j.RunID {
+		ref = refHint{}
+	}
+	if err := d.refFacts(ctx, &f, ref); err != nil {
+		log.Warn("no cache disk", "err", err)
+		return nil, "No cache disk: " + err.Error()
+	}
 	scope := cacheScope(d.cfg.CacheDisk, d.instance(), f)
 	return &scope, ""
 }
@@ -190,8 +199,7 @@ func (d *Dispatcher) attach(ctx context.Context, ca source.CacheAttacher, vm VM,
 // or else one of the run the hook names. GitHub's word decides; the hint
 // only says where to look.
 func (d *Dispatcher) runnersJob(ctx context.Context, repo string, queued int64, runner, hint string) (string, job, error) {
-	hintRepo, run, _ := strings.Cut(hint, " ")
-	runID, _ := strconv.ParseInt(run, 10, 64)
+	hintRepo, runID, _ := parseHint(hint)
 	// GitHub may name the runner on the job a moment after the runner has it.
 	var why error
 	for try := 0; ; try++ {
@@ -311,18 +319,53 @@ func (d *Dispatcher) cacheFacts(ctx context.Context, repo string, j job) (cacheF
 	if f.branch == "" {
 		return f, errors.New("the job's run has no branch")
 	}
-	if isReview(f.event) || isFork(f) || !needsRef(d.cfg.CacheDisk.Rules(repo)) {
-		return f, nil
+	return f, nil
+}
+
+// refHint is what the job's runner says of its ref, from the job's hook
+// (GITHUB_REF_TYPE, GITHUB_REF_PROTECTED): GitHub's own word, in the job
+// it sent the runner, given before any of the job's steps run.
+type refHint struct{ known, tag, protected bool }
+
+// parseHint reads the hook's line: the job's repo and run, then its ref's
+// type and whether it is protected, which an older hook leaves out.
+func parseHint(hint string) (repo string, run int64, ref refHint) {
+	f := strings.Fields(hint)
+	if len(f) > 0 {
+		repo = f[0]
 	}
+	if len(f) > 1 {
+		run, _ = strconv.ParseInt(f[1], 10, 64)
+	}
+	if len(f) > 3 && (f[2] == "branch" || f[2] == "tag") && (f[3] == "true" || f[3] == "false") {
+		ref = refHint{known: true, tag: f[2] == "tag", protected: f[3] == "true"}
+	}
+	return repo, run, ref
+}
+
+// refFacts says whether the job's ref is a tag or a protected branch, when
+// the writers' rules need to know: as the job's runner says, so the app
+// needs no permission for it, or else as GitHub's API says, which needs
+// Contents: read.
+func (d *Dispatcher) refFacts(ctx context.Context, f *cacheFacts, ref refHint) error {
+	if isReview(f.event) || isFork(*f) || !needsRef(d.cfg.CacheDisk.Rules(f.repo)) {
+		return nil
+	}
+	if ref.known {
+		f.tag, f.protected = ref.tag, ref.protected && !ref.tag
+		return nil
+	}
+	repo := f.repo
+	var err error
 	f.protected, err = d.refs.get(repo+" branch "+f.branch, refFor, func() (bool, error) { return d.gh.branchProtected(ctx, repo, f.branch) })
 	if errors.Is(err, errNotFound) {
 		// Not a branch: a tag's run names the tag.
 		f.tag, err = d.refs.get(repo+" tag "+f.branch, refFor, func() (bool, error) { return d.gh.tagExists(ctx, repo, f.branch) })
 	}
 	if se := (statusError{}); errors.As(err, &se) && se.status == http.StatusForbidden {
-		err = fmt.Errorf("the writers' rules need the branch, which the app may not read (Contents: read): %w", err)
+		err = fmt.Errorf("the writers' rules need to know whether the branch is protected: the job's runner didn't say, and the app may not read the branch (Contents: read): %w", err)
 	}
-	return f, err
+	return err
 }
 
 // needsRef says whether the rules tell branches from tags, or protected

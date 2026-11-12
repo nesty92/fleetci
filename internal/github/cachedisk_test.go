@@ -126,6 +126,9 @@ func TestRunnersJob(t *testing.T) {
 func TestCacheFacts(t *testing.T) {
 	d := cacheGitHub(t, map[string]bool{"feature/x": true})
 	f, err := d.cacheFacts(context.Background(), "o/r", job{ID: 2, RunID: 70})
+	if err == nil {
+		err = d.refFacts(context.Background(), &f, refHint{})
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +137,11 @@ func TestCacheFacts(t *testing.T) {
 	}
 	// Neither a branch nor a tag any more: not protected.
 	d = cacheGitHub(t, nil)
-	if f, err = d.cacheFacts(context.Background(), "o/r", job{ID: 2, RunID: 70}); err != nil || f.protected || f.tag {
+	f, err = d.cacheFacts(context.Background(), "o/r", job{ID: 2, RunID: 70})
+	if err == nil {
+		err = d.refFacts(context.Background(), &f, refHint{})
+	}
+	if err != nil || f.protected || f.tag {
 		t.Fatalf("%+v %v", f, err)
 	}
 }
@@ -151,14 +158,52 @@ func TestCacheFactsAsksOnlyWhatTheRulesNeed(t *testing.T) {
 		}
 		return http.DefaultTransport.RoundTrip(r)
 	})})
+	ctx := context.Background()
+	facts := func(ref refHint) (cacheFacts, error) {
+		f, err := d.cacheFacts(ctx, "o/r", job{ID: 2, RunID: 70})
+		if err == nil {
+			err = d.refFacts(ctx, &f, ref)
+		}
+		return f, err
+	}
 	d.cfg.CacheDisk = &cachedisk.Policy{Writers: &[]string{"default"}}
-	if _, err := d.cacheFacts(context.Background(), "o/r", job{ID: 2, RunID: 70}); err != nil || branches != 0 {
+	if _, err := facts(refHint{}); err != nil || branches != 0 {
 		t.Fatalf("default: %d branch calls, %v", branches, err)
 	}
 	d.cfg.CacheDisk = nil // protected
-	_, err := d.cacheFacts(context.Background(), "o/r", job{ID: 2, RunID: 70})
+	// The runner said: GitHub isn't asked, and the app needs no Contents: read.
+	if f, err := facts(refHint{known: true, protected: true}); err != nil || !f.protected || branches != 0 {
+		t.Fatalf("protected, from the runner: %+v %v, %d branch calls", f, err, branches)
+	}
+	if f, err := facts(refHint{known: true, tag: true, protected: true}); err != nil || f.protected || !f.tag {
+		t.Fatalf("tag, from the runner: %+v %v", f, err)
+	}
+	// It didn't (an older hook): GitHub is asked, and refuses.
+	_, err := facts(refHint{})
 	if err == nil || !strings.Contains(err.Error(), "Contents: read") {
 		t.Fatalf("protected, refused: %v", err)
+	}
+}
+
+func TestParseHint(t *testing.T) {
+	for _, tc := range []struct {
+		hint string
+		repo string
+		run  int64
+		ref  refHint
+	}{
+		{"o/r 70", "o/r", 70, refHint{}},
+		{"o/r 70 branch true", "o/r", 70, refHint{known: true, protected: true}},
+		{"o/r 70 branch false", "o/r", 70, refHint{known: true}},
+		{"o/r 70 tag false", "o/r", 70, refHint{known: true, tag: true}},
+		{"o/r 70 - -", "o/r", 70, refHint{}},
+		{"o/r 70 branch yes", "o/r", 70, refHint{}},
+		{"", "", 0, refHint{}},
+	} {
+		repo, run, ref := parseHint(tc.hint)
+		if repo != tc.repo || run != tc.run || ref != tc.ref {
+			t.Errorf("%q: %q %d %+v", tc.hint, repo, run, ref)
+		}
 	}
 }
 

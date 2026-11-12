@@ -112,7 +112,7 @@ func TestJobStartedHook(t *testing.T) {
 				_ = os.Mkdir(filepath.Join(d, "decided"), 0o700)
 			}
 			cmd := exec.Command("sh", "-c", strings.ReplaceAll(jobStartedHook, "/run/fleetci", d))
-			cmd.Env = []string{"PATH=" + bin + ":" + os.Getenv("PATH"), "GITHUB_REPOSITORY=o/r", "GITHUB_RUN_ID=77"}
+			cmd.Env = []string{"PATH=" + bin + ":" + os.Getenv("PATH"), "GITHUB_REPOSITORY=o/r", "GITHUB_RUN_ID=77", "GITHUB_REF_TYPE=branch", "GITHUB_REF_PROTECTED=true"}
 			out, err := cmd.CombinedOutput()
 			if err != nil {
 				t.Fatalf("%v: %s", err, out)
@@ -120,7 +120,7 @@ func TestJobStartedHook(t *testing.T) {
 			if strings.TrimSpace(string(out)) != tc.out {
 				t.Errorf("output %q, want %q", out, tc.out)
 			}
-			if job, _ := os.ReadFile(filepath.Join(d, "job")); string(job) != "o/r 77\n" {
+			if job, _ := os.ReadFile(filepath.Join(d, "job")); string(job) != "o/r 77 branch true\n" {
 				t.Errorf("job file %q", job)
 			}
 			if _, err := os.Stat(filepath.Join(d, "decided")); (err == nil) != (tc.done == "") {

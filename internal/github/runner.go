@@ -98,12 +98,12 @@ exec ./run.sh --jitconfig "$jit"
 `
 
 // jobStartedHook runs before the job's first step: it says which run the
-// job is in, and waits while fleetci gives the job its cache disk
+// job is in, and its ref's type and protection as GitHub gave them, and waits while fleetci gives the job its cache disk
 // (Dispatcher.attachCache). fleetci or the hook, whichever makes "decided"
 // first, decides: the hook gives up after a minute only if fleetci has not
 // begun, so fleetci never stops Docker under a job that has started.
 const jobStartedHook = `d=/run/fleetci
-printf '%s %s\n' "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > "$d/job.new" && mv "$d/job.new" "$d/job"
+printf '%s %s %s %s\n' "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "${GITHUB_REF_TYPE:--}" "${GITHUB_REF_PROTECTED:--}" > "$d/job.new" && mv "$d/job.new" "$d/job"
 i=0
 until [ -e "$d/done" ]; do
   i=$((i+1))
