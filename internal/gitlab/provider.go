@@ -20,11 +20,13 @@
 package gitlab
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"path"
 	"slices"
 	"strings"
 	"sync"
@@ -310,7 +312,30 @@ func (e *executor) attachCache(options common.ExecutorPrepareOptions, vm source.
 	}
 	options.BuildLogger.Println(msg)
 	job.keepFromClean(options.Build)
-	return job.volumes()
+	return append(job.volumes(), cacheDirVolume(options.Config)...)
+}
+
+// cacheDirVolume keeps the runner's cache directory, where the job's
+// cache: archives land, on the cache disk: a Docker volume, as
+// gitlab-runner register writes in config.toml. The next job's restore
+// then finds cache.zip as new as the one in S3 and skips the download.
+// Nothing when the config has the volume already, or turns caches off.
+func cacheDirVolume(rc *common.RunnerConfig) []string {
+	if rc == nil || rc.Docker == nil || rc.Docker.DisableCache {
+		return nil
+	}
+	dir := path.Clean(cmp.Or(rc.CacheDir, "/cache"))
+	for _, v := range rc.Docker.Volumes {
+		parts := strings.Split(v, ":")
+		target := parts[0]
+		if len(parts) > 1 {
+			target = parts[1]
+		}
+		if path.Clean(target) == dir {
+			return nil
+		}
+	}
+	return []string{dir}
 }
 
 // attachedCache is the cache disk a fleet's worker attached, and what to

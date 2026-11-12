@@ -215,6 +215,31 @@ func TestWithVolumes(t *testing.T) {
 	}
 }
 
+func TestCacheDirVolume(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		d    *common.DockerConfig
+		dir  string
+		want []string
+	}{
+		{"no volume", &common.DockerConfig{}, "", []string{"/cache"}},
+		{"has it", &common.DockerConfig{Volumes: []string{"/cache"}}, "", nil},
+		{"has it from the host", &common.DockerConfig{Volumes: []string{"/srv/c:/cache:rw"}}, "", nil},
+		{"other volumes", &common.DockerConfig{Volumes: []string{"/a:/a", "/cache2"}}, "", []string{"/cache"}},
+		{"cache_dir", &common.DockerConfig{}, "/var/cache/ci/", []string{"/var/cache/ci"}},
+		{"caches off", &common.DockerConfig{DisableCache: true}, "", nil},
+		{"no docker", nil, "", nil},
+	} {
+		rc := &common.RunnerConfig{RunnerSettings: common.RunnerSettings{Docker: tc.d, CacheDir: tc.dir}}
+		if got := cacheDirVolume(rc); !slices.Equal(got, tc.want) {
+			t.Errorf("%s: %q, want %q", tc.name, got, tc.want)
+		}
+	}
+	if got := cacheDirVolume(nil); got != nil {
+		t.Errorf("no config: %q", got)
+	}
+}
+
 func TestKeepFromClean(t *testing.T) {
 	var c *CacheDisk
 	for _, tc := range []struct {
