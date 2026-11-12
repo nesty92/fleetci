@@ -2,9 +2,11 @@
 
 A fleetingd class with `cache_disk` gives each job's VM a disk that outlives
 the VM. Docker's data is on it, so images the job pulled last time are still
-there, and so are the paths the job asks to keep. The README's "A cache disk
-per ref" section covers the setup; this page covers using it from
-`.gitlab-ci.yml`, and [from GitHub Actions](#github-actions).
+there, and so are the archives of the job's own `cache:` (GitLab) and
+`actions/cache` steps (GitHub): the disk is a local copy in front of the
+cache the job already uses, S3 or GitHub's. Nothing changes in the job. The
+README's "A cache disk per ref" section covers the setup; this page covers
+how jobs use it, on GitLab and [on GitHub Actions](#github-actions).
 
 - [How it works](#how-it-works)
 - [Variables](#variables)
@@ -18,26 +20,61 @@ per ref" section covers the setup; this page covers using it from
 
 ## How it works
 
-1. When a job starts, fleetci finds the newest disk for the job's key. The
-   key is the job's ref unless the job names one. If that key has no disk
-   yet, fleetci uses the first of `FLEETCI_CACHE_FROM` that has one; that is
-   the default branch's unless the job lists others. If none exists, the job
-   starts with an empty disk.
-2. The job's VM gets a new copy-on-write layer on that disk. Docker uses it,
-   and each path in `FLEETCI_CACHE_PATHS` is a directory on it, mounted into
-   the job's container.
+1. **Each job has its own disk**, named by its ref and its job's name, a
+   matrix job's values included: `main · build`, `feature/login · test
+   (node 24)`. When a job starts, fleetci finds that disk's newest copy. If
+   there is none yet, the job starts from the same job's disk on the
+   default branch (or the first of `FLEETCI_CACHE_FROM` that has one), and
+   with none of those, from an empty disk.
+2. The job's VM gets a new copy-on-write layer on that disk. Docker's data
+   is on it, and so is the job's cache directory.
 3. When the job ends and the VM returns the disk cleanly, the layer becomes
-   the key's newest. A job that crashes leaves the key as it was.
+   the disk's newest. A job that crashes leaves the disk as it was.
 
-Pulled images and service images are kept with no variables set. The
-variables are for everything else.
+Jobs of one pipeline run at once, so they each get a disk: on one shared
+disk, the last to finish would undo what the others added, archives and
+Docker's data alike. A disk that starts from the default branch's shares
+its blocks with it on the node, so the copy costs only what the job adds.
+
+### The job's own caches
+
+The job's `cache:` and `actions/cache` steps work as before. The disk sits
+in front of where they store their archives:
+
+- **GitLab:** the runner's cache directory (`/cache`, or its `cache_dir`)
+  is on the disk. A `cache:` restore finds the archive there, as new as
+  S3's copy, and skips the download. Uploads go to S3 as before, so jobs on
+  other nodes and runners without a disk still get them.
+- **GitHub:** an `actions/cache` restore asks fleetci's cache service in
+  the VM. It asks GitHub which entry the key names, serves that entry from
+  the disk if the disk has it, and otherwise downloads it from GitHub,
+  in 8 MiB ranges, 8 at a time, keeping a copy. Saves are kept on the disk
+  and go to GitHub as before. BuildKit's `type=gha` cache uses the same
+  service.
+
+The disk's copy of an archive is served only for the entry GitHub or S3
+names now: a pull request's disk, which started from the default branch's,
+can hold the same key of the default branch's scope, and that copy isn't
+served for the pull request's own entry.
+
+Each job's log ends with what its cache steps got, e.g.:
+
+```
+fleetci cache: 2 restored from the cache disk (412 MB), 1 saved, kept on the disk (38 MB)
+```
+
+Pulled images and service images are kept with nothing set.
 
 ## Variables
+
+GitLab only, and seldom needed: `cache:` covers most jobs. They keep paths
+on the disk without an archive, for tools whose caches are too large or too
+many files to pack each time.
 
 | Variable | Default | What it does |
 |---|---|---|
 | `FLEETCI_CACHE_PATHS` | none | Paths in the job's container to keep, separated by spaces or commas. Relative paths are in the project's checkout. |
-| `FLEETCI_CACHE_KEY` | the ref | The cache's name. Jobs with the same key share a cache. |
+| `FLEETCI_CACHE_KEY` | the ref and job | The disk's name. Jobs with the same key share a disk. |
 | `FLEETCI_CACHE_FROM` | the default branch | Caches a key with nothing yet starts from, the first that exists. |
 | `FLEETCI_CACHE` | on | `off` runs the job without a disk. |
 
@@ -297,18 +334,18 @@ deploy:
 
 ## Keys
 
-- **The default key is the ref.** Each branch then keeps its own cache, and
-  its first job starts from the default branch's. That suits a project with
-  one kind of job.
-- **One key per kind of job.** Use `npm`, `cargo`, `e2e` or `$CI_JOB_NAME`
-  when a pipeline's jobs keep different things. Jobs on the same key run at
-  once from the same layer, and the last one to finish wins: anything another
-  job added is lost.
+- **The default is a disk per job.** Each job of each ref keeps its own,
+  and its first run on a branch starts from the same job's on the default
+  branch. That suits nearly every project.
+- **A key of your own** (`FLEETCI_CACHE_KEY`) names the disk whole: jobs on
+  the same key share it, run at once from the same layer, and the last one
+  to finish wins: anything another job added is lost. Use it only for jobs
+  that keep the same things and seldom run together.
 - **Key the tool, not the lockfile.** Package managers check their caches
   against the lockfile, so a key that never changes keeps working through
   updates. A lockfile hash in the key gives every update an empty cache.
-- **Starting points.** `FLEETCI_CACHE_FROM: develop main` makes a new key
-  start from `develop`'s cache if there is one, else from `main`'s.
+- **Starting points.** `FLEETCI_CACHE_FROM: develop main` makes a new disk
+  start from `develop`'s if there is one, else from `main`'s.
 - **Keys are per project.** No other project reads them.
 
 ## Things to know
@@ -324,9 +361,10 @@ deploy:
   parents.
 - **Relative paths** follow `GIT_CLONE_PATH` and the runner's `builds_dir`.
   If `builds_dir` is mounted from the host, use absolute paths.
-- **Sizes.** A key past `max_per_cache` starts again empty. Keys no job has
-  used for `max_age` are deleted, and so are the least recently used keys
-  when the class is over its `budget`.
+- **Sizes.** A disk past `max_per_cache` starts again empty. Disks no job
+  has used for `max_age` (7 days) are deleted, a merge or pull request's
+  sooner, after `reader_max_age` (2 days), and so are the least recently
+  used when the class is over its `budget`.
 - **Turning it off.** `FLEETCI_CACHE: "off"` gives a job no disk. Use it for
   a deploy job, or for a job that must start cold.
 - **Emptying a key.** Change the key, e.g. `npm-2`. Its first job starts from
@@ -377,25 +415,26 @@ work that way. It is not a good default.
 
 ## GitHub Actions
 
-A GitHub job on a class with `cache_disk` gets a disk keyed by its repo and
-branch, with Docker's data on it: images and service containers pulled by
-the branch's last job are there. Nothing changes in the workflow.
+A GitHub job on a class with `cache_disk` gets a disk as a GitLab job does:
+its own, by repo, branch and job name, with Docker's data and its
+`actions/cache` archives on it. Nothing changes in the workflow.
 
 GitHub gives a runner any queued job its labels fit, so fleetci learns
-which repo and branch the VM serves only when the job starts. The runner
-runs a hook before the job's first step. The hook waits while fleetci looks
-the job up on GitHub's API and attaches its disk, which takes a second or
-two, then prints the outcome in the job's log:
+which job the VM serves only when the job starts. The runner runs a hook
+before the job's first step. It tells fleetci the job's repo, ref and
+whether the ref is protected, from the runner's own job context, then waits
+while fleetci attaches the disk, which takes about a second, and prints the
+outcome in the job's log:
 
 ```
-Cache disk "main" (shared with the project)
-Cache disk "feature/login" (this ref's own): starting from "main"'s
+Cache disk "main · build" (shared with the project)
+Cache disk "feature/login · build" (this ref's own): starting from "main · build"'s
 ```
 
 If fleetci doesn't answer within a minute, the job runs without a disk.
 
-Who writes is decided as on GitLab, from what GitHub says of the job: its
-branch, whether that branch is protected, and whether the run is a pull
+Who writes is decided as on GitLab, from what the job's runner says of it:
+its branch, whether that branch is protected, and whether the run is a pull
 request's. The rules are the same, in their own table:
 
 ```toml
@@ -407,20 +446,38 @@ match = "my-org/trunk-app"       # owner/name, or "my-org/*"
 writers = ["default"]
 ```
 
-A pull request's job reads its base's shared cache and writes one of its
+A pull request's job reads its base's shared disk and writes one of its
 own; it writes the shared one only under `all`. A pull request from a fork
-never writes, even under `all`, and its cache is kept apart, under the
+never writes, even under `all`, and its disk is kept apart, under the
 fork's name.
 
-fleetci's GitHub App or token reads the job and its run, which needs
-`Actions: read` on the repos it serves. Rules other than `default` and
-`all` also need the branch, to tell a protected branch or a tag: that
-needs `Contents: read`. Without it, the job's log says so and the job runs
-with no disk. The runner's image needs passwordless `sudo`, as for the
+fleetci's GitHub App needs only `Actions: read` and the permission to
+register its self-hosted runners. It reads nothing of the repo's contents or
+branch protection. The runner's image needs passwordless `sudo`, as for the
 rest of fleetci.
 
-Not yet on GitHub: choosing keys and paths to keep (the `FLEETCI_CACHE_*`
-variables are GitLab's), and serving `actions/cache` from the disk.
+### actions/cache
+
+`actions/cache` (v4 and later, and anything on its toolkit, such as
+`setup-node`'s `cache:` and BuildKit's `type=gha`) goes through fleetci's
+cache service in the VM. The runner sets it up: fleetci points the
+runner's `ACTIONS_RESULTS_URL` at the service, and the service talks to
+GitHub's cache for anything not on the disk.
+
+- **Job containers** (`container:`) reach the service through Docker's
+  bridge. A host firewall that drops forwarded traffic, such as ufw's
+  default, doesn't matter: the VM's own rules let it through.
+- **Alpine job containers can't use `actions/cache`:** BusyBox's `tar`
+  lacks what the action needs, with or without fleetci. Use a Debian-based
+  image, e.g. `node:24-bookworm-slim`, or install GNU `tar`.
+- **A runner fleetci couldn't patch** sends `actions/cache` to GitHub
+  directly, as any runner does. The job's log says so in a warning, and the
+  job still works.
+
+The approach of pointing the runner at a cache service of one's own comes
+from [falcondev-oss/github-actions-cache-server](https://github.com/falcondev-oss/github-actions-cache-server)
+(MIT), which serves `actions/cache` from its own storage. fleetci keeps
+GitHub's cache behind the disk instead, so it needs no server of its own.
 
 ## On a fleet of machines
 
@@ -499,9 +556,10 @@ that edit `.gitlab-ci.yml` use the cache disk well:
 ````markdown
 ## CI cache disk (fleetci)
 
-This project's GitLab jobs run on fleetci VMs with a cache disk. Pulled
-Docker images are kept with nothing set. To keep a tool's cache, set
-variables on the job; there are no `cache:` uploads to wait for.
+This project's GitLab jobs run on fleetci VMs with a cache disk of their
+own. Pulled Docker images are kept with nothing set, and so are `cache:`
+archives: the disk serves them before S3, so use `cache:` as usual. For a
+tool cache too large to archive each time, keep its path on the disk:
 
 - Point the tool's cache at an absolute path outside the checkout, and list
   that path in `FLEETCI_CACHE_PATHS` (space-separated):
@@ -512,9 +570,9 @@ variables on the job; there are no `cache:` uploads to wait for.
   Maven `-Dmaven.repo.local`, Gradle `GRADLE_USER_HOME`,
   Playwright `PLAYWRIGHT_BROWSERS_PATH`. Use `/fleetci/<tool>`; never
   `/cache`, which is gitlab-runner's.
-- Give each kind of job its own `FLEETCI_CACHE_KEY` (`npm`, `cargo`,
-  `e2e`). Jobs on one key overwrite each other's changes; the last to finish
-  wins.
+- Each job already has its own disk. Don't set `FLEETCI_CACHE_KEY` unless
+  several jobs keep the same things and seldom run together: jobs on one
+  key overwrite each other's changes; the last to finish wins.
 - Key by tool, not by lockfile hash. The tools check their caches against
   the lockfile already.
 - Keep download caches rather than build output where both work. Keep
@@ -527,7 +585,7 @@ variables on the job; there are no `cache:` uploads to wait for.
 - A new cache starts from the default branch's (`FLEETCI_CACHE_FROM` to
   change it). The first run after changing a key is a cold run; that is
   expected.
-- Job logs show which cache each job got: `Cache disk "npm" (shared with
-  the project)`, or `starting from "main"'s`. Check that line when a job is
-  slower than expected.
+- Job logs show which disk each job got: `Cache disk "main · test" (shared
+  with the project)`, or `starting from "main · test"'s`. Check that line
+  when a job is slower than expected.
 ````

@@ -387,3 +387,27 @@ take about 5.8 s uncompressed and 3.4 s with S2; at 10 Gbit about the
 same either way, as S2 on two cores keeps up with about 760 MB/s.
 `qemu-img check` found the copied chain whole, its backing files at the
 receiving worker's paths.
+
+### actions/cache through the disk
+
+The same fleet, GitHub, a throwaway workflow on WireZone/fleetci-playground
+with three jobs: `actions/cache` of 200 MB on the VM, of 100 MB in a
+`node:24-bookworm-slim` job container, and a BuildKit build of an 80 MB
+layer with `cache-to: type=gha,mode=max`. Each job on a disk of its own;
+the second run on the same branch:
+
+| Job | First run | Second run | Second run's cache line |
+| --- | --- | --- | --- |
+| On the VM | 20 s | 43 s¹ | 1 restored from the cache disk (200 MB) |
+| In a job container | 160 s | 17 s | 1 restored from the cache disk (100 MB) |
+| BuildKit, `type=gha` | 138 s | 25 s | layer restored from the disk, `#6 CACHED` |
+
+¹ The job ran on the other worker, which had a copy of its disk from the
+first run: the restore itself took about 2 s, the rest was the runner.
+
+Restores from the disk took 1–2 s for 100–200 MB. Before each job had its
+own disk, jobs of one run on one branch shared one: on the second run the
+VM job found the container job's disk, which had come over from the other
+worker, and missed. A download from GitHub's cache in 8 MiB ranges, 8 at a
+time, took 16.6 s for the 200 MB archive, against 14–16 s for one stream:
+the host's internet link was the limit.
