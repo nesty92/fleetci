@@ -70,6 +70,7 @@ type Worker struct {
 	checking bool               // the microVM checks run
 	stop     context.CancelFunc // ends Run
 	exitErr  error              // what Run returns: ErrRestart for an update
+	peers    *neighbourState
 }
 
 // task is an assignment as this worker carries it out.
@@ -138,7 +139,7 @@ func NewWorker(cfg *WorkerConfig, version string, log hclog.Logger) (*Worker, er
 	w := &Worker{cfg: cfg, pki: p, log: log, version: version,
 		checks: map[string]string{}, passed: map[string]bool{}, count: map[string]int{},
 		vms: map[string]*workerVM{}, drainBy: map[string]bool{}, clients: map[string]*client{},
-		tasks: map[string]*task{}, changed: make(chan struct{}, 1), started: time.Now()}
+		tasks: map[string]*task{}, changed: make(chan struct{}, 1), started: time.Now(), peers: newNeighbourState()}
 	f, err := GatherFacts(cfg, version)
 	if err != nil {
 		return nil, err
@@ -213,7 +214,18 @@ func (w *Worker) Run(ctx context.Context) error {
 	w.mu.Lock()
 	w.stop = stop
 	w.mu.Unlock()
+	lis, err := w.listenPeers()
+	if err != nil {
+		w.log.Warn("not answering other workers", "err", err)
+	}
+	if lis != nil {
+		w.facts.PeerAddrs = peerAddrs(lis.Addr(), w.cfg.PeerAdvertise)
+		w.log.Info("answering other workers", "listen", lis.Addr().String(), "addrs", w.facts.PeerAddrs)
+	}
 	var wg sync.WaitGroup
+	if lis != nil {
+		wg.Go(func() { w.peerLoop(ctx, lis, pool) })
+	}
 	wg.Go(func() { w.updateLoop(ctx) })
 	for _, cl := range w.clients {
 		wg.Go(func() { w.watchLoop(ctx, cl) })
@@ -552,6 +564,7 @@ func (w *Worker) report() Report {
 		anyPassed = anyPassed || ok
 	}
 	r.Update = w.updateReportLocked()
+	r.Neighbours = w.peers.list()
 	switch {
 	case w.draining:
 		r.State = Draining
@@ -587,6 +600,7 @@ func (w *Worker) reportLoop(ctx context.Context) {
 				var resp StatusResponse
 				if err := cl.do(rctx, http.MethodPut, workerPath(w.cfg.ID, "/status"), up, &resp); err != nil {
 					w.setDrain(addr, nil) // what it said no longer counts
+					w.peers.set(addr, nil)
 					w.takeUpdateOrders(addr, nil)
 					var se *StatusError
 					if errors.As(err, &se) && se.Code == http.StatusConflict {
@@ -601,6 +615,7 @@ func (w *Worker) reportLoop(ctx context.Context) {
 				}
 				w.configure(ctx, resp.Fit)
 				w.setDrain(addr, &resp.Draining)
+				w.peers.set(addr, &resp.Peers)
 				w.takeUpdateOrders(addr, &resp)
 				w.takeVerify(ctx, resp.Verify)
 				w.reached()

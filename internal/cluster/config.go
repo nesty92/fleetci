@@ -185,6 +185,12 @@ type WorkerConfig struct {
 	FleetingdPlugin string `toml:"fleetingd_plugin"`
 	// Update is how the worker updates itself; off by default.
 	Update UpdateConfig `toml:"update,omitempty"`
+	// PeerListen is where this worker answers other workers, which check
+	// which of them reach each other. Default ":9483"; "off" for none.
+	PeerListen string `toml:"peer_listen,omitempty"`
+	// PeerAdvertise are the addresses other workers reach it at; by
+	// default its own, but loopback and link-local.
+	PeerAdvertise []string `toml:"peer_advertise,omitempty"`
 	// CacheDisk sizes this worker's cache disks, for the classes with
 	// cache_disk; they are kept under StateDir/cache.
 	CacheDisk *fleet.CacheDisk `toml:"cache_disk,omitempty"`

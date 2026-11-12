@@ -26,6 +26,8 @@ type Facts struct {
 	Protocol int `json:"protocol"`
 	// Hosts are a joining controller's addresses, for its certificate.
 	Hosts []string `json:"hosts,omitempty"`
+	// PeerAddrs are where it answers other workers.
+	PeerAddrs []string `json:"peer_addrs,omitempty"`
 }
 
 // Class is a class a worker runs: its name and spec.
@@ -73,6 +75,9 @@ type Report struct {
 	// Caches are the cache disks it keeps (cachedisk.Scope.Dirs' names):
 	// the controllers place a job where its cache is.
 	Caches []string `json:"caches,omitempty"`
+	// Neighbours are the workers it reaches, of those the controllers
+	// name to it.
+	Neighbours []Neighbour `json:"neighbours,omitempty"`
 }
 
 // VMInfo is one of a worker's VMs.
@@ -115,6 +120,8 @@ type StatusResponse struct {
 	// Verify, when later than the worker's last request, asks it to run
 	// its microVM checks again: fleetci fleet verify.
 	Verify time.Time `json:"verify,omitzero"`
+	// Peers are the other workers, for it to find which it reaches.
+	Peers []PeerHint `json:"peers,omitempty"`
 }
 
 // The update policies: how far a worker may update itself, set on the

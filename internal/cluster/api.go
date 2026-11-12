@@ -176,6 +176,7 @@ func (c *Controller) handleWorkerStatus(w http.ResponseWriter, r *http.Request, 
 	resp.UpdateGo = c.updateSlotLocked(wc)
 	resp.Version, resp.Protocol, resp.Artifacts = c.version, Protocol, c.artifacts
 	resp.Verify = c.verify
+	resp.Peers = c.peerHintsLocked(id.ID)
 	if wc.verify.After(resp.Verify) {
 		resp.Verify = wc.verify
 	}

@@ -404,7 +404,7 @@ func printStatus(out io.Writer, st cluster.Status) {
 	}
 	fmt.Fprintf(out, "controllers  %s\n\n", strings.Join(ctl, ", "))
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "WORKER\tVERSION\tSTATE\tBUDGET\tUSED\tCLASSES (room)\tVMS\tNOTE")
+	fmt.Fprintln(tw, "WORKER\tVERSION\tSTATE\tBUDGET\tUSED\tCLASSES (room)\tVMS\tNEIGHBOURS\tNOTE")
 	for _, w := range st.Workers {
 		var cls []string
 		for _, c := range w.Fit.Classes {
@@ -439,11 +439,26 @@ func printStatus(out io.Writer, st cluster.Status) {
 			notes = append(notes, "no "+n+": "+w.Fit.Refused[n])
 		}
 		note := strings.Join(notes, "; ")
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%d cpu %s\t%d cpu %s\t%s\t%s\t%s\n", w.ID, w.Facts.Version, w.State,
+		var near []string
+		for _, n := range w.Report.Neighbours {
+			near = append(near, n.ID+" "+roundRTT(n.RTT))
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%d cpu %s\t%d cpu %s\t%s\t%s\t%s\t%s\n", w.ID, w.Facts.Version, w.State,
 			w.Facts.CPUs, fleet.Size(w.Facts.MemoryMB), w.Report.UsedCPUs, fleet.Size(w.Report.UsedMemory),
-			strings.Join(cls, " "), strings.Join(jobs, ", "), note)
+			strings.Join(cls, " "), strings.Join(jobs, ", "), strings.Join(near, ", "), note)
 	}
 	tw.Flush()
+}
+
+// roundRTT shows a round trip to two significant digits: 0.31ms, 12ms.
+func roundRTT(d time.Duration) string {
+	switch {
+	case d < time.Millisecond:
+		return d.Round(10 * time.Microsecond).String()
+	case d < 10*time.Millisecond:
+		return d.Round(100 * time.Microsecond).String()
+	}
+	return d.Round(time.Millisecond).String()
 }
 
 // printChecks prints each worker's microVM checks, as it last reported them.

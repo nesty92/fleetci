@@ -457,7 +457,8 @@ job, which then starts from what that worker has.
 The writers' rules are the controllers', as on one machine. Each worker
 writes only its own copy of a cache, so two workers can hold different
 versions of one key until their jobs catch up. Workers don't copy caches
-to each other yet.
+to each other yet; they already find which of them reach each other
+([Neighbours](design/ha.md#neighbours-which-workers-reach-each-other)).
 
 ## For coding agents
 

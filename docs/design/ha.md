@@ -153,8 +153,9 @@ single machine is both, as `fleetci serve` is today:
 
 The fleet's API is HTTPS and JSON, as Kubernetes's is between the kubelet
 and the API server: versioned paths under `/v1`, HTTP/2, mutual TLS, one
-TCP port (9481). Workers dial every controller; nothing dials a worker, so
-workers can be behind any NAT. Controllers dial each other on the same
+TCP port (9481). Workers dial every controller; no controller dials a
+worker, so workers can be behind any NAT. (Workers on one network also
+check which of them reach each other: see Neighbours, below.) Controllers dial each other on the same
 port. It works through HTTP proxies, and `curl --cert` can read it.
 
 It is declarative. The leader never calls a worker; it writes
@@ -215,6 +216,38 @@ certificate against the fleet's CA, never the system's.
   controllers trust both and sign with the new one, workers pick up the
   new chain on renewal, and the old CA is dropped once no live
   certificate uses it.
+
+#### Neighbours: which workers reach each other
+
+Workers on one network can later copy caches to each other, directly,
+without anything passing through a controller or another network. For
+that, each worker first finds which of the others it reaches:
+
+- **Each worker answers its peers** on its own port, `peer_listen` in
+  `worker.toml` (`:9483` by default; `"off"` for none). It tells the
+  controllers where in its report: `peer_advertise`, or by default every
+  address it has but loopback and link-local.
+- **The controllers name the peers.** Each status answer lists the other
+  workers that report, answer peers and aren't revoked: their ids, their
+  certificates' serials and their addresses.
+- **Each worker checks them** with mutual TLS, the fleet's certificates
+  on both sides. It believes a peer only if it shows a worker
+  certificate from the fleet's CA, with the id and the serial the
+  controllers named, so a revoked or an old certificate doesn't pass.
+  Each worker answers only the peers the controllers named to it.
+- **It times them:** the best of three requests on an open connection,
+  per address. It checks again when the controllers name others, and
+  every 30 s. What it reaches, and how fast, is in its report, and
+  `fleetci fleet status` shows it:
+
+```
+WORKER  VERSION  STATE  …  NEIGHBOURS  NOTE
+w1      v0.8.0   Ready  …  w2 40µs
+w2      v0.8.0   Ready  …  w1 40µs
+```
+
+A worker that reaches none of the others works as before. Nothing is
+copied between workers yet.
 
 #### GitHub
 
