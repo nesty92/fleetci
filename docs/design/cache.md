@@ -5,6 +5,11 @@ S3 cache behind it, saved through (#18). What comes behind the disk next,
 and when it is written, is open. This page keeps what the reference
 projects and our own tests found, so it isn't learned twice.
 
+The rule: a workflow written for GitHub's or GitLab's own runners runs
+unchanged and only gets faster. Nothing a user has to add, rename or turn
+on; `actions/cache`, `setup-*` caches, BuildKit's `type=gha` and GitLab's
+`cache:` all land on the disk as they are.
+
 ## What the reference projects do
 
 | Project | What it does | What fleetci takes |
