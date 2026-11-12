@@ -429,6 +429,31 @@ func TestL1CacheSummary(t *testing.T) {
 	}
 }
 
+// The disk's copy of a key is served only for the entry the cache server
+// names: a disk that started from the default branch's may hold the same
+// key and version of another ref's scope.
+func TestL1CacheServesOnlyTheSameEntry(t *testing.T) {
+	l2 := newFakeL2(t)
+	store := filepath.Join(t.TempDir(), "actions")
+	l1 := startL1(t, l2.srv.URL+"/", store, true)
+	l2.put("deps", "v1", []byte("this ref's"))
+	restore(t, l1, "deps", nil)
+	metas, _ := filepath.Glob(filepath.Join(store, "*.json"))
+	if len(metas) != 1 {
+		t.Fatalf("%d entries on the disk", len(metas))
+	}
+	// As if the disk came from another ref, whose entry this was.
+	if err := os.WriteFile(metas[0], []byte(`{"key":"deps","version":"v1","size":10,"src":"elsewhere/blob/x"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, data, _ := restore(t, l1, "deps", nil); string(data) != "this ref's" || l2.gets.Load() != 2 {
+		t.Fatalf("got %q after %d downloads; want the cache server's, downloaded again", data, l2.gets.Load())
+	}
+	if _, _, _ = restore(t, l1, "deps", nil); l2.gets.Load() != 2 {
+		t.Fatalf("%d downloads; the copy is this entry's now", l2.gets.Load())
+	}
+}
+
 func TestL1CacheFetchesInRanges(t *testing.T) {
 	l2 := newFakeL2(t)
 	store := filepath.Join(t.TempDir(), "actions")

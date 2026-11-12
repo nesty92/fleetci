@@ -136,7 +136,7 @@ func (b *Backend) AttachCache(ctx context.Context, vm VM, scope cachedisk.Scope)
 	b.caches[id] = cv
 	b.mu.Unlock()
 	st := lease.Start()
-	b.log.Info("cache attached", "vm", id, "ref", scope.Ref, "key", scope.Key, "writer", scope.Writer, "from", lease.From(), "took", time.Since(start).Round(time.Millisecond).String())
+	b.log.Info("cache attached", "vm", id, "ref", scope.Ref, "key", scope.Key, "job", scope.Job, "writer", scope.Writer, "from", lease.From(), "took", time.Since(start).Round(time.Millisecond).String())
 	return &st, nil
 }
 

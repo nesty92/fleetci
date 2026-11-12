@@ -47,8 +47,11 @@ type Scope struct {
 	// Ref is the job's ref. A job that isn't a writer has caches of its
 	// ref's own.
 	Ref string `json:"ref"`
-	// Key names the cache within the project; "" is Ref.
+	// Key names the cache within the project; "" is Ref and Job: each job
+	// has its own, so jobs that run at once don't undo each other's.
 	Key string `json:"key,omitempty"`
+	// Job is the job's name, matrix values included.
+	Job string `json:"job,omitempty"`
 	// Writer: the job writes the project's shared cache of Key.
 	Writer bool `json:"writer"`
 	// From are the shared caches a cache with nothing yet starts from, the
@@ -58,9 +61,23 @@ type Scope struct {
 
 func (s Scope) name() string {
 	if s.Key == "" {
-		return s.Ref
+		return s.named(s.Ref)
 	}
 	return s.Key
+}
+
+// named is the cache of ref for the scope's job; a Key the job chose is
+// its own and names the cache whole.
+func (s Scope) named(ref string) string {
+	if s.Key != "" || s.Job == "" {
+		return ref
+	}
+	return ref + "\x00" + s.Job
+}
+
+// Label is the cache's name for people.
+func (s Scope) Label() string {
+	return strings.ReplaceAll(s.name(), "\x00", " · ")
 }
 
 func hashKey(parts ...string) string {
@@ -89,10 +106,16 @@ type source struct{ dir, name string }
 func (s Scope) sources() []source {
 	out := []source{{s.key(), ""}}
 	seen := map[string]bool{s.key(): true}
-	for _, k := range append([]string{s.name()}, s.From...) {
+	names := []string{s.name()}
+	for _, k := range s.From {
+		if k != "" {
+			names = append(names, s.named(k))
+		}
+	}
+	for _, k := range names {
 		if d := s.shared(k); k != "" && !seen[d] {
 			seen[d] = true
-			out = append(out, source{d, k})
+			out = append(out, source{d, strings.ReplaceAll(k, "\x00", " · ")})
 		}
 	}
 	return out
@@ -269,7 +292,7 @@ func (s *Store) Begin(scope Scope) (*Lease, error) {
 		// Its flattening failed, or is behind: this job goes without,
 		// and the next gets the flattened chain.
 		s.flattenLater(from.dir, parent.layer())
-		return nil, fmt.Errorf("cache: %s is %d layers, too deep for a VM; it is being flattened for the next job", parent.Scope.name(), len(parent.Chain))
+		return nil, fmt.Errorf("cache: %s is %d layers, too deep for a VM; it is being flattened for the next job", parent.Scope.Label(), len(parent.Chain))
 	}
 	if parent != nil {
 		s.keepShallow(from.dir, parent)
@@ -308,7 +331,7 @@ func (s *Store) readable(scope Scope) (*head, *source) {
 			continue
 		}
 		if size := s.chainSize(h.Chain); size > s.cfg.MaxPerCache {
-			s.log.Info("cache: over max_per_cache, starting again", "cache", h.Scope.name(), "size", size)
+			s.log.Info("cache: over max_per_cache, starting again", "cache", h.Scope.Label(), "size", size)
 			continue
 		}
 		return h, &src
@@ -416,7 +439,7 @@ func (s *Store) flatten(key, layer string) {
 			_ = os.Remove(dst)
 			return
 		}
-		s.log.Info("cache: flattened", "cache", h.Scope.name(), "took", s.now().Sub(start).Round(time.Second).String())
+		s.log.Info("cache: flattened", "cache", h.Scope.Label(), "took", s.now().Sub(start).Round(time.Second).String())
 		s.sweep()
 	}
 }

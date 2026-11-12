@@ -159,6 +159,45 @@ func TestAbortKeepsParent(t *testing.T) {
 	}
 }
 
+// Jobs of one pipeline run at once, each on a disk of its own: none undoes
+// another's. A merge request's job starts from the same job's on main.
+func TestEachJobHasItsOwn(t *testing.T) {
+	img := &fakeImages{}
+	s := open(t, Config{}, img)
+	build, test := main_, main_
+	build.Job, test.Job = "build", "test (node 24)"
+	if build.key() == test.key() {
+		t.Fatal("two jobs share a disk")
+	}
+	a, _ := s.Begin(build)
+	b, _ := s.Begin(test)
+	if err := s.Commit(a); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Commit(b); err != nil {
+		t.Fatal(err)
+	}
+	for i, sc := range []Scope{build, test} {
+		l := []*Lease{a, b}[i]
+		if h, err := s.readHead(sc.key()); err != nil || h.layer() != l.Layer() {
+			t.Fatalf("%s lost its layer", sc.Label())
+		}
+	}
+	feature := mr
+	feature.Job = "test (node 24)"
+	l, _ := s.Begin(feature)
+	if l.From() != "main · test (node 24)" || img.parent[l.Layer()] != b.Layer() {
+		t.Fatalf("MR's test job from %q, parent %q; want main's test job's", l.From(), img.parent[l.Layer()])
+	}
+	s.Abort(l)
+	// A key the job chose names the disk whole, whatever the job.
+	keyed := build
+	keyed.Key = "deps"
+	if keyed.Label() != "deps" {
+		t.Fatalf("keyed disk is %q", keyed.Label())
+	}
+}
+
 func TestLastFinisherWins(t *testing.T) {
 	img := &fakeImages{}
 	s := open(t, Config{}, img)

@@ -54,6 +54,9 @@ type Job struct {
 	Default bool
 	// Review says the job is a merge or pull request's.
 	Review bool
+	// Name is the job's name in its pipeline, a matrix job's values
+	// included: each job has disks of its own.
+	Name string
 }
 
 // DefaultWriters are the rules when the config sets none.
@@ -166,7 +169,7 @@ func Describe(s Scope, st Start) string {
 	if s.Writer {
 		whose = "shared with the project"
 	}
-	msg := "Cache disk " + strconv.Quote(s.name()) + " (" + whose + ")"
+	msg := "Cache disk " + strconv.Quote(s.Label()) + " (" + whose + ")"
 	switch {
 	case st.Empty:
 		msg += ": empty, its first job"
@@ -207,6 +210,7 @@ func (p *Policy) Scope(r Request) Scope {
 		Project:  r.Project,
 		Ref:      ref,
 		Key:      r.Key,
+		Job:      r.Name,
 		Writer:   r.Fork == "" && p.Writer(r.Path, r.Job),
 		From:     r.From,
 	}

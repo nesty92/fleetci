@@ -54,6 +54,9 @@ def log(*a):
 STATS = {"hit": [0, 0], "fill": [0, 0, 0.0], "remote": 0, "none": 0,
          "saved": [0, 0], "saved_remote": 0}
 STATS_MU = threading.Lock()
+# The cache server's entry each upload goes to, by entry id.
+UPLOADS = {}
+UPLOADS_MU = threading.Lock()
 
 
 def count(what, size=0, secs=0.0):
@@ -70,7 +73,7 @@ def count(what, size=0, secs=0.0):
 
 def summary():
     def mb(n):
-        return "%d MB" % round(n / 1e6)
+        return "%d MB" % round(n / 1e6) if n >= 1e6 else "%d KB" % max(1, round(n / 1e3))
 
     with STATS_MU:
         s = {k: (list(v) if isinstance(v, list) else v) for k, v in STATS.items()}
@@ -132,12 +135,29 @@ def have(eid):
     return os.path.isfile(blob_path(eid)) and os.path.isfile(meta_path(eid))
 
 
-def commit(tmp, key, version):
+def src_of(url):
+    """The cache server's entry an URL names, without its signature."""
+    p = urllib.parse.urlsplit(url)
+    return p.netloc + p.path
+
+
+def same_entry(eid, url):
+    """The disk's copy is of the entry the cache server names now. The same
+    key and version may be another entry in another ref's scope: a copy of
+    the default branch's isn't served for a pull request's own."""
+    try:
+        with open(meta_path(eid)) as f:
+            return json.load(f).get("src") == src_of(url)
+    except (OSError, ValueError):
+        return False
+
+
+def commit(tmp, key, version, src=""):
     """Moves a whole archive into the store, then trims the store."""
     eid = entry_id(key, version)
     size = os.path.getsize(tmp)
     with open(meta_path(eid) + ".tmp", "w") as f:
-        json.dump({"key": key, "version": version, "size": size, "saved": time.time()}, f)
+        json.dump({"key": key, "version": version, "size": size, "saved": time.time(), "src": src}, f)
     os.replace(tmp, blob_path(eid))
     os.replace(meta_path(eid) + ".tmp", meta_path(eid))
     log("kept", key, size, "bytes")
@@ -477,7 +497,7 @@ class Handler(BaseHTTPRequestHandler):
             count("remote")
             return self.reply(status, headers, body)
         eid = entry_id(m, version)
-        if have(eid):
+        if have(eid) and same_entry(eid, url):
             log("hit", m)
             local = self.local_url("/fleetci/l1/" + eid)
         else:
@@ -519,7 +539,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 start = time.time()
                 if fetch_ranges(url, tmp) is not None:
-                    commit(tmp, key, version)
+                    commit(tmp, key, version, src_of(url))
                     secs = time.time() - start
                     log("fetched %s in %.1fs" % (key, secs))
                     count("fill", os.path.getsize(blob_path(eid)), secs)
@@ -552,7 +572,7 @@ class Handler(BaseHTTPRequestHandler):
         if tmp is not None and tee is not None:
             try:
                 if whole:
-                    commit(tmp, key, version)
+                    commit(tmp, key, version, src_of(url))
                     kept = True
                     count("fill", os.path.getsize(blob_path(eid)), time.time() - start)
                 else:
@@ -578,6 +598,8 @@ class Handler(BaseHTTPRequestHandler):
         eid = entry_id(req.get("key", ""), req.get("version", ""))
         shutil.rmtree(os.path.join(STORE, "tmp", eid), ignore_errors=True)
         out.pop("signedUploadUrl", None)
+        with UPLOADS_MU:
+            UPLOADS[eid] = src_of(url)
         out["signed_upload_url"] = self.local_url("/fleetci/put/" + link(url, eid))
         self.reply_json(status, headers, out)
 
@@ -677,7 +699,9 @@ class Handler(BaseHTTPRequestHandler):
                 want = int(req.get("size_bytes") or req.get("sizeBytes") or -1)
                 size = os.path.getsize(whole)
                 if want < 0 or size == want:
-                    commit(whole, key, version)
+                    with UPLOADS_MU:
+                        src = UPLOADS.pop(entry_id(key, version), "")
+                    commit(whole, key, version, src)
                     kept = True
                     count("saved", size)
             except (OSError, ValueError) as e:

@@ -302,10 +302,11 @@ type cacheFacts struct {
 	headRepo      string // the repo the branch is in: a fork's for a pull request from one
 	protected     bool
 	tag           bool
+	job           string // its name, a matrix job's values included
 }
 
 func (d *Dispatcher) cacheFacts(ctx context.Context, repo string, j job) (cacheFacts, error) {
-	f := cacheFacts{repo: repo}
+	f := cacheFacts{repo: repo, job: j.Name}
 	r, err := d.repoInfos.get(repo, repoFor, func() (repoInfo, error) { return d.gh.repo(ctx, repo) })
 	if err != nil {
 		return f, err
@@ -397,6 +398,7 @@ func cacheScope(p *cachedisk.Policy, instance string, f cacheFacts) cachedisk.Sc
 			Protected: f.protected && !review, // a pull request runs the merge, not its branch
 			Default:   !f.tag && f.branch == f.defaultBranch,
 			Review:    review,
+			Name:      f.job,
 		},
 	}
 	if isFork(f) {

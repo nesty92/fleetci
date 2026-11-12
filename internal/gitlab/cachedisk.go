@@ -50,6 +50,7 @@ func gitlabJob(build *common.Build) cachedisk.Job {
 		Tag:       build.GitInfo.RefType == spec.RefTypeTag,
 		Protected: build.IsProtected(),
 		Default:   ref != "" && ref == gitlabDefaultBranch(build),
+		Name:      build.JobInfo.Name,
 		Review: slices.ContainsFunc(build.GitInfo.Refspecs, func(s string) bool {
 			return strings.Contains(s, "refs/merge-requests/")
 		}),
