@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -592,7 +593,9 @@ func (c *Controller) fit(f Facts) Fit {
 		fit.Reach = append(fit.Reach, "https://github.com", "https://api.github.com", "https://pipelines.actions.githubusercontent.com")
 	}
 	if c.cfg.GitLab != nil {
-		fit.Reach = append(fit.Reach, strings.TrimRight(c.cfg.GitLab.URL, "/")+"/")
+		// The URL gitlab-runner defaults to, as the runners do: a
+		// config_file alone sets none here.
+		fit.Reach = append(fit.Reach, strings.TrimRight(cmp.Or(c.cfg.GitLab.URL, "https://gitlab.com"), "/")+"/")
 	}
 	return fit
 }

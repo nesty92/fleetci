@@ -10,8 +10,18 @@ import (
 	"github.com/hashicorp/go-hclog"
 
 	"github.com/nesty92/fleetci/internal/cachedisk"
+	"github.com/nesty92/fleetci/internal/gitlab"
 	"github.com/nesty92/fleetci/internal/source"
 )
+
+func TestFitReachesGitLab(t *testing.T) {
+	for url, want := range map[string]string{"": "https://gitlab.com/", "https://gl.example/": "https://gl.example/"} {
+		c := &Controller{cfg: &ControllerConfig{GitLab: &gitlab.Config{URL: url, ConfigFile: "config.toml"}}}
+		if got := c.fit(Facts{}).Reach; len(got) != 1 || got[0] != want {
+			t.Errorf("url %q: reach %q, want %q", url, got, want)
+		}
+	}
+}
 
 // cacheFleet is a controller with workers w1 and w2, as their reports say.
 func cacheFleet(t *testing.T, w1, w2 Report) *Controller {
