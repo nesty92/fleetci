@@ -151,8 +151,9 @@ func (f *fakeL2) serve(w http.ResponseWriter, r *http.Request) {
 
 const svcPath = "/twirp/github.actions.results.api.v1.CacheService/"
 
-// startL1 runs l1cache.py in front of l2, keeping archives in store.
-func startL1(t *testing.T, l2, store string, anyStore bool) string {
+// startL1 runs l1cache.py in front of l2, keeping archives in store, with
+// opts after its arguments, e.g. "remote=off".
+func startL1(t *testing.T, l2, store string, anyStore bool, opts ...string) string {
 	t.Helper()
 	py, err := exec.LookPath("python3")
 	if err != nil {
@@ -173,6 +174,7 @@ func startL1(t *testing.T, l2, store string, anyStore bool) string {
 	if anyStore {
 		args = append(args, "any")
 	}
+	args = append(args, opts...)
 	cmd := exec.Command(py, args...)
 	var logs bytes.Buffer
 	cmd.Stderr = &logs

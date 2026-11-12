@@ -48,11 +48,11 @@ GitHub's order, pinned by their tests
 4. Keys compare byte for byte: case, accents and trailing spaces all count,
    and `%`, `_` and `\` in a restore key are literal, not patterns.
 
-fleetci's `local_match` (internal/github/l1cache.py) doesn't follow 2 and 3
-yet: it never tries the primary key as a prefix, and it takes the newest
-entry a restore key prefixes even when one equals it. It decides only when
-GitHub can't be reached today, but decides every restore with GitHub's
-cache off. Fix it with their cases as tests.
+fleetci's `local_match` (internal/github/l1cache.py) follows this order,
+with their cases as tests (`TestL1CacheDiskOnly`). It reads the scopes from
+the job's own token without checking its signature: it runs inside the job
+and only decides what the job's own disk answers. Entries filled from
+GitHub carry no scope and come after the token's scopes.
 
 ### The protocol's corners
 
@@ -70,13 +70,14 @@ cache off. Fix it with their cases as tests.
   capability; only its hash is stored, and a block without it is a 403.
 - **Calls come as JSON or as protobuf.** The request types carry a
   `metadata` field the server doesn't declare, which it must ignore.
-  fleetci's service only reads JSON; which clients send protobuf is to
-  check.
+  fleetci's service only reads JSON, which is what `@actions/cache` and
+  BuildKit's client (`cache_v2.go`) send.
 - **A download URL is a promise.** BuildKit fails the build on a 404 after
   a hit; it can't fall back to a miss. So before answering a hit, check the
   data is there, and drop the entry and match again if it isn't.
 - **Ranges.** Serve `Range` on a whole object; clients go by the status
-  (206 or 200), not `Accept-Ranges`.
+  (206 or 200), not `Accept-Ranges`. BuildKit reads at offsets through
+  Azure's SDK, which sends `x-ms-range`; the disk's copies answer both.
 - **Passthrough** forwards everything else byte for byte: drop hop-by-hop
   headers and `Accept-Encoding`, buffer the body so a 307 can replay it,
   and never log the query, which carries signatures.
@@ -135,5 +136,6 @@ GitLab's has no such limit: the runner uploads it.
 
 - Uploading after the job, which needs a store fleetci writes itself on
   GitHub, the way the GitLab runner writes S3.
-- A setting that turns the cache behind the disk off, for both forges.
-- Fixing `local_match`'s order, the 409, and `x-ms-request-id`.
+- A setting that turns the cache behind the disk off, for both forges. The
+  in-VM service has it (`remote=off`); the config and GitLab's side don't
+  yet.

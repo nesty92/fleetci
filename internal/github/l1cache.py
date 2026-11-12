@@ -12,16 +12,22 @@
 # go on as without it. When the L2 can't be reached, a restore is answered
 # from the disk, as the L2 would have chosen among the same entries.
 #
-# Usage: python3 -I l1cache.py LISTEN_PORT UPSTREAM_URL STORE_DIR [any]
+# With "remote=off" the cache server isn't used for actions/cache at all:
+# a restore is answered from the disk alone, as the cache server would
+# have chosen among the same entries, and a save stays on the disk. The
+# job's other calls, artifacts', still go to it.
+#
+# Usage: python3 -I l1cache.py LISTEN_PORT UPSTREAM_URL STORE_DIR [any] [remote=off]
 # "any" stores in STORE_DIR whether or not its parent is a mount (tests).
-import hashlib, http.client, json, os, re, secrets, shutil, socket, sys, threading, time
+import base64, hashlib, http.client, json, os, re, secrets, shutil, socket, sys, threading, time, uuid
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(sys.argv[1])
 UPSTREAM = sys.argv[2].rstrip("/")
 STORE = sys.argv[3]
-ANY_STORE = len(sys.argv) > 4 and sys.argv[4] == "any"
+ANY_STORE = "any" in sys.argv[4:]
+REMOTE_OFF = "remote=off" in sys.argv[4:]
 SVC = "/twirp/github.actions.results.api.v1.CacheService/"
 CHUNK = 1 << 20
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -123,6 +129,26 @@ def entry_id(key, version):
     return hashlib.sha256((version + "\n" + key).encode()).hexdigest()[:32]
 
 
+def token_scopes(headers):
+    """The cache scopes the job's token grants, as GitHub's cache server
+    reads them: (the scope a save goes to, the scopes a restore searches in
+    order). The token's "ac" claim lists {"Scope": ref, "Permission": bits},
+    1 to read and 2 to write. (None, None) when the token doesn't say.
+
+    The token isn't verified: this runs in the job, for the job's own
+    token, and only decides what the job's own disk answers it."""
+    try:
+        auth = headers.get("Authorization") or ""
+        payload = auth.split(" ", 1)[1].split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        grants = json.loads(claims["ac"])
+        write = next((g["Scope"] for g in grants if g["Permission"] & 2), None)
+        reads = [g["Scope"] for g in sorted(grants, key=lambda g: -g["Permission"]) if g["Permission"] & 1]
+        return write, reads or None
+    except (IndexError, KeyError, TypeError, ValueError):
+        return None, None
+
+
 def blob_path(eid):
     return os.path.join(STORE, eid + ".blob")
 
@@ -152,12 +178,14 @@ def same_entry(eid, url):
         return False
 
 
-def commit(tmp, key, version, src=""):
-    """Moves a whole archive into the store, then trims the store."""
+def commit(tmp, key, version, src="", scope=None):
+    """Moves a whole archive into the store, then trims the store. scope is
+    the ref's scope a save went to, None when unknown."""
     eid = entry_id(key, version)
     size = os.path.getsize(tmp)
     with open(meta_path(eid) + ".tmp", "w") as f:
-        json.dump({"key": key, "version": version, "size": size, "saved": time.time(), "src": src}, f)
+        json.dump({"key": key, "version": version, "size": size, "saved": time.time(), "src": src,
+                   "scope": scope}, f)
     os.replace(tmp, blob_path(eid))
     os.replace(meta_path(eid) + ".tmp", meta_path(eid))
     log("kept", key, size, "bytes")
@@ -188,9 +216,12 @@ def trim():
         log("trim:", e)
 
 
-def local_match(key, restore_keys, version):
-    """What GitHub would restore, among the disk's entries: the key itself,
-    else each restore key in turn, the newest entry it prefixes."""
+def local_match(key, restore_keys, version, scopes=None):
+    """What GitHub would restore, among the disk's entries: scope by scope,
+    in the order the token gives, the key and then each restore key, each
+    first exactly and else as the prefix of the newest entry. Keys compare
+    byte for byte. Entries of no known scope come after the token's scopes;
+    without scopes, every entry is one scope."""
     try:
         metas = []
         for n in os.listdir(STORE):
@@ -201,13 +232,20 @@ def local_match(key, restore_keys, version):
                     metas.append(m)
     except (OSError, ValueError):
         return None
-    for m in metas:
-        if m["key"] == key:
-            return m["key"]
-    for rk in restore_keys:
-        hits = [m for m in metas if m["key"].startswith(rk)]
-        if hits:
-            return max(hits, key=lambda m: m.get("saved", 0))["key"]
+    if scopes:
+        groups = [[m for m in metas if m.get("scope") == s] for s in scopes]
+        groups.append([m for m in metas if not m.get("scope")])
+    else:
+        groups = [metas]
+    newest = lambda ms: max(ms, key=lambda m: m.get("saved", 0))["key"]
+    for ms in groups:
+        for k in [key] + list(restore_keys):
+            exact = [m for m in ms if m["key"] == k]
+            if exact:
+                return newest(exact)
+            prefixed = [m for m in ms if m["key"].startswith(k)]
+            if prefixed:
+                return newest(prefixed)
     return None
 
 
@@ -471,11 +509,20 @@ class Handler(BaseHTTPRequestHandler):
         key, version = req.get("key", ""), req.get("version", "")
         rks = req.get("restore_keys") or req.get("restoreKeys") or []
         disk = store_ok()
+        _, scopes = token_scopes(self.headers)
+        if REMOTE_OFF:
+            m = local_match(key, rks, version, scopes) if disk else None
+            if m is None:
+                count("none")
+                return self.reply_json(200, [], {"ok": False})
+            log("hit", m)
+            return self.reply_json(200, [], {"ok": True, "matched_key": m,
+                                             "signed_download_url": self.local_url("/fleetci/l1/" + entry_id(m, version))})
         try:
             status, headers, body = self.call(raw)
         except (ConnectionError, socket.timeout, OSError, http.client.HTTPException) as e:
             # The L2 is out of reach: the disk answers, if it can.
-            m = local_match(key, rks, version) if disk else None
+            m = local_match(key, rks, version, scopes) if disk else None
             log("L2 unreachable (%s): restoring %s from the disk" % (e, m) if m else "L2 unreachable: %s" % e)
             if m is None:
                 return self.reply(502, [], str(e).encode())
@@ -514,17 +561,45 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(404, [], b"not on the disk")
         with f:
             size = os.fstat(f.fileno()).st_size
-            if hit:
-                count("hit", size)
             try:
                 os.utime(blob_path(eid))
             except OSError:
                 pass
-            self.send_response(200)
+            # BuildKit reads at offsets, through Azure's SDK (x-ms-range);
+            # one range is served, anything else whole.
+            m = re.fullmatch(r"\s*bytes=(\d*)-(\d*)\s*",
+                             self.headers.get("x-ms-range") or self.headers.get("Range") or "")
+            if hit and (not m or m.group(1) in ("", "0")):
+                count("hit", size)  # once per restore, not per range
+            start, end = 0, size - 1
+            if m and (m.group(1) or m.group(2)):
+                if m.group(1):
+                    start = int(m.group(1))
+                    end = min(int(m.group(2)), size - 1) if m.group(2) else size - 1
+                else:
+                    start = max(0, size - int(m.group(2)))
+                if start >= size or end < start:
+                    self.send_response(416)
+                    self.send_header("Content-Range", "bytes */%d" % size)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                self.send_response(206)
+                self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, size))
+            else:
+                self.send_response(200)
+            self.send_header("Accept-Ranges", "bytes")
             self.send_header("Content-Type", "application/octet-stream")
-            self.send_header("Content-Length", str(size))
+            self.send_header("Content-Length", str(end - start + 1))
             self.end_headers()
-            shutil.copyfileobj(f, self.wfile, CHUNK)
+            f.seek(start)
+            left = end - start + 1
+            while left > 0:
+                b = f.read(min(CHUNK, left))
+                if not b:
+                    break
+                self.wfile.write(b)
+                left -= len(b)
 
     def fill(self, token, q):
         v = linked(token)
@@ -585,6 +660,16 @@ class Handler(BaseHTTPRequestHandler):
     def create(self):
         raw = b"".join(self.body_chunks())
         req = json.loads(raw or b"{}")
+        if REMOTE_OFF:
+            eid = entry_id(req.get("key", ""), req.get("version", ""))
+            if not store_ok():
+                return self.reply_json(200, [], {"ok": False, "message": "no cache disk"})
+            if have(eid) and self.saved_in_scope(eid):
+                # An entry never changes once saved; GitHub's answer.
+                return self.reply_json(409, [], {"code": "already_exists",
+                                                 "msg": "cache entry with the same key, version, and scope already exists"})
+            shutil.rmtree(os.path.join(STORE, "tmp", eid), ignore_errors=True)
+            return self.reply_json(200, [], {"ok": True, "signed_upload_url": self.local_url("/fleetci/put/" + link(None, eid))})
         status, headers, body = self.call(raw)
         if status != 200 or not store_ok():
             return self.reply(status, headers, body)
@@ -611,17 +696,20 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(404, [], b"no such upload")
         url, eid = v
         extra = urllib.parse.urlencode({k: v[0] for k, v in q.items()})
-        if extra:
+        if extra and url is not None:
             url += ("&" if "?" in url else "?") + extra
         comp = q.get("comp", [""])[0]
         d = os.path.join(STORE, "tmp", eid)
         if comp == "blocklist":
             raw = b"".join(self.body_chunks())
-            conn, resp = self.upstream("PUT", url, body=raw)
-            try:
-                status, headers, body = resp.status, resp.getheaders(), resp.read()
-            finally:
-                conn.close()
+            if url is None:
+                status, headers, body = 201, [], b""
+            else:
+                conn, resp = self.upstream("PUT", url, body=raw)
+                try:
+                    status, headers, body = resp.status, resp.getheaders(), resp.read()
+                finally:
+                    conn.close()
             if status < 300 and os.path.isdir(d):
                 ids = [m.group(2) for m in re.finditer(rb"<(Latest|Committed|Uncommitted)>([^<]*)</\1>", raw)]
                 try:
@@ -633,13 +721,17 @@ class Handler(BaseHTTPRequestHandler):
                 except OSError as e:
                     log("not keeping:", e)
                     shutil.rmtree(d, ignore_errors=True)
-            return self.reply(status, headers, body)
+            return self.put_reply(status, headers, body)
         if comp == "block":
             name = "block-" + hashlib.sha1(q.get("blockid", [""])[0].encode()).hexdigest()
         elif comp == "":
             name = "whole"
+        elif url is None:
+            return self.reply(400, [], b"not an upload")
         else:
             return self.passthrough_to("PUT", url)
+        if url is None:
+            return self.keep(d, name)
         tee = None
         if store_ok():
             try:
@@ -673,7 +765,40 @@ class Handler(BaseHTTPRequestHandler):
                     os.replace(os.path.join(d, name + ".part"), os.path.join(d, name))
             except OSError as e:
                 log("not keeping:", e)
+        self.put_reply(status, headers, body)
+
+    def put_reply(self, status, headers, body):
+        """An upload's answer, with the request id Azure's would carry:
+        BuildKit's client intermittently fails without one."""
+        if not any(k.lower() == "x-ms-request-id" for k, _ in headers):
+            headers = list(headers) + [("x-ms-request-id", str(uuid.uuid4()))]
         self.reply(status, headers, body)
+
+    def saved_in_scope(self, eid):
+        """The disk's entry is in the scope this job saves to. A pull
+        request's disk starts with its base branch's entries, and the pull
+        request may save the same key in its own scope, as on GitHub."""
+        write, _ = token_scopes(self.headers)
+        try:
+            with open(meta_path(eid)) as f:
+                scope = json.load(f).get("scope")
+        except (OSError, ValueError):
+            return True
+        return write is None or scope is None or scope == write
+
+    def keep(self, d, name):
+        """An upload with no cache server behind: to the disk alone."""
+        try:
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, name + ".part"), "wb") as f:
+                for c in self.body_chunks():
+                    f.write(c)
+            os.replace(os.path.join(d, name + ".part"), os.path.join(d, name))
+        except OSError as e:
+            log("not keeping:", e)
+            shutil.rmtree(d, ignore_errors=True)
+            return self.reply(500, [], str(e).encode())
+        self.put_reply(201, [], b"")
 
     def passthrough_to(self, method, url):
         conn, resp = self.upstream(method, url, chunks=self.body_chunks())
@@ -685,7 +810,10 @@ class Handler(BaseHTTPRequestHandler):
     def finalize(self):
         raw = b"".join(self.body_chunks())
         req = json.loads(raw or b"{}")
-        status, headers, body = self.call(raw)
+        if REMOTE_OFF:
+            status, headers, body = 200, [], json.dumps({"ok": True, "entry_id": "0"}).encode()
+        else:
+            status, headers, body = self.call(raw)
         key, version = req.get("key", ""), req.get("version", "")
         d = os.path.join(STORE, "tmp", entry_id(key, version))
         try:
@@ -701,11 +829,14 @@ class Handler(BaseHTTPRequestHandler):
                 if want < 0 or size == want:
                     with UPLOADS_MU:
                         src = UPLOADS.pop(entry_id(key, version), "")
-                    commit(whole, key, version, src)
+                    commit(whole, key, version, src, token_scopes(self.headers)[0])
                     kept = True
                     count("saved", size)
             except (OSError, ValueError) as e:
                 log("not keeping:", e)
+        if REMOTE_OFF and not kept:
+            shutil.rmtree(d, ignore_errors=True)
+            return self.reply_json(200, [], {"ok": False, "message": "not kept on the cache disk"})
         if ok and not kept:
             count("saved_remote")
         shutil.rmtree(d, ignore_errors=True)
