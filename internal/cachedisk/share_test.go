@@ -181,3 +181,21 @@ func TestPullNoRoom(t *testing.T) {
 		t.Fatalf("a failed copy left %d bytes", c.used())
 	}
 }
+
+// A neighbour's deep chain is flattened here as soon as it is copied, not
+// when a job finds it too deep.
+func TestPulledDeepChainIsFlattened(t *testing.T) {
+	a, b := open(t, Config{MaxDepth: 10}, &fakeImages{}), open(t, Config{MaxDepth: 3}, &fakeImages{})
+	main := Scope{Forge: "gitlab", Instance: "gitlab.com", Project: "1", Ref: "main", Writer: true}
+	for range 5 {
+		commitJob(t, a, main)
+	}
+	var got []string
+	if _, err := b.Pull(context.Background(), offerOf(t, a, main.key()), fetchFrom(a, &got)); err != nil {
+		t.Fatal(err)
+	}
+	b.Wait()
+	if h, _ := b.readHead(main.key()); len(h.Chain) != 1 {
+		t.Fatalf("copied chain of %d left deep", len(h.Chain))
+	}
+}

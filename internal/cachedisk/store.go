@@ -202,9 +202,14 @@ func Open(dir string, cfg Config, img Images, log hclog.Logger) (*Store, error) 
 	}
 	s := &Store{dir: dir, cfg: cfg.withDefaults(), img: img, log: log, now: time.Now,
 		leases: map[*Lease]struct{}{}, flattening: map[string]bool{}, pulling: map[string]bool{}}
-	// Layers a stopped fleetci left half-made.
+	// Layers a stopped fleetci left half-made, and chains it left deep.
 	s.mu.Lock()
 	s.sweep()
+	for _, key := range s.keys() {
+		if h, err := s.readHead(key); err == nil {
+			s.keepShallow(key, h)
+		}
+	}
 	s.mu.Unlock()
 	return s, nil
 }
@@ -267,6 +272,7 @@ func (s *Store) Begin(scope Scope) (*Lease, error) {
 		return nil, fmt.Errorf("cache: %s is %d layers, too deep for a VM; it is being flattened for the next job", parent.Scope.name(), len(parent.Chain))
 	}
 	if parent != nil {
+		s.keepShallow(from.dir, parent)
 		l.chain, l.from = append(l.chain, parent.Chain...), from
 		parent.Used = s.now()
 		if err := s.writeHead(from.dir, parent); err != nil {
@@ -326,9 +332,7 @@ func (s *Store) Commit(l *Lease) error {
 		_ = os.Remove(l.Layer())
 		return err
 	}
-	if len(h.Chain) > s.cfg.MaxDepth {
-		s.flattenLater(key, h.layer())
-	}
+	s.keepShallow(key, h)
 	s.sweep()
 	s.evict()
 	return nil
@@ -345,6 +349,19 @@ func (s *Store) Abort(l *Lease) {
 	delete(s.leases, l)
 	_ = os.Remove(l.Layer())
 }
+
+// keepShallow flattens the scope's chain in the background once it is
+// deeper than MaxDepth, well before a VM can't take it: whichever way the
+// chain got deep (a commit, a neighbour's copy, a restart that stopped a
+// flattening). s.mu is held.
+func (s *Store) keepShallow(key string, h *head) {
+	if len(h.Chain) > s.cfg.MaxDepth {
+		s.flattenLater(key, h.layer())
+	}
+}
+
+// flattenRetry is how long a failed flattening waits to try again.
+var flattenRetry = 30 * time.Second
 
 // flattenLater starts flattening a scope's chain up to layer, unless it is
 // already under way. s.mu is held.
@@ -377,17 +394,22 @@ func (s *Store) flatten(key, layer string) {
 	h, herr := s.readHead(key)
 	switch {
 	case err != nil:
-		s.log.Warn("cache: flattening failed", "err", err)
+		s.log.Warn("cache: flattening failed; trying again", "cache", key, "in", flattenRetry, "err", err)
 		_ = os.Remove(dst)
+		time.AfterFunc(flattenRetry, func() {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			if h, err := s.readHead(key); err == nil {
+				s.keepShallow(key, h)
+			}
+		})
 	case herr != nil:
 		// Evicted meanwhile.
 		_ = os.Remove(dst)
 	case h.layer() != layer:
 		// Committed over meanwhile: the new head, if it is still deep.
 		_ = os.Remove(dst)
-		if len(h.Chain) > s.cfg.MaxDepth {
-			s.flattenLater(key, h.layer())
-		}
+		s.keepShallow(key, h)
 	default:
 		h.Chain = []string{dst}
 		if err := s.writeHead(key, h); err != nil {

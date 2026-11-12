@@ -440,3 +440,47 @@ func TestHeldNamesDirs(t *testing.T) {
 		t.Fatalf("held %v; want main's, %s", held, dirs[2])
 	}
 }
+
+// A chain left deep by a stopped fleetci is flattened when the store opens,
+// before a job asks for it.
+func TestDeepChainFlattenedAtOpen(t *testing.T) {
+	s := open(t, Config{MaxDepth: 10}, &fakeImages{})
+	for range 5 {
+		run(t, s, main_)
+	}
+	again, err := Open(s.dir, Config{MaxDepth: 3, MinFree: 1}, &fakeImages{parent: map[string]string{}}, hclog.NewNullLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	again.Wait()
+	if h, _ := again.readHead(main_.key()); len(h.Chain) != 1 {
+		t.Fatalf("chain of %d after opening", len(h.Chain))
+	}
+}
+
+// A flattening that failed is tried again on its own, not at the next
+// job's commit.
+func TestFailedFlattenIsRetried(t *testing.T) {
+	defer func(d time.Duration) { flattenRetry = d }(flattenRetry)
+	flattenRetry = 10 * time.Millisecond
+	img := &fakeImages{flattenFail: errors.New("Failed to lock byte 100")}
+	s := open(t, Config{MaxDepth: 2}, img)
+	for range 3 {
+		run(t, s, main_)
+	}
+	s.Wait()
+	img.mu.Lock()
+	img.flattenFail = nil
+	img.mu.Unlock()
+	for end := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		s.mu.Lock()
+		h, _ := s.readHead(main_.key())
+		s.mu.Unlock()
+		if len(h.Chain) == 1 {
+			return
+		}
+		if time.Now().After(end) {
+			t.Fatalf("chain of %d: the failed flattening wasn't tried again", len(h.Chain))
+		}
+	}
+}

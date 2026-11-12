@@ -199,10 +199,13 @@ func (s *Store) Pull(ctx context.Context, o Offer, fetch Fetch) (int64, error) {
 	case lerr == nil:
 		used = local.Used
 	}
-	if err := s.writeHead(o.Key, &head{Scope: o.Scope, Chain: chain, Used: used, Committed: o.Committed}); err != nil {
+	h := &head{Scope: o.Scope, Chain: chain, Used: used, Committed: o.Committed}
+	if err := s.writeHead(o.Key, h); err != nil {
 		release()
 		return 0, err
 	}
+	// A neighbour's chain may be deep: flattened here before a job needs it.
+	s.keepShallow(o.Key, h)
 	release()
 	s.evict()
 	return need, nil
