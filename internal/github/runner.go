@@ -54,11 +54,33 @@ fi
 if [ -r /etc/os-release ]; then . /etc/os-release; fi
 if [ "${ID:-}" = ubuntu ]; then export ImageOS="ubuntu${VERSION_ID%%%%.*}"; fi
 cache='%[2]s'
-if [ -n "$cache" ]; then
+# With a cache disk, actions/cache goes through the L1 (l1cache.py), which
+# keeps the archives on the disk, in front of the cache server it would
+# have used. Without python3, or if it doesn't start, jobs go straight on.
+l1=
+if [ "$hook" = cache ] && command -v python3 >/dev/null 2>&1; then
+  cat > fleetci-l1cache.py <<'L1PY'
+%[5]s
+L1PY
+  mkdir -p _diag
+  nohup setsid python3 -I fleetci-l1cache.py %[6]d "${cache:-%[7]s}" /cache/actions >> _diag/fleetci-l1cache.log 2>&1 < /dev/null &
+  # The address the VM's containers reach it at too: Docker's bridge.
+  at=$(ip -4 -o addr show docker0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1)
+  i=0
+  while [ $i -lt 50 ]; do
+    if curl -fsS -o /dev/null -m 1 "http://127.0.0.1:%[6]d/fleetci/ping" 2>/dev/null; then
+      l1="http://${at:-127.0.0.1}:%[6]d/"
+      break
+    fi
+    i=$((i+1))
+    sleep 0.1
+  done
+fi
+if [ -n "$l1$cache" ]; then
   # The runner sets ACTIONS_RESULTS_URL for each job from GitHub's answer.
   # Renaming the variable it writes (same length, UTF-16) keeps ours.
   sed -i 's/A\x00C\x00T\x00I\x00O\x00N\x00S\x00_\x00R\x00E\x00S\x00U\x00L\x00T\x00S\x00_\x00U\x00R\x00L\x00/A\x00C\x00T\x00I\x00O\x00N\x00S\x00_\x00R\x00E\x00S\x00U\x00L\x00T\x00S\x00_\x00O\x00R\x00L\x00/g' bin/Runner.Worker.dll
-  export ACTIONS_RESULTS_URL="$cache"
+  export ACTIONS_RESULTS_URL="${l1:-$cache}"
 fi
 if ! ls /usr/lib*/libicuuc.so.* /usr/lib/*/libicuuc.so.* 2>/dev/null | grep -q .; then
   if command -v dnf >/dev/null 2>&1; then sudo dnf install -y -q libicu >/dev/null
@@ -107,7 +129,12 @@ cat "$d/done"
 // stopping, leaves it running. A VM handed over to the next fleetci is
 // followed by that one to the job's end.
 func SSHStart(version, cacheURL string, log hclog.Logger) StartFunc {
-	return sshStart(fmt.Sprintf(runScript, version, cacheURL, DefaultRunnerVersion, jobStartedHook), log)
+	return sshStart(vmScript(version, cacheURL), log)
+}
+
+// vmScript is runScript for the runner version and cache server given.
+func vmScript(version, cacheURL string) string {
+	return fmt.Sprintf(runScript, version, cacheURL, DefaultRunnerVersion, jobStartedHook, l1CacheScript, l1CachePort, githubResultsURL)
 }
 
 // followTries is how many times in a row following the runner may fail
