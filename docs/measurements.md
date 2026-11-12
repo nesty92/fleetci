@@ -349,3 +349,22 @@ record size and keeps its table in memory. fleetci needs no change for
 either; `vm_cache_directory` goes on such a filesystem. Not measured yet:
 how jobs run with their layers on btrfs, where copy-on-write fragments
 files that VMs write to.
+
+### On a fleet of machines
+
+A controller and two workers in the cachelab container, each worker with
+6 CPUs, 7 GB and a 10 GB cache budget, and a class of 4 CPUs and 6 GB with
+`cache_disk`: one VM per worker. GitLab, the express repo of the language
+matrix, `FLEETCI_CACHE_KEY=matrix-node`:
+
+| Job | Worker | Why | Install | Total |
+| --- | --- | --- | --- | --- |
+| First, w1 drained | w2 | the only one Ready | 9.1 s | 12.8 s |
+| Next commit, both Ready | w2 | holds `matrix-node` | 2.4 s | 5.9 s |
+
+Without the cache, the second job would have gone to w1, which comes first
+when both are empty. GitHub, `cache.yml` on WireZone/fleetci-playground:
+its two jobs ran one on each worker, each writing `main` on its own worker.
+On the next run, `docker pull node:24-alpine` took 1.35 s instead of 7.1 s
+on the worker whose copy had it; `postgres:17-alpine`, pulled on the other
+worker, took 6.5 s again, as workers don't copy caches to each other.

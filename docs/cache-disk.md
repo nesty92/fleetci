@@ -422,6 +422,43 @@ rest of fleetci.
 Not yet on GitHub: choosing keys and paths to keep (the `FLEETCI_CACHE_*`
 variables are GitLab's), and serving `actions/cache` from the disk.
 
+## On a fleet of machines
+
+With controllers and workers (`fleetci controller`, `fleetci join`), a
+class gets cache disks with `cache_disk = true` in the controllers'
+`controller.toml`. Each worker keeps its own caches, under its `state_dir`,
+and sizes them in its own `worker.toml`:
+
+```toml
+# controller.toml
+[controller]
+cache_wait = "30s"   # how long a job waits for the worker with its cache
+
+[classes.4vcpu-8gb]
+cpus = 4
+memory = "8GB"
+cache_disk = true
+
+# worker.toml, on each worker
+[cache_disk]
+budget = "100GB"
+min_free = "20GB"
+max_per_cache = "30GB"
+```
+
+The workers report which caches they hold, and the leader boots a job's VM
+on the worker that has the best one: the job's own key, then the shared
+cache it falls back on, then `FLEETCI_CACHE_FROM`'s. If that worker is
+full, the job waits up to `cache_wait` for room there, then goes to any
+worker, where it starts from what that worker has, or empty. A GitHub job
+is placed by what its queued job says; GitHub may give the runner another
+job, which then starts from what that worker has.
+
+The writers' rules are the controllers', as on one machine. Each worker
+writes only its own copy of a cache, so two workers can hold different
+versions of one key until their jobs catch up. Workers don't copy caches
+to each other yet.
+
 ## For coding agents
 
 Paste this into a project's `AGENTS.md` or `CLAUDE.md`, so coding agents
