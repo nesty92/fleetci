@@ -30,6 +30,7 @@ type fakeL2 struct {
 	pending map[string][]byte // blob name
 	blocks  map[string][]byte // blob name + "\n" + block id
 	gets    atomic.Int32
+	ranges  atomic.Int32 // ranged GETs past the first byte's
 	down    atomic.Bool
 }
 
@@ -54,7 +55,8 @@ func (f *fakeL2) serve(w http.ResponseWriter, r *http.Request) {
 		c.Close()
 		return
 	}
-	if r.Header.Get("Authorization") != "Bearer tok" {
+	// Blob URLs are signed, as Azure's: only the twirp calls take the token.
+	if !strings.HasPrefix(r.URL.Path, "/blob/") && r.Header.Get("Authorization") != "Bearer tok" {
 		http.Error(w, "no token", http.StatusUnauthorized)
 		return
 	}
@@ -117,8 +119,13 @@ func (f *fakeL2) serve(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		switch {
 		case r.Method == http.MethodGet && q.Get("sig") == "dl":
-			f.gets.Add(1)
-			_, _ = w.Write(f.entries[string(name)])
+			// One per download: a whole GET, or the first of its ranges.
+			if rg := r.Header.Get("Range"); rg == "" || rg == "bytes=0-0" {
+				f.gets.Add(1)
+			} else {
+				f.ranges.Add(1)
+			}
+			http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(f.entries[string(name)]))
 		case r.Method == http.MethodPut && q.Get("sig") == "ul" && q.Get("comp") == "block":
 			f.blocks[string(name)+"\n"+q.Get("blockid")] = body
 			w.WriteHeader(http.StatusCreated)
@@ -391,4 +398,27 @@ func withQuery(url, q string) string {
 		return url + "&" + q
 	}
 	return url + "?" + q
+}
+
+// A miss is fetched to the disk in parallel ranges, as actions/cache would
+// fetch it from Azure, then served from the disk.
+func TestL1CacheFetchesInRanges(t *testing.T) {
+	l2 := newFakeL2(t)
+	store := filepath.Join(t.TempDir(), "actions")
+	l1 := startL1(t, l2.srv.URL+"/", store, true)
+	big := make([]byte, 20<<20+123) // three 8 MiB ranges
+	for i := range big {
+		big[i] = byte(i * 7)
+	}
+	l2.put("big", "v1", big)
+	key, data, url := restore(t, l1, "big", nil)
+	if key != "big" || !bytes.Equal(data, big) || !strings.HasPrefix(url, l1) {
+		t.Fatalf("first restore: %q, %d bytes, equal %v, %s", key, len(data), bytes.Equal(data, big), url)
+	}
+	if g, r := l2.gets.Load(), l2.ranges.Load(); g != 1 || r != 3 {
+		t.Fatalf("%d downloads in %d more ranges; want 1 in 3", g, r)
+	}
+	if _, data, _ = restore(t, l1, "big", nil); !bytes.Equal(data, big) || l2.gets.Load() != 1 {
+		t.Fatalf("second restore: equal %v, %d downloads", bytes.Equal(data, big), l2.gets.Load())
+	}
 }

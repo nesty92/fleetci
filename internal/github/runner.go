@@ -64,8 +64,14 @@ if [ "$hook" = cache ] && command -v python3 >/dev/null 2>&1; then
 L1PY
   mkdir -p _diag
   nohup setsid python3 -I fleetci-l1cache.py %[6]d "${cache:-%[7]s}" /cache/actions >> _diag/fleetci-l1cache.log 2>&1 < /dev/null &
-  # The address the VM's containers reach it at too: Docker's bridge.
+  # The address the VM's containers reach it at too: Docker's bridge. A
+  # firewall that drops what comes in lets them through to it, and only it.
   at=$(ip -4 -o addr show docker0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1)
+  if command -v iptables >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+    for i in docker0 br-+; do
+      sudo -n iptables -I INPUT -i "$i" -p tcp --dport %[6]d -j ACCEPT 2>/dev/null || true
+    done
+  fi
   i=0
   while [ $i -lt 50 ]; do
     if curl -fsS -o /dev/null -m 1 "http://127.0.0.1:%[6]d/fleetci/ping" 2>/dev/null; then
@@ -80,7 +86,7 @@ if [ -n "$l1$cache" ]; then
   # The runner sets ACTIONS_RESULTS_URL for each job from GitHub's answer.
   # Renaming the variable it writes (same length, UTF-16) keeps ours.
   sed -i 's/A\x00C\x00T\x00I\x00O\x00N\x00S\x00_\x00R\x00E\x00S\x00U\x00L\x00T\x00S\x00_\x00U\x00R\x00L\x00/A\x00C\x00T\x00I\x00O\x00N\x00S\x00_\x00R\x00E\x00S\x00U\x00L\x00T\x00S\x00_\x00O\x00R\x00L\x00/g' bin/Runner.Worker.dll
-  export ACTIONS_RESULTS_URL="${l1:-$cache}"
+  export ACTIONS_RESULTS_URL="${l1:-$cache}" FLEETCI_RESULTS_URL="${l1:-$cache}"
 fi
 if ! ls /usr/lib*/libicuuc.so.* /usr/lib/*/libicuuc.so.* 2>/dev/null | grep -q .; then
   if command -v dnf >/dev/null 2>&1; then sudo dnf install -y -q libicu >/dev/null
@@ -117,6 +123,15 @@ until [ -e "$d/done" ]; do
   fi
   sleep 0.1
 done
+# A job's container doesn't get the runner's environment, only the job's:
+# the job's, through GITHUB_ENV, has the cache server too.
+if [ -n "${FLEETCI_RESULTS_URL:-}" ] && [ -n "${GITHUB_ENV:-}" ]; then
+  echo "ACTIONS_RESULTS_URL=$FLEETCI_RESULTS_URL" >> "$GITHUB_ENV"
+fi
+# The L1 (l1cache.py) runs as this user and keeps its archives on the disk.
+if mountpoint -q /cache 2>/dev/null; then
+  sudo -n mkdir -p /cache/actions && sudo -n chown "$(id -u):$(id -g)" /cache/actions
+fi
 cat "$d/done"
 `
 

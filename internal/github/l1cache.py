@@ -50,16 +50,27 @@ def log(*a):
     print(time.strftime("%H:%M:%S"), *a, file=sys.stderr, flush=True)
 
 
+STORE_WHY = [None]
+
+
 def store_ok():
     """The store is usable: on a disk of its own, not the VM's root."""
     try:
         parent = os.path.dirname(STORE.rstrip("/"))
         if not ANY_STORE and os.stat(parent).st_dev == os.stat("/").st_dev:
-            return False
+            return store_says("no cache disk at %s" % parent)
         os.makedirs(os.path.join(STORE, "tmp"), exist_ok=True)
-        return True
-    except OSError:
-        return False
+        return store_says(None)
+    except OSError as e:
+        return store_says("the disk can't be used: %s" % e)
+
+
+def store_says(why):
+    """Logs why the disk isn't used when that changes; True when it is."""
+    if why != STORE_WHY[0]:
+        STORE_WHY[0] = why
+        log(why or "using the disk at %s" % STORE)
+    return why is None
 
 
 def entry_id(key, version):
@@ -145,6 +156,72 @@ def connect(url):
     if u.query:
         path += "?" + u.query
     return conn, path, u.netloc
+
+
+# A miss is fetched in ranges this big, this many at a time, as
+# actions/cache would fetch it from the cache server itself.
+PART = 8 << 20
+PARTS_AT_ONCE = 8
+
+
+def fetch_ranges(url, tmp):
+    """Fetches url into tmp in parallel ranges. None: the server doesn't
+    take ranges (nothing written); else the size fetched."""
+    conn, path, netloc = connect(url)
+    try:
+        conn.request("GET", path, headers={"Host": netloc, "Range": "bytes=0-0"})
+        resp = conn.getresponse()
+        resp.read()
+    finally:
+        conn.close()
+    m = re.match(r"bytes 0-0/(\d+)$", resp.getheader("Content-Range") or "")
+    if resp.status != 206 or not m:
+        return None
+    size = int(m.group(1))
+    parts = [(o, min(o + PART, size) - 1) for o in range(0, size, PART)]
+    errs = []
+    mu = threading.Lock()
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+
+    def worker():
+        while True:
+            with mu:
+                if errs or not parts:
+                    return
+                lo, hi = parts.pop(0)
+            try:
+                c, pth, nl = connect(url)
+                try:
+                    c.request("GET", pth, headers={"Host": nl, "Range": "bytes=%d-%d" % (lo, hi)})
+                    r = c.getresponse()
+                    if r.status != 206:
+                        raise http.client.HTTPException("range %d-%d: %d" % (lo, hi, r.status))
+                    at = lo
+                    while at <= hi:
+                        b = r.read(min(CHUNK, hi + 1 - at))
+                        if not b:
+                            raise ConnectionError("range %d-%d ended at %d" % (lo, hi, at))
+                        os.pwrite(fd, b, at)
+                        at += len(b)
+                finally:
+                    c.close()
+            except Exception as e:
+                with mu:
+                    errs.append(e)
+                return
+
+    try:
+        if size:
+            ts = [threading.Thread(target=worker, daemon=True) for _ in range(min(PARTS_AT_ONCE, len(parts)))]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join()
+        if errs:
+            raise errs[0]
+    finally:
+        os.close(fd)
+    return size
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -384,6 +461,22 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(404, [], b"no such download")
         url, key, version = v
         eid = entry_id(key, version)
+        if store_ok():
+            # To the disk in parallel ranges, then from it: one stream from
+            # the cache server would be several times slower.
+            tmp = os.path.join(STORE, "tmp", "%s.%d.ranges" % (eid, threading.get_ident()))
+            try:
+                start = time.time()
+                if fetch_ranges(url, tmp) is not None:
+                    commit(tmp, key, version)
+                    log("fetched %s in %.1fs" % (key, time.time() - start))
+                    return self.serve_local(eid)
+            except Exception as e:
+                log("not keeping (ranges):", e)
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
         conn, resp = self.upstream("GET", url)
         tmp, tee = None, None
         if resp.status == 200 and store_ok():
