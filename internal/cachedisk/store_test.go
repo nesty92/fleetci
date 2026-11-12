@@ -48,6 +48,16 @@ func (f *fakeImages) Flatten(src, dst string) error {
 	return os.WriteFile(dst, nil, 0o600)
 }
 
+func (f *fakeImages) Rebase(path, parent string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.parent == nil {
+		f.parent = map[string]string{}
+	}
+	f.parent[path] = parent
+	return nil
+}
+
 func open(t *testing.T, cfg Config, img Images) *Store {
 	t.Helper()
 	if cfg.MinFree == 0 {

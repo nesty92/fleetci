@@ -367,4 +367,23 @@ when both are empty. GitHub, `cache.yml` on WireZone/fleetci-playground:
 its two jobs ran one on each worker, each writing `main` on its own worker.
 On the next run, `docker pull node:24-alpine` took 1.35 s instead of 7.1 s
 on the worker whose copy had it; `postgres:17-alpine`, pulled on the other
-worker, took 6.5 s again, as workers don't copy caches to each other.
+worker, took 6.5 s again: workers didn't copy caches to each other yet.
+
+Copying between workers, the same fleet and `cache.yml`. Both workers are
+in one container, so their link is the host's memory: what it shows is
+what a copy costs on the wire, and the time without a network in the way.
+
+| Copy | Layers | On the wire | Took |
+| --- | --- | --- | --- |
+| w1's `main` to w2, which had another copy | 666 MB | 395 MB | 0.97 s |
+| w2's newer one back to w1 | 665 MB | 395 MB | 0.88 s |
+| The next two jobs' new layers, each | 2.4–3.9 MB | 0.1 MB | 16–25 ms |
+| The whole chain to an empty w2, uncompressed (twice) | 677 MB | 677 MB | 0.70 s |
+| The same, S2 on two cores (twice) | 677 MB | 396 MB | 0.89 s |
+
+With w1 drained, both jobs ran on w2 from the copied chain, and pulled
+their images in 1.1 s each, as on w1. At 1 Gbit, the whole chain would
+take about 5.8 s uncompressed and 3.4 s with S2; at 10 Gbit about the
+same either way, as S2 on two cores keeps up with about 760 MB/s.
+`qemu-img check` found the copied chain whole, its backing files at the
+receiving worker's paths.

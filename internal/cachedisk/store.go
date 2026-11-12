@@ -155,6 +155,9 @@ type Images interface {
 	Create(path, parent string, size int64) error
 	// Flatten writes the whole chain ending in src to dst, a file of its own.
 	Flatten(src, dst string) error
+	// Rebase points the layer at path to parent, its data unchanged: for
+	// a layer copied from another node, whose parent is elsewhere here.
+	Rebase(path, parent string) error
 }
 
 // head is a scope's newest layer, in its head.json.
@@ -164,6 +167,9 @@ type head struct {
 	Chain []string `json:"chain"`
 	// Used is when a job last read or wrote it.
 	Used time.Time `json:"used"`
+	// Committed is when its newest layer was kept, on whichever node:
+	// which of two nodes' copies is newer.
+	Committed time.Time `json:"committed,omitzero"`
 }
 
 func (h *head) layer() string { return h.Chain[len(h.Chain)-1] }
@@ -181,7 +187,9 @@ type Store struct {
 	leases map[*Lease]struct{}
 	// flattening: scopes whose chain is being flattened.
 	flattening map[string]bool
-	wg         sync.WaitGroup
+	// pulling: layers being copied from another node, as .part files.
+	pulling map[string]bool
+	wg      sync.WaitGroup
 }
 
 // Open opens the store in dir, making it if needed.
@@ -193,7 +201,7 @@ func Open(dir string, cfg Config, img Images, log hclog.Logger) (*Store, error) 
 		return nil, err
 	}
 	s := &Store{dir: dir, cfg: cfg.withDefaults(), img: img, log: log, now: time.Now,
-		leases: map[*Lease]struct{}{}, flattening: map[string]bool{}}
+		leases: map[*Lease]struct{}{}, flattening: map[string]bool{}, pulling: map[string]bool{}}
 	// Layers a stopped fleetci left half-made.
 	s.mu.Lock()
 	s.sweep()
@@ -313,7 +321,7 @@ func (s *Store) Commit(l *Lease) error {
 	l.done = true
 	delete(s.leases, l)
 	key := l.scope.key()
-	h := &head{Scope: l.scope, Chain: l.chain, Used: s.now()}
+	h := &head{Scope: l.scope, Chain: l.chain, Used: s.now(), Committed: s.now()}
 	if err := s.writeHead(key, h); err != nil {
 		_ = os.Remove(l.Layer())
 		return err
@@ -421,7 +429,8 @@ func (s *Store) sweep() {
 		left := 0
 		for _, e := range entries {
 			p := filepath.Join(dir, e.Name())
-			if strings.HasSuffix(e.Name(), ".qcow2") && !keep[p] {
+			if strings.HasSuffix(e.Name(), ".qcow2") && !keep[p] ||
+				strings.HasSuffix(e.Name(), ".part") && !s.pulling[p] {
 				_ = os.Remove(p)
 				continue
 			}
@@ -435,7 +444,10 @@ func (s *Store) sweep() {
 
 // evict drops scopes, least recently used first, until the store is in
 // budget, and those past MaxAge. A scope with a lease on its layers stays.
-func (s *Store) evict() {
+func (s *Store) evict() { s.evictFor(0) }
+
+// evictFor is evict with room left for need more bytes.
+func (s *Store) evictFor(need int64) {
 	type scope struct {
 		key  string
 		used time.Time
@@ -457,7 +469,7 @@ func (s *Store) evict() {
 	}
 	for _, h := range heads {
 		old := s.now().Sub(h.used) > s.cfg.MaxAge
-		if !old && s.fits() {
+		if !old && s.fitsWith(need) {
 			break
 		}
 		if leased[h.key] {
@@ -469,14 +481,15 @@ func (s *Store) evict() {
 	}
 }
 
-// fits says whether the store is within its budget and leaves MinFree.
-func (s *Store) fits() bool {
-	if s.used() > s.cfg.Budget {
+// fitsWith says whether the store, need bytes more, is within its budget
+// and leaves MinFree.
+func (s *Store) fitsWith(need int64) bool {
+	if s.used()+need > s.cfg.Budget {
 		return false
 	}
 	var st syscall.Statfs_t
 	if err := syscall.Statfs(s.dir, &st); err == nil {
-		if int64(st.Bavail)*int64(st.Bsize) < s.cfg.MinFree {
+		if int64(st.Bavail)*int64(st.Bsize)-need < s.cfg.MinFree {
 			return false
 		}
 	}

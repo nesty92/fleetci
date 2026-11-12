@@ -454,11 +454,37 @@ worker, where it starts from what that worker has, or empty. A GitHub job
 is placed by what its queued job says; GitHub may give the runner another
 job, which then starts from what that worker has.
 
-The writers' rules are the controllers', as on one machine. Each worker
-writes only its own copy of a cache, so two workers can hold different
-versions of one key until their jobs catch up. Workers don't copy caches
-to each other yet; they already find which of them reach each other
-([Neighbours](design/ha.md#neighbours-which-workers-reach-each-other)).
+The writers' rules are the controllers', as on one machine. Each job
+writes its own worker's copy of a cache, and the workers then copy each
+other's newer copies of the shared caches, those writers make: never a
+merge request's or another ref's own cache.
+
+- **Every 30 s** each worker asks the others it reaches (see
+  [Neighbours](design/ha.md#neighbours-which-workers-reach-each-other))
+  for their shared caches. It copies a newer copy of one it has, and one
+  it lacks while its budget has room to spare: a copied cache never
+  evicts one of its own.
+- **Only the new layers move.** Layers never change once kept, so a
+  newer copy costs the layers its jobs added since; a chain flattened
+  on its worker comes over whole once.
+- **Each layer is checked:** it comes over the workers' mutual TLS with
+  its SHA-256 after it, and is kept only when they agree, and only once
+  the whole chain has come. A job that starts meanwhile uses the copy
+  its worker had.
+- **Compressed:** a layer comes S2-compressed, at about half its size,
+  with two cores of the sending worker.
+- Two workers that run jobs of one cache at once each keep their own
+  result, and the newer wins on both, as one machine's last job does.
+
+```toml
+# worker.toml
+share_caches = false     # neither copy caches to others nor from them
+share_compress = false   # copy them uncompressed: on links faster than 10 Gbit
+```
+
+A worker that runs any branch's jobs as writers (see the controllers'
+`writers`) shares what they write too: one more reason to keep writers to
+protected branches.
 
 ## For coding agents
 

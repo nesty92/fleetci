@@ -191,6 +191,13 @@ type WorkerConfig struct {
 	// PeerAdvertise are the addresses other workers reach it at; by
 	// default its own, but loopback and link-local.
 	PeerAdvertise []string `toml:"peer_advertise,omitempty"`
+	// ShareCaches copies the shared caches, those writers make, to and from
+	// the other workers it reaches. Default true.
+	ShareCaches *bool `toml:"share_caches,omitempty"`
+	// ShareCompress asks for the layers it copies compressed (S2), which
+	// takes about half the network and two cores on the sending worker
+	// while one comes. Default true.
+	ShareCompress *bool `toml:"share_compress,omitempty"`
 	// CacheDisk sizes this worker's cache disks, for the classes with
 	// cache_disk; they are kept under StateDir/cache.
 	CacheDisk *fleet.CacheDisk `toml:"cache_disk,omitempty"`

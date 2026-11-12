@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/nesty92/fleetci/internal/cachedisk"
 )
 
 // TestPeerHints: the controller names to each worker the others that
@@ -95,7 +97,7 @@ func TestProbePeer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &http.Server{Handler: peerHandler("w1"), TLSConfig: peerServerTLS(p1, pool, n1)}
+	srv := &http.Server{Handler: peerHandler("w1", func() []*cachedisk.Store { return nil }), TLSConfig: peerServerTLS(p1, pool, n1)}
 	go func() { _ = srv.ServeTLS(lis, "", "") }()
 	t.Cleanup(func() { _ = srv.Close() })
 	addr := lis.Addr().String()

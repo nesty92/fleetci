@@ -219,9 +219,10 @@ certificate against the fleet's CA, never the system's.
 
 #### Neighbours: which workers reach each other
 
-Workers on one network can later copy caches to each other, directly,
-without anything passing through a controller or another network. For
-that, each worker first finds which of the others it reaches:
+Workers on one network copy shared caches to each other, directly,
+without anything passing through a controller or another network (see
+[docs/cache-disk.md](../cache-disk.md#on-a-fleet-of-machines)). For that,
+each worker first finds which of the others it reaches:
 
 - **Each worker answers its peers** on its own port, `peer_listen` in
   `worker.toml` (`:9483` by default; `"off"` for none). It tells the
@@ -246,8 +247,8 @@ w1      v0.8.0   Ready  …  w2 40µs
 w2      v0.8.0   Ready  …  w1 40µs
 ```
 
-A worker that reaches none of the others works as before. Nothing is
-copied between workers yet.
+A worker that reaches none of the others works as before, with only the
+caches its own jobs made.
 
 #### GitHub
 

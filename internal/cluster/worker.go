@@ -71,6 +71,8 @@ type Worker struct {
 	stop     context.CancelFunc // ends Run
 	exitErr  error              // what Run returns: ErrRestart for an update
 	peers    *neighbourState
+	// shareKick has the worker look at its neighbours' caches now.
+	shareKick chan struct{}
 }
 
 // task is an assignment as this worker carries it out.
@@ -139,7 +141,7 @@ func NewWorker(cfg *WorkerConfig, version string, log hclog.Logger) (*Worker, er
 	w := &Worker{cfg: cfg, pki: p, log: log, version: version,
 		checks: map[string]string{}, passed: map[string]bool{}, count: map[string]int{},
 		vms: map[string]*workerVM{}, drainBy: map[string]bool{}, clients: map[string]*client{},
-		tasks: map[string]*task{}, changed: make(chan struct{}, 1), started: time.Now(), peers: newNeighbourState()}
+		tasks: map[string]*task{}, changed: make(chan struct{}, 1), started: time.Now(), peers: newNeighbourState(), shareKick: make(chan struct{}, 1)}
 	f, err := GatherFacts(cfg, version)
 	if err != nil {
 		return nil, err
@@ -225,6 +227,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 	if lis != nil {
 		wg.Go(func() { w.peerLoop(ctx, lis, pool) })
+		wg.Go(func() { w.shareLoop(ctx, pool) })
 	}
 	wg.Go(func() { w.updateLoop(ctx) })
 	for _, cl := range w.clients {

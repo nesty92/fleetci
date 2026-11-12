@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/nesty92/fleetci/internal/cachedisk"
 )
 
 // Workers find which of them can reach each other: the controllers name
@@ -232,12 +234,13 @@ func peerClientTLS(pk PKI, pool *x509.CertPool, h PeerHint) *tls.Config {
 	}
 }
 
-// peerHandler answers peers.
-func peerHandler(id string) http.Handler {
+// peerHandler answers peers: who this worker is, and its shared caches.
+func peerHandler(id string, stores func() []*cachedisk.Store) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /peer/v1/hello", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"id": id})
 	})
+	shareHandlers(mux, stores)
 	return mux
 }
 
@@ -298,7 +301,7 @@ func probePeer(ctx context.Context, pk PKI, pool *x509.CertPool, h PeerHint, pre
 // peerLoop answers peers at lis and checks the peers the controllers name,
 // when they name others and every peerProbeEvery.
 func (w *Worker) peerLoop(ctx context.Context, lis net.Listener, pool *x509.CertPool) {
-	srv := &http.Server{Handler: peerHandler(w.cfg.ID), TLSConfig: peerServerTLS(w.pki, pool, w.peers),
+	srv := &http.Server{Handler: peerHandler(w.cfg.ID, w.cacheStores), TLSConfig: peerServerTLS(w.pki, pool, w.peers),
 		ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = srv.ServeTLS(lis, "", "") }()
 	defer srv.Close()
@@ -356,6 +359,10 @@ func (w *Worker) peerLoop(ctx context.Context, lis net.Listener, pool *x509.Cert
 			}
 			w.log.Info("neighbours", "reached", names)
 			w.poke()
+			select {
+			case w.shareKick <- struct{}{}:
+			default:
+			}
 		}
 		select {
 		case <-ctx.Done():
