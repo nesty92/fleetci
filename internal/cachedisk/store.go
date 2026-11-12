@@ -132,6 +132,9 @@ type Config struct {
 	MaxPerCache int64
 	// MaxAge drops a scope no job has used for that long.
 	MaxAge time.Duration
+	// ReaderMaxAge drops sooner a scope only readers use, a merge or pull
+	// request's: with a disk for each job, they are most of the disks.
+	ReaderMaxAge time.Duration
 	// Size is the cache disk's size as the guest sees it. Only what is
 	// written takes space.
 	Size int64
@@ -160,6 +163,10 @@ func (c Config) withDefaults() Config {
 	if c.MaxAge == 0 {
 		c.MaxAge = 7 * 24 * time.Hour
 	}
+	if c.ReaderMaxAge == 0 {
+		c.ReaderMaxAge = 2 * 24 * time.Hour
+	}
+	c.ReaderMaxAge = min(c.ReaderMaxAge, c.MaxAge)
 	if c.Size == 0 {
 		c.Size = 100 * gb
 	}
@@ -176,8 +183,10 @@ type Images interface {
 	// Create makes an empty qcow2 file at path of size bytes, on parent
 	// when it isn't "".
 	Create(path, parent string, size int64) error
-	// Flatten writes the whole chain ending in src to dst, a file of its own.
-	Flatten(src, dst string) error
+	// Flatten writes the chain ending in src to dst: on base, a layer of
+	// the chain, what differs from it; with base "", all of it, in a file
+	// of its own.
+	Flatten(src, base, dst string) error
 	// Rebase points the layer at path to parent, its data unchanged: for
 	// a layer copied from another node, whose parent is elsewhere here.
 	Rebase(path, parent string) error
@@ -291,7 +300,7 @@ func (s *Store) Begin(scope Scope) (*Lease, error) {
 	if parent != nil && len(parent.Chain) >= chainLimit {
 		// Its flattening failed, or is behind: this job goes without,
 		// and the next gets the flattened chain.
-		s.flattenLater(from.dir, parent.layer())
+		s.flattenLater(from.dir, parent.Chain)
 		return nil, fmt.Errorf("cache: %s is %d layers, too deep for a VM; it is being flattened for the next job", parent.Scope.Label(), len(parent.Chain))
 	}
 	if parent != nil {
@@ -379,27 +388,50 @@ func (s *Store) Abort(l *Lease) {
 // flattening). s.mu is held.
 func (s *Store) keepShallow(key string, h *head) {
 	if len(h.Chain) > s.cfg.MaxDepth {
-		s.flattenLater(key, h.layer())
+		s.flattenLater(key, h.Chain)
 	}
 }
 
 // flattenRetry is how long a failed flattening waits to try again.
 var flattenRetry = 30 * time.Second
 
-// flattenLater starts flattening a scope's chain up to layer, unless it is
-// already under way. s.mu is held.
-func (s *Store) flattenLater(key, layer string) {
+// flattenLater starts flattening a scope's chain, unless it is already
+// under way. s.mu is held.
+func (s *Store) flattenLater(key string, chain []string) {
 	if s.flattening[key] {
 		return
 	}
 	s.flattening[key] = true
 	s.wg.Add(1)
-	go s.flatten(key, layer)
+	go s.flatten(key, append([]string(nil), chain...))
 }
 
-// flatten writes a scope's chain into one layer, which becomes its head if
-// no job has committed since; if one has, it flattens the new head.
-func (s *Store) flatten(key, layer string) {
+// shared is how many of the chain's first layers are another scope's, as
+// a merge request's job's are the default branch's it started from. They
+// are kept when the chain is flattened, so the two disks still share their
+// blocks, unless that would leave it too deep.
+func (s *Store) shared(key string, chain []string) int {
+	dir := filepath.Join(s.dir, "scopes", key)
+	n := 0
+	for n < len(chain) && filepath.Dir(chain[n]) != dir {
+		n++
+	}
+	if n == len(chain) || n+1 > s.cfg.MaxDepth/2 {
+		return 0
+	}
+	return n
+}
+
+// flatten writes a scope's own layers into one, on those it shares with
+// another scope; it becomes the head if no job has committed since; if one
+// has, it flattens the new head.
+func (s *Store) flatten(key string, chain []string) {
+	layer := chain[len(chain)-1]
+	keep := chain[:s.shared(key, chain)]
+	base := ""
+	if len(keep) > 0 {
+		base = keep[len(keep)-1]
+	}
 	defer s.wg.Done()
 	dst := filepath.Join(s.dir, "scopes", key, randomName()+".qcow2")
 	// Held as a lease so sweep leaves it while it is written.
@@ -408,7 +440,7 @@ func (s *Store) flatten(key, layer string) {
 	s.leases[hold] = struct{}{}
 	s.mu.Unlock()
 	start := s.now()
-	err := s.img.Flatten(layer, dst)
+	err := s.img.Flatten(layer, base, dst)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -434,12 +466,12 @@ func (s *Store) flatten(key, layer string) {
 		_ = os.Remove(dst)
 		s.keepShallow(key, h)
 	default:
-		h.Chain = []string{dst}
+		h.Chain = append(keep, dst)
 		if err := s.writeHead(key, h); err != nil {
 			_ = os.Remove(dst)
 			return
 		}
-		s.log.Info("cache: flattened", "cache", h.Scope.Label(), "took", s.now().Sub(start).Round(time.Second).String())
+		s.log.Info("cache: flattened", "cache", h.Scope.Label(), "on", len(keep), "took", s.now().Sub(start).Round(time.Second).String())
 		s.sweep()
 	}
 }
@@ -494,8 +526,9 @@ func (s *Store) evict() { s.evictFor(0) }
 // evictFor is evict with room left for need more bytes.
 func (s *Store) evictFor(need int64) {
 	type scope struct {
-		key  string
-		used time.Time
+		key    string
+		used   time.Time
+		maxAge time.Duration
 	}
 	var heads []scope
 	for _, key := range s.keys() {
@@ -503,7 +536,11 @@ func (s *Store) evictFor(need int64) {
 		if err != nil {
 			continue
 		}
-		heads = append(heads, scope{key, h.Used})
+		age := s.cfg.MaxAge
+		if !h.Scope.Writer {
+			age = s.cfg.ReaderMaxAge
+		}
+		heads = append(heads, scope{key, h.Used, age})
 	}
 	sort.Slice(heads, func(i, j int) bool { return heads[i].used.Before(heads[j].used) })
 	leased := map[string]bool{}
@@ -512,10 +549,12 @@ func (s *Store) evictFor(need int64) {
 			leased[filepath.Base(filepath.Dir(f))] = true
 		}
 	}
+	fits := false
 	for _, h := range heads {
-		old := s.now().Sub(h.used) > s.cfg.MaxAge
-		if !old && s.fitsWith(need) {
-			break
+		old := s.now().Sub(h.used) > h.maxAge
+		fits = fits || s.fitsWith(need)
+		if !old && fits {
+			continue
 		}
 		if leased[h.key] {
 			continue

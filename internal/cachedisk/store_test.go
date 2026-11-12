@@ -35,7 +35,7 @@ func (f *fakeImages) Create(path, parent string, _ int64) error {
 	return os.WriteFile(path, make([]byte, f.data), 0o600)
 }
 
-func (f *fakeImages) Flatten(src, dst string) error {
+func (f *fakeImages) Flatten(src, base, dst string) error {
 	if f.flatten != nil {
 		<-f.flatten
 	}
@@ -44,7 +44,7 @@ func (f *fakeImages) Flatten(src, dst string) error {
 	if f.flattenFail != nil {
 		return f.flattenFail
 	}
-	f.parent[dst] = ""
+	f.parent[dst] = base
 	return os.WriteFile(dst, nil, 0o600)
 }
 
@@ -245,6 +245,25 @@ func TestFlatten(t *testing.T) {
 	}
 }
 
+// A merge request's disk, flattened, stays on the default branch's layers
+// it started from: the two still share those blocks.
+func TestFlattenKeepsSharedLayers(t *testing.T) {
+	img := &fakeImages{}
+	s := open(t, Config{MaxDepth: 6}, img)
+	base := run(t, s, main_).Layer()
+	for range 6 {
+		run(t, s, mr)
+	}
+	s.Wait()
+	h, _ := s.readHead(mr.key())
+	if len(h.Chain) != 2 || h.Chain[0] != base || img.parent[h.Chain[1]] != base {
+		t.Fatalf("chain %v after flattening; want main's layer and one of its own on it", h.Chain)
+	}
+	if _, err := os.Stat(base); err != nil {
+		t.Fatalf("main's layer went: %v", err)
+	}
+}
+
 // A job that commits while the chain is flattened doesn't leave it deep:
 // the new head is flattened in turn.
 func TestFlattenAgainWhenCommittedOver(t *testing.T) {
@@ -356,6 +375,28 @@ func TestMaxAge(t *testing.T) {
 	l, _ := s.Begin(mr)
 	if l.From() != "" {
 		t.Fatalf("a cache past max_age was read (from %s)", l.From())
+	}
+}
+
+// A merge request's disk goes after ReaderMaxAge; the default branch's,
+// used before it, stays until MaxAge.
+func TestReaderMaxAge(t *testing.T) {
+	img := &fakeImages{}
+	s := open(t, Config{MaxAge: 10 * time.Hour, ReaderMaxAge: time.Hour}, img)
+	now := time.Now()
+	s.now = func() time.Time { return now }
+	run(t, s, main_)
+	now = now.Add(time.Minute)
+	run(t, s, mr)
+	now = now.Add(2 * time.Hour)
+	other := main_
+	other.Project = "2"
+	run(t, s, other) // evicts on Begin
+	if _, err := s.readHead(mr.key()); err == nil {
+		t.Fatal("the merge request's disk outlived reader_max_age")
+	}
+	if _, err := s.readHead(main_.key()); err != nil {
+		t.Fatalf("the default branch's disk went before max_age: %v", err)
 	}
 }
 

@@ -3,6 +3,8 @@ package cachedisk
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -38,11 +40,37 @@ func (q QemuImg) Create(path, parent string, size int64) error {
 	return q.run(time.Minute, append(args, path, strconv.FormatInt(size, 10))...)
 }
 
-// Flatten copies the whole chain into dst, which has no backing file. The
-// chain's layers are never written once kept, so it reads them while VMs
-// have them open (-U): without it, qemu-img fails on their locks.
-func (q QemuImg) Flatten(src, dst string) error {
-	return q.run(time.Hour, "convert", "-q", "-U", "-O", "qcow2", src, dst)
+// Flatten copies the chain into dst. With base, dst is a copy of src
+// rebased onto it, safely: what the layers between them hold is copied
+// in (convert -B would copy src's own clusters only). Without, dst has no
+// backing file. The chain's layers are never written once kept, so it
+// reads them while VMs have them open (-U): without it, qemu-img fails on
+// their locks.
+func (q QemuImg) Flatten(src, base, dst string) error {
+	if base == "" {
+		return q.run(time.Hour, "convert", "-q", "-U", "-O", "qcow2", src, dst)
+	}
+	if err := copyFile(src, dst); err != nil {
+		return err
+	}
+	return q.run(time.Hour, "rebase", "-q", "-U", "-f", "qcow2", "-F", "qcow2", "-b", base, dst)
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 // Rebase points the layer at path to parent without touching its data

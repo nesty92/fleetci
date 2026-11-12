@@ -34,6 +34,10 @@ type CacheDisk struct {
 	MaxPerCache Size `json:"max_per_cache" toml:"max_per_cache"`
 	// MaxAge drops a cache no job has used for that long. Default 7 days.
 	MaxAge Duration `json:"max_age" toml:"max_age"`
+	// ReaderMaxAge drops sooner the caches of jobs that don't write the
+	// shared ones, a merge or pull request's. Default 2 days, and never
+	// past MaxAge.
+	ReaderMaxAge Duration `json:"reader_max_age" toml:"reader_max_age"`
 	// QemuImg is the qemu-img binary; default, the one on PATH.
 	QemuImg string `json:"qemu_img" toml:"qemu_img"`
 }
@@ -62,7 +66,7 @@ func (c Class) validateCacheDisk(name string) error {
 		return fmt.Errorf("class %q: cache_disk needs a VM per job: leave capacity_per_instance and max_use_count at 1", name)
 	}
 	d := c.CacheDisk
-	if d.Budget < 0 || d.MinFree < 0 || d.MaxPerCache < 0 || d.MaxAge < 0 {
+	if d.Budget < 0 || d.MinFree < 0 || d.MaxPerCache < 0 || d.MaxAge < 0 || d.ReaderMaxAge < 0 {
 		return fmt.Errorf("class %q: cache_disk sizes and max_age can't be negative", name)
 	}
 	return nil
@@ -71,7 +75,7 @@ func (c Class) validateCacheDisk(name string) error {
 func (d CacheDisk) config() cachedisk.Config {
 	const mb = 1 << 20
 	return cachedisk.Config{Budget: int64(d.Budget) * mb, MinFree: int64(d.MinFree) * mb,
-		MaxPerCache: int64(d.MaxPerCache) * mb, MaxAge: time.Duration(d.MaxAge)}
+		MaxPerCache: int64(d.MaxPerCache) * mb, MaxAge: time.Duration(d.MaxAge), ReaderMaxAge: time.Duration(d.ReaderMaxAge)}
 }
 
 // openCache opens the class's store. Classes on one directory share it.
