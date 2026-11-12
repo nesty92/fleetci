@@ -221,7 +221,7 @@ func (s *Store) fetchLayers(ctx context.Context, chain []string, missing []int, 
 		if err != nil {
 			return err
 		}
-		sw := &sparseWriter{f: out}
+		sw := &sparseWriter{f: out, max: o.Layers[i].Size}
 		err = fetch(ctx, o.Layers[i].Path, sw)
 		if err == nil {
 			err = sw.finish()
@@ -250,11 +250,17 @@ func (s *Store) fetchLayers(ctx context.Context, chain []string, missing []int, 
 type sparseWriter struct {
 	f   *os.File
 	off int64
+	max int64 // the layer's size: a neighbour sending more is refused
 }
+
+var errTooLong = errors.New("longer than offered")
 
 const sparseBlock = 64 << 10
 
 func (w *sparseWriter) Write(p []byte) (int, error) {
+	if w.off+int64(len(p)) > w.max {
+		return 0, errTooLong
+	}
 	n := len(p)
 	for len(p) > 0 {
 		b := p[:min(len(p), sparseBlock)]

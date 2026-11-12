@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/go-hclog"
 
@@ -113,5 +115,34 @@ func TestShareOverPeers(t *testing.T) {
 	}
 	if len(c.Held()) != 0 {
 		t.Fatal("a bad layer was kept")
+	}
+
+	// A neighbour that stops sending halfway, and one that sends more
+	// than it offered: both copies end, and leave nothing.
+	defer func(d time.Duration) { layerIdle = d }(layerIdle)
+	layerIdle = 200 * time.Millisecond
+	stall := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(make([]byte, 1000))
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	})
+	long := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(bytes.Repeat([]byte{1}, int(offs[0].Size())+1))
+	})
+	for name, h := range map[string]http.Handler{"stalled": stall, "too long": long} {
+		start := time.Now()
+		_, err := c.Pull(ctx, offs[0], fetchLayer(hc, servePeer(t, p1, n1, h), false, &wire))
+		if err == nil || time.Since(start) > 5*time.Second {
+			t.Fatalf("%s: %v after %s", name, err, time.Since(start))
+		}
+		if len(c.Held()) != 0 {
+			t.Fatalf("%s: kept", name)
+		}
+		// The store still serves jobs.
+		l, err := c.Begin(main)
+		if err != nil {
+			t.Fatalf("%s: then Begin: %v", name, err)
+		}
+		c.Abort(l)
 	}
 }

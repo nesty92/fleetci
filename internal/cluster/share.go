@@ -145,6 +145,26 @@ func neighbourOffers(ctx context.Context, hc *http.Client, addr string) ([]cache
 	return out, json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&out)
 }
 
+// layerIdle is how long a layer may come without a byte: a neighbour
+// that stops sending ends the copy, and frees what it held.
+var layerIdle = 30 * time.Second
+
+var errStalled = errors.New("the neighbour stopped sending")
+
+// idleReader resets its timer on every read.
+type idleReader struct {
+	r io.Reader
+	t *time.Timer
+}
+
+func (i idleReader) Read(p []byte) (int, error) {
+	n, err := i.r.Read(p)
+	if n > 0 {
+		i.t.Reset(layerIdle)
+	}
+	return n, err
+}
+
 // countReader counts what it reads.
 type countReader struct {
 	r io.Reader
@@ -161,7 +181,16 @@ func (c countReader) Read(p []byte) (int, error) {
 // SHA-256 the neighbour sends after it. It asks for it compressed when
 // compress is set, and adds what came over the network to wire.
 func fetchLayer(hc *http.Client, addr string, compress bool, wire *int64) cachedisk.Fetch {
-	return func(ctx context.Context, path string, dst io.Writer) error {
+	return func(ctx context.Context, path string, dst io.Writer) (err error) {
+		ctx, cancel := context.WithCancelCause(ctx)
+		defer cancel(nil)
+		idle := time.AfterFunc(layerIdle, func() { cancel(errStalled) })
+		defer idle.Stop()
+		defer func() {
+			if err != nil && context.Cause(ctx) == errStalled {
+				err = errStalled
+			}
+		}()
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+addr+"/peer/v1/layers/"+path, nil)
 		if err != nil {
 			return err
@@ -177,7 +206,7 @@ func fetchLayer(hc *http.Client, addr string, compress bool, wire *int64) cached
 		if resp.StatusCode != http.StatusOK {
 			return fmt.Errorf("%s: %s", path, resp.Status)
 		}
-		var body io.Reader = countReader{resp.Body, wire}
+		var body io.Reader = idleReader{countReader{resp.Body, wire}, idle}
 		switch enc := resp.Header.Get("Content-Encoding"); enc {
 		case "":
 		case encS2:
