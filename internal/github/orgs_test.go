@@ -42,6 +42,31 @@ func TestAnOrgsJobsGetRunnersOnTheOrg(t *testing.T) {
 	}
 }
 
+// With runner_scope = "repo", an org's jobs get runners on their repo, in
+// no runner group of the org's.
+func TestAnOrgsJobsGetRunnersOnTheirRepo(t *testing.T) {
+	f := newForge(t, queuedJob(1, 7))
+	f.orgRepos = []map[string]any{{"full_name": "o/r"}}
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+	dispatchWith(t, f, srv.URL, &fakeBackend{defaultClass: "2vcpu-1gb"}, func(c *Config) {
+		c.Repos = nil
+		c.Orgs = []string{"o"}
+		c.RunnerScope = "repo"
+	})
+	eventuallySettled(t, f, 5*time.Second)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.scopes) == 0 {
+		t.Fatal("no runner registered")
+	}
+	for _, s := range f.scopes {
+		if s != "/repos/o/r" {
+			t.Fatalf("runners registered on %v; want all on /repos/o/r", f.scopes)
+		}
+	}
+}
+
 // A repo listed on its own but whose org is served too gets org runners.
 func TestAnOrgWinsOverItsRepoListedAlone(t *testing.T) {
 	d := &Dispatcher{orgs: map[string]bool{"acme": true}, repos: map[string]bool{"acme/x": true, "me/y": true}}

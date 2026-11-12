@@ -79,6 +79,14 @@ type Config struct {
 	// RunnerGroupID is the runner group to register in. Default 1, the
 	// default group.
 	RunnerGroupID int64 `json:"runner_group_id" toml:"runner_group_id"`
+	// RunnerScope is where an org's runners are registered: "org", the
+	// default, or "repo", on the job's repo. GitHub gives a repo's runner
+	// only that repo's jobs, so a runner fleetci starts for a job takes
+	// that job or another of its repo, whose cache disk is more often on
+	// the VM's node. With "repo" the token needs "Administration: write"
+	// on the org's repos, and RunnerGroupID does not apply: groups are an
+	// org's.
+	RunnerScope string `json:"runner_scope" toml:"runner_scope"`
 	// APIURL is GitHub's REST API. Default https://api.github.com.
 	APIURL string `json:"api_url" toml:"api_url"`
 	// CacheURL sends actions/cache, the setup-* caches and buildx's
@@ -277,6 +285,15 @@ func New(ctx context.Context, cfg Config, capacity source.Capacity, start StartF
 	if err := cfg.CacheDisk.Validate(); err != nil {
 		return nil, fmt.Errorf("github: cache_disk %w", err)
 	}
+	switch cfg.RunnerScope {
+	case "", "org":
+	case "repo":
+		if cfg.RunnerGroupID > 1 {
+			return nil, errors.New(`github: runner_group_id with runner_scope = "repo": runner groups are an org's, and a repo's runners are in none`)
+		}
+	default:
+		return nil, fmt.Errorf(`github runner_scope %q: want "org" or "repo"`, cfg.RunnerScope)
+	}
 	if cfg.RunnerGroupID == 0 {
 		cfg.RunnerGroupID = 1
 	}
@@ -381,7 +398,7 @@ func (w WebhookConfig) check() (string, error) {
 // serves the org, otherwise on the repo.
 func (d *Dispatcher) scope(repo string) string {
 	owner, _, _ := strings.Cut(repo, "/")
-	if d.orgs[strings.ToLower(owner)] {
+	if d.orgs[strings.ToLower(owner)] && d.cfg.RunnerScope != "repo" {
 		return "/orgs/" + owner
 	}
 	return "/repos/" + repo
@@ -429,7 +446,17 @@ func Check(ctx context.Context, cfg Config) []Finding {
 		if err := gh.do(ctx, http.MethodGet, "/orgs/"+org+"/repos?per_page=1", nil, nil); err != nil {
 			errs = append(errs, fmt.Errorf("listing repos: %w", err))
 		}
-		if err := gh.do(ctx, http.MethodGet, "/orgs/"+org+"/actions/runners?per_page=1", nil, nil); err != nil {
+		if cfg.RunnerScope == "repo" {
+			// The runners go on the repos: try one of them.
+			var repos []struct {
+				FullName string `json:"full_name"`
+			}
+			if err := gh.do(ctx, http.MethodGet, "/orgs/"+org+"/repos?per_page=1", nil, &repos); err == nil && len(repos) > 0 {
+				if err := gh.do(ctx, http.MethodGet, "/repos/"+repos[0].FullName+"/actions/runners?per_page=1", nil, nil); err != nil {
+					errs = append(errs, fmt.Errorf("listing %s's runners (runner_scope = \"repo\" needs Administration: read and write on the org's repos): %w", repos[0].FullName, err))
+				}
+			}
+		} else if err := gh.do(ctx, http.MethodGet, "/orgs/"+org+"/actions/runners?per_page=1", nil, nil); err != nil {
 			errs = append(errs, fmt.Errorf("listing runners (needs Self-hosted runners: read and write): %w", err))
 		}
 		out = append(out, Finding{"org " + org, "can list repos and runners", errors.Join(errs...)})
@@ -1038,7 +1065,11 @@ type registration struct {
 // register registers a runner under name.
 func (d *Dispatcher) register(ctx context.Context, scope, name string, labels []string) registration {
 	r := registration{name: name}
-	r.id, r.jit, r.err = d.gh.jitConfig(ctx, scope, r.name, d.cfg.RunnerGroupID, labels)
+	group := d.cfg.RunnerGroupID
+	if strings.HasPrefix(scope, "/repos/") {
+		group = 1 // a repo's runners are in no group of the org's
+	}
+	r.id, r.jit, r.err = d.gh.jitConfig(ctx, scope, r.name, group, labels)
 	r.at = time.Now()
 	return r
 }

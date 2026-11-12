@@ -116,6 +116,15 @@ The App needs the same permissions (*Self-hosted runners*, *Actions: Read*,
 and *Administration: Read and write* for repos listed in `repos`), and to
 be installed on each org or repo.
 
+`runner_scope = "repo"` registers an org's runners on each job's repo
+instead. GitHub gives a repo's runner only that repo's jobs, so the job a
+runner takes is the one it was started for or another of the same repo;
+with cache disks on several nodes, the VM's node then more often has that
+repo's disk. The token or App needs *Administration: Read and write* on
+the org's repos (not *Self-hosted runners*), runner groups don't apply, and
+the org must allow repos to have their own runners (Settings → Actions →
+Runners).
+
 ### Webhooks
 
 Without them fleetci finds jobs by listing each repo's queued runs every
