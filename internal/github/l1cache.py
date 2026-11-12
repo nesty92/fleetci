@@ -282,6 +282,8 @@ class Handler(BaseHTTPRequestHandler):
     def route(self, method):
         p = urllib.parse.urlsplit(self.path)
         q = urllib.parse.parse_qs(p.query, keep_blank_values=True)
+        if p.path != "/fleetci/ping":
+            log(method, p.path[:80], "from", self.client_address[0])
         try:
             if method == "POST" and p.path == SVC + "GetCacheEntryDownloadURL":
                 return self.restore()
