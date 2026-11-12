@@ -159,6 +159,16 @@ type Assignment struct {
 	// that is no longer listed is not cancelled: its controller may have
 	// gone, and the worker sees it through.
 	Cancel bool `json:"cancel,omitempty"`
+	// Cache answers a GitHub job's hook (AssignmentStatus.JobHint): the
+	// disk to attach before the job goes on.
+	Cache *CacheGrant `json:"cache,omitempty"`
+}
+
+// CacheGrant is the cache disk the leader decided on for a GitHub job.
+type CacheGrant struct {
+	// Scope is the disk to attach; nil for none, and Note says why.
+	Scope *cachedisk.Scope `json:"scope,omitempty"`
+	Note  string           `json:"note,omitempty"`
 }
 
 // RunSpec is the job an assignment runs: one of GitHub and GitLab.
@@ -173,6 +183,9 @@ type GitHubRun struct {
 	RunnerVersion string        `json:"runner_version,omitempty"`
 	CacheURL      string        `json:"cache_url,omitempty"`
 	IdleTimeout   time.Duration `json:"idle_timeout"`
+	// Cache: the VM's class has a cache disk, and each job waits at its
+	// start for the leader to say which (Assignment.Cache).
+	Cache bool `json:"cache,omitempty"`
 }
 
 // GitLabRun is a GitLab job, run with the job's own token.
@@ -198,15 +211,20 @@ const ReasonNoRoom = "NoRoom"
 
 // AssignmentStatus is an assignment as its worker reports it.
 type AssignmentStatus struct {
-	ID       string    `json:"id"`
-	Class    string    `json:"class"`
-	Phase    string    `json:"phase"`
-	Reason   string    `json:"reason,omitempty"`
-	Err      string    `json:"err,omitempty"`
-	VM       string    `json:"vm,omitempty"`
-	Instance string    `json:"instance,omitempty"`
-	Took     string    `json:"took,omitempty"` // the GitHub job its runner took
-	Since    time.Time `json:"since"`
+	ID       string `json:"id"`
+	Class    string `json:"class"`
+	Phase    string `json:"phase"`
+	Reason   string `json:"reason,omitempty"`
+	Err      string `json:"err,omitempty"`
+	VM       string `json:"vm,omitempty"`
+	Instance string `json:"instance,omitempty"`
+	Took     string `json:"took,omitempty"` // the GitHub job its runner took
+	// JobHint is what the GitHub job's hook said of the job, "owner/repo
+	// run-id", for the leader to decide its cache disk; CacheNote is what
+	// the job was told of its disk, once it was.
+	JobHint   string    `json:"job_hint,omitempty"`
+	CacheNote string    `json:"cache_note,omitempty"`
+	Since     time.Time `json:"since"`
 	// Job is the forge of the job it ran, "github" or "gitlab"; the times
 	// are when the leader wrote it, its VM was up, its job started, and it
 	// ended. Every controller keeps its history from these.

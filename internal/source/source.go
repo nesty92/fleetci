@@ -59,6 +59,20 @@ type CacheAttacher interface {
 	HasCache(vm string) bool
 }
 
+// CacheRelay is a CacheAttacher whose VMs another machine runs, which a
+// source can't reach: that machine relays the VM's job-started hook (see
+// package github) and attaches the disk the source decides on.
+type CacheRelay interface {
+	// JobHint waits for what the VM's job said of itself when it started.
+	JobHint(ctx context.Context, vm string) (string, error)
+	// GiveCache has the VM's machine attach scope's disk, or none when
+	// scope is nil, and tell the job; it returns what the job was told.
+	// note is what to tell it when scope is nil.
+	GiveCache(ctx context.Context, vm string, scope *cachedisk.Scope, note string) (string, error)
+	// ClassHasCache says whether the class's VMs have a cache disk.
+	ClassHasCache(class string) bool
+}
+
 type cachesKey struct{}
 
 // WithCaches says, to a Capacity that places VMs across machines, which

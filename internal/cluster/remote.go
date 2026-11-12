@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -256,6 +257,96 @@ func (c *Controller) createOn(ctx context.Context, w *workerConn, class string) 
 	}
 }
 
+var _ source.CacheRelay = fleetCapacity{}
+
+// HasCache says whether the VM's class has a cache disk.
+func (f fleetCapacity) HasCache(id string) bool {
+	_, a, err := f.c.assignmentOf(id)
+	if err != nil || a == nil {
+		return false
+	}
+	f.c.mu.Lock()
+	class := cmp.Or(a.status.Class, a.Class)
+	f.c.mu.Unlock()
+	spec := f.c.cfg.Classes[class]
+	return spec != nil && spec.CacheDisk
+}
+
+// ClassHasCache says whether the class's VMs have a cache disk.
+func (f fleetCapacity) ClassHasCache(class string) bool {
+	spec := f.c.cfg.Classes[class]
+	return spec != nil && spec.CacheDisk
+}
+
+// AttachCache: a fleet's VM gets its disk from its worker (GiveCache).
+func (f fleetCapacity) AttachCache(context.Context, string, cachedisk.Scope) (*cachedisk.Start, error) {
+	return nil, errors.New("a fleet's worker attaches its VM's cache disk")
+}
+
+// JobHint waits for the worker to relay what the VM's job hook said.
+func (f fleetCapacity) JobHint(ctx context.Context, id string) (string, error) {
+	st, err := f.c.awaitStatus(ctx, id, func(s AssignmentStatus) bool { return s.JobHint != "" || s.CacheNote != "" })
+	if err != nil {
+		return "", err
+	}
+	if st.JobHint == "" {
+		return "", errors.New(st.CacheNote) // the worker got no word from the hook
+	}
+	return st.JobHint, nil
+}
+
+// GiveCache writes the leader's decision on the VM's assignment: its
+// worker attaches the disk and answers the job's hook.
+func (f fleetCapacity) GiveCache(ctx context.Context, id string, scope *cachedisk.Scope, note string) (string, error) {
+	c := f.c
+	w, a, err := c.assignmentOf(id)
+	if err != nil {
+		return "", err
+	}
+	if a == nil {
+		return "", fmt.Errorf("vm %s is gone", id)
+	}
+	c.mu.Lock()
+	if a.Cache == nil {
+		a.Cache = &CacheGrant{Scope: scope, Note: note}
+		w.bumpLocked()
+	}
+	c.mu.Unlock()
+	st, err := c.awaitStatus(ctx, id, func(s AssignmentStatus) bool { return s.CacheNote != "" })
+	return st.CacheNote, err
+}
+
+// awaitStatus waits for the VM's assignment's status to be done, or over.
+func (c *Controller) awaitStatus(ctx context.Context, id string, done func(AssignmentStatus) bool) (AssignmentStatus, error) {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancel()
+	for {
+		wake := c.changed()
+		_, a, err := c.assignmentOf(id)
+		if err != nil {
+			return AssignmentStatus{}, err
+		}
+		if a == nil {
+			return AssignmentStatus{}, fmt.Errorf("vm %s is gone", id)
+		}
+		c.mu.Lock()
+		st := a.status
+		c.mu.Unlock()
+		switch {
+		case done(st):
+			return st, nil
+		case st.terminal():
+			return st, fmt.Errorf("vm %s's job ended", id)
+		}
+		select {
+		case <-ctx.Done():
+			return st, ctx.Err()
+		case <-wake:
+		case <-time.After(5 * time.Second):
+		}
+	}
+}
+
 // Conn is nil: a fleet VM is reached by its worker, not the controller.
 func (f fleetCapacity) Conn(string) (*proxy.Conn, error) { return nil, nil }
 
@@ -299,7 +390,7 @@ const lostAfter = 10 * time.Minute
 // it by the worker's reports.
 func (c *Controller) GitHubStart(cfg github.Config) github.StartFunc {
 	return func(ctx context.Context, vm github.VM, jit string, took func(job string)) error {
-		run := RunSpec{GitHub: &GitHubRun{JITConfig: jit, RunnerVersion: cfg.RunnerVersion, CacheURL: cfg.CacheURL, IdleTimeout: time.Duration(cfg.IdleTimeout)}}
+		run := RunSpec{GitHub: &GitHubRun{JITConfig: jit, RunnerVersion: cfg.RunnerVersion, CacheURL: cfg.CacheURL, IdleTimeout: time.Duration(cfg.IdleTimeout), Cache: vm.Cache}}
 		return c.runOn(ctx, vm.ID, run, took)
 	}
 }

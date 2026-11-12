@@ -1,10 +1,14 @@
 package cluster
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/hashicorp/go-hclog"
+
+	"github.com/nesty92/fleetci/internal/cachedisk"
+	"github.com/nesty92/fleetci/internal/source"
 )
 
 // cacheFleet is a controller with workers w1 and w2, as their reports say.
@@ -63,5 +67,60 @@ func TestPlaceByCache(t *testing.T) {
 	c.workers["w2"].report.State = Draining
 	if _, better := c.byCache(c.candidates("small"), "small", dirs); better {
 		t.Fatal("waits for a draining worker")
+	}
+}
+
+// TestCacheRelay: a GitHub job's hook goes through the worker's report to
+// the leader, whose decision reaches the worker on the assignment, and
+// what the job was told comes back.
+func TestCacheRelay(t *testing.T) {
+	f := newTestFleet(t)
+	ready := Report{State: Ready, Room: map[string]int{"small": 1}}
+	f.report(t, ready)
+	l := f.watch(t, "")
+	vmc := make(chan string, 1)
+	go func() {
+		vm, _ := f.c.Capacity().Create(context.Background(), "small")
+		vmc <- vm.ID
+	}()
+	l = f.watch(t, l.Rev)
+	st := AssignmentStatus{ID: l.Assignments[0].ID, Class: "small", Phase: PhaseReady, VM: "vm-1"}
+	ready.Assignments = []AssignmentStatus{st}
+	f.report(t, ready)
+	id := <-vmc
+	relay := f.c.Capacity().(source.CacheRelay)
+
+	hint := make(chan string, 1)
+	go func() {
+		h, err := relay.JobHint(context.Background(), id)
+		if err != nil {
+			t.Error(err)
+		}
+		hint <- h
+	}()
+	st.Phase, st.JobHint = PhaseRunning, "o/r 70"
+	ready.Assignments = []AssignmentStatus{st}
+	f.report(t, ready)
+	if h := <-hint; h != "o/r 70" {
+		t.Fatalf("hint %q", h)
+	}
+
+	told := make(chan string, 1)
+	go func() {
+		n, err := relay.GiveCache(context.Background(), id, &cachedisk.Scope{Ref: "main"}, "")
+		if err != nil {
+			t.Error(err)
+		}
+		told <- n
+	}()
+	l = f.watch(t, l.Rev)
+	if c := l.Assignments[0].Cache; c == nil || c.Scope == nil || c.Scope.Ref != "main" {
+		t.Fatalf("assignment's cache %+v", c)
+	}
+	st.CacheNote = "Cache disk: main"
+	ready.Assignments = []AssignmentStatus{st}
+	f.report(t, ready)
+	if n := <-told; n != "Cache disk: main" {
+		t.Fatalf("told %q", n)
 	}
 }

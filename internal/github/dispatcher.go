@@ -893,7 +893,17 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 		a.unwait = unwait
 	}
 	d.mu.Unlock()
-	created, err := d.capacity.Create(wctx, class)
+	// A fleet places the VM where the job's cache is, as far as the job
+	// queued says: the runner may take another, which then starts cold.
+	cctx := wctx
+	var ahead *factsAhead
+	if relay, ok := d.capacity.(source.CacheRelay); ok && relay.ClassHasCache(class) {
+		ahead = d.factsAhead(ctx, repo, j)
+		if f, ok := ahead.within(ctx, placeWait); ok {
+			cctx = source.WithCaches(wctx, cacheScope(d.cfg.CacheDisk, d.instance(), f).Dirs())
+		}
+	}
+	created, err := d.capacity.Create(cctx, class)
 	d.mu.Lock()
 	if a := d.taken[j.ID]; a != nil {
 		a.unwait = nil
@@ -980,8 +990,7 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 	var attaching sync.WaitGroup
 	defer func() { cancel(); attaching.Wait() }()
 	go d.watchIdle(rctx, cancel, scope, runnerID, log)
-	var ahead *factsAhead
-	if vm.Cache {
+	if vm.Cache && ahead == nil {
 		ahead = d.factsAhead(rctx, repo, j)
 	}
 

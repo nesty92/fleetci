@@ -41,6 +41,33 @@ cat "$d/job"`
 // answerScript gives the hook its answer, from stdin.
 const answerScript = `cat > /run/fleetci/done.new && mv /run/fleetci/done.new /run/fleetci/done`
 
+// ErrHookGaveUp says the job's hook stopped waiting for its cache disk
+// before fleetci claimed the decision: the job runs without one.
+var ErrHookGaveUp = errors.New("the job's hook stopped waiting")
+
+// WaitJobHook waits for the VM's job-started hook to say which run the
+// job is in, "owner/repo run-id", and claims the decision.
+func WaitJobHook(ctx context.Context, conn *proxy.Conn) (string, error) {
+	wctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancel()
+	out, err := onVM(wctx, conn, waitJobScript, "")
+	var exit interface{ ExitStatus() int }
+	if errors.As(err, &exit) && exit.ExitStatus() == 4 {
+		return "", ErrHookGaveUp
+	}
+	if err != nil {
+		return "", fmt.Errorf("the job's hook did not say which job it is: %w", err)
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// AnswerJobHook gives the hook its answer, for the job's log; the job goes
+// on then.
+func AnswerJobHook(ctx context.Context, conn *proxy.Conn, msg string) error {
+	_, err := onVM(ctx, conn, answerScript, msg+"\n")
+	return err
+}
+
 // factsAhead is what GitHub says of the job a runner was started for,
 // asked while its VM and runner start, so its disk is attached as soon as
 // the runner has the job, if it is that one.
@@ -60,6 +87,16 @@ func (d *Dispatcher) factsAhead(ctx context.Context, repo string, j job) *factsA
 		a.facts, a.err = d.cacheFacts(ctx, repo, j)
 	}()
 	return a
+}
+
+// placeWait is how long a fleet's placement waits for the facts.
+const placeWait = 2 * time.Second
+
+// within is get, waiting no longer than wait.
+func (a *factsAhead) within(ctx context.Context, wait time.Duration) (cacheFacts, bool) {
+	ctx, cancel := context.WithTimeout(ctx, wait)
+	defer cancel()
+	return a.get(ctx)
 }
 
 // get is the facts, if they came without error.
@@ -83,32 +120,45 @@ func (d *Dispatcher) attachCache(ctx context.Context, vm VM, repo string, queued
 	if !ok {
 		return
 	}
-	wctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
-	out, err := onVM(wctx, vm.Conn, waitJobScript, "")
-	cancel()
-	var exit interface{ ExitStatus() int }
-	if errors.As(err, &exit) && exit.ExitStatus() == 4 {
-		log.Warn("no cache disk: the job's hook stopped waiting")
-		return
+	// A fleet's VM is on a worker, which relays the hook.
+	relay, remote := d.capacity.(source.CacheRelay)
+	var hint string
+	var err error
+	if remote {
+		hint, err = relay.JobHint(ctx, vm.ID)
+	} else {
+		hint, err = WaitJobHook(ctx, vm.Conn)
 	}
 	if err != nil {
-		log.Warn("no cache disk: the job's hook did not say which job it is", "err", err)
+		log.Warn("no cache disk", "err", err)
 		return
 	}
-	msg := d.cacheDisk(ctx, ca, vm, repo, queued, runner, strings.TrimSpace(out), ahead, log)
-	if _, err := onVM(context.WithoutCancel(ctx), vm.Conn, answerScript, msg+"\n"); err != nil {
+	scope, msg := d.jobScope(ctx, repo, queued, runner, hint, ahead, log)
+	if remote {
+		if _, err := relay.GiveCache(ctx, vm.ID, scope, msg); err != nil {
+			log.Warn("no cache disk", "err", err)
+		}
+		return
+	}
+	if scope != nil {
+		msg = d.attach(ctx, ca, vm, *scope, log)
+	}
+	if err := AnswerJobHook(context.WithoutCancel(ctx), vm.Conn, msg); err != nil {
 		log.Warn("the job's hook got no answer; it goes on after ten minutes", "err", err)
 	}
 }
 
-// cacheDisk attaches the job's disk and says what it got, for the job's log.
-func (d *Dispatcher) cacheDisk(ctx context.Context, ca source.CacheAttacher, vm VM, repo string, queued int64, runner, hint string, ahead *factsAhead, log hclog.Logger) string {
+// jobScope is the cache of the job the runner took, or nil and why not,
+// for the job's log.
+func (d *Dispatcher) jobScope(ctx context.Context, repo string, queued int64, runner, hint string, ahead *factsAhead, log hclog.Logger) (*cachedisk.Scope, string) {
 	jobRepo, j, err := d.runnersJob(ctx, repo, queued, runner, hint)
 	if err != nil {
 		log.Warn("no cache disk", "err", err)
-		return "No cache disk: " + err.Error()
+		return nil, "No cache disk: " + err.Error()
 	}
-	log = log.With("job_id", strconv.FormatInt(j.ID, 10))
+	if jobRepo != repo || j.ID != queued {
+		log.Info("the runner took another job than the one it was started for", "job_repo", jobRepo, "job_id", strconv.FormatInt(j.ID, 10))
+	}
 	f, ok := cacheFacts{}, false
 	if jobRepo == repo && j.ID == queued {
 		f, ok = ahead.get(ctx)
@@ -116,10 +166,16 @@ func (d *Dispatcher) cacheDisk(ctx context.Context, ca source.CacheAttacher, vm 
 	if !ok {
 		if f, err = d.cacheFacts(ctx, jobRepo, j); err != nil {
 			log.Warn("no cache disk", "err", err)
-			return "No cache disk: " + err.Error()
+			return nil, "No cache disk: " + err.Error()
 		}
 	}
-	msg, err := source.AttachCache(ctx, ca, vm.ID, cacheScope(d.cfg.CacheDisk, d.instance(), f))
+	scope := cacheScope(d.cfg.CacheDisk, d.instance(), f)
+	return &scope, ""
+}
+
+// attach attaches the job's disk and says what it got, for the job's log.
+func (d *Dispatcher) attach(ctx context.Context, ca source.CacheAttacher, vm VM, scope cachedisk.Scope, log hclog.Logger) string {
+	msg, err := source.AttachCache(ctx, ca, vm.ID, scope)
 	if err != nil {
 		log.Warn("no cache disk", "err", err)
 		return "No cache disk: " + err.Error()

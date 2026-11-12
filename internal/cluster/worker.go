@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -77,6 +78,9 @@ type task struct {
 	status  AssignmentStatus
 	started bool
 	cancel  context.CancelFunc // the job's, once it runs
+	// granted is closed when the leader's Cache comes, for a job that
+	// waits for it.
+	granted chan struct{}
 	done    time.Time
 	listed  time.Time // when a controller last listed it
 	by      string    // the address of the controller that last listed it
@@ -679,6 +683,12 @@ func (w *Worker) reconcile(ctx context.Context, by string, list []Assignment) {
 			continue
 		}
 		t.a.Cancel = t.a.Cancel || a.Cancel
+		if t.a.Cache == nil && a.Cache != nil {
+			t.a.Cache = a.Cache
+			if t.granted != nil {
+				close(t.granted)
+			}
+		}
 		if t.a.Run == nil && a.Run != nil {
 			t.a.Run = a.Run
 		}
@@ -766,6 +776,7 @@ func (w *Worker) run(ctx context.Context, t *task) {
 	defer cancel()
 	run := *t.a.Run
 	v.cancel, t.cancel = cancel, cancel
+	t.granted = make(chan struct{})
 	t.status.Phase, t.status.Since = PhaseRunning, time.Now()
 	t.status.Started = t.status.Since
 	switch {
@@ -781,7 +792,7 @@ func (w *Worker) run(ctx context.Context, t *task) {
 	switch {
 	case run.GitHub != nil:
 		w.setJob(v, "github")
-		err = w.runGitHub(rctx, cancel, v, *run.GitHub, log, func(job string) {
+		err = w.runGitHub(rctx, cancel, t, v, *run.GitHub, log, func(job string) {
 			w.mu.Lock()
 			v.took, t.status.Took = job, job
 			w.mu.Unlock()
@@ -928,8 +939,17 @@ func (w *Worker) delete(ctx context.Context, id string) error {
 // runGitHub runs a just-in-time runner on a VM until it exits. A runner
 // that takes no job is stopped, as the leader's idle watch would; the
 // leader may be gone.
-func (w *Worker) runGitHub(ctx context.Context, cancel context.CancelFunc, v *workerVM, req GitHubRun, log hclog.Logger, took func(string)) error {
+func (w *Worker) runGitHub(ctx context.Context, cancel context.CancelFunc, t *task, v *workerVM, req GitHubRun, log hclog.Logger, took func(string)) error {
 	start := github.SSHStart(req.RunnerVersion, req.CacheURL, log)
+	var hook sync.WaitGroup
+	defer hook.Wait()
+	if req.Cache {
+		hook.Add(1)
+		go func() {
+			defer hook.Done()
+			w.relayCache(ctx, t, v, log)
+		}()
+	}
 	tookc := make(chan struct{})
 	go func() {
 		idle := req.IdleTimeout + time.Minute
@@ -945,10 +965,64 @@ func (w *Worker) runGitHub(ctx context.Context, cancel context.CancelFunc, v *wo
 		}
 	}()
 	var once sync.Once
-	return start(ctx, github.VM{VM: source.VM{ID: v.vm.ID, Class: v.vm.Class, Instance: v.vm.Instance}, Conn: v.vm.Conn}, req.JITConfig, func(job string) {
+	return start(ctx, github.VM{VM: source.VM{ID: v.vm.ID, Class: v.vm.Class, Instance: v.vm.Instance}, Conn: v.vm.Conn, Cache: req.Cache}, req.JITConfig, func(job string) {
 		once.Do(func() { close(tookc) })
 		took(job)
 	})
+}
+
+// relayCache is a GitHub job's cache disk: it relays what the job's hook
+// says of the job to the leader, which decides the disk, attaches that,
+// and answers the hook. A job that ends first leaves it.
+func (w *Worker) relayCache(ctx context.Context, t *task, v *workerVM, log hclog.Logger) {
+	set := func(hint, note string) {
+		w.mu.Lock()
+		if hint != "" {
+			t.status.JobHint = hint
+		}
+		if note != "" {
+			t.status.CacheNote = note
+		}
+		w.mu.Unlock()
+		w.poke()
+	}
+	hint, err := github.WaitJobHook(ctx, v.vm.Conn)
+	if err != nil {
+		if ctx.Err() == nil {
+			log.Warn("no cache disk", "err", err)
+			set("", "No cache disk: "+err.Error())
+		}
+		return
+	}
+	set(hint, "")
+	w.mu.Lock()
+	grant, granted := t.a.Cache, t.granted
+	w.mu.Unlock()
+	if grant == nil {
+		select {
+		case <-granted:
+		case <-ctx.Done():
+			return
+		case <-time.After(3 * time.Minute):
+			log.Warn("no cache disk: the leader did not say which")
+			_ = github.AnswerJobHook(context.WithoutCancel(ctx), v.vm.Conn, "No cache disk: fleetci did not say which")
+			set("", "No cache disk: the leader did not say which")
+			return
+		}
+		w.mu.Lock()
+		grant = t.a.Cache
+		w.mu.Unlock()
+	}
+	note := cmp.Or(grant.Note, "No cache disk")
+	if grant.Scope != nil {
+		if _, n := w.attachCache(ctx, v, *grant.Scope, log); n != "" {
+			note = n
+		}
+	}
+	if err := github.AnswerJobHook(context.WithoutCancel(ctx), v.vm.Conn, note); err != nil {
+		log.Warn("the job's hook got no answer; it goes on after ten minutes", "err", err)
+	}
+	set("", note)
 }
 
 // attachCache gives the VM its job's cache disk, when its class has one.
