@@ -191,6 +191,10 @@ func TestFactsAhead(t *testing.T) {
 	if f, ok := ahead.get(ctx); !ok || f.branch != "feature/x" || runs != 1 {
 		t.Fatalf("ahead: %+v %v, %d run calls", f, ok, runs)
 	}
+	// Another job of the run: GitHub was asked already.
+	if f, err := d.cacheFacts(ctx, "o/r", job{ID: 3, RunID: 70}); err != nil || f.repoID != 9 || runs != 1 {
+		t.Fatalf("again: %+v %v, %d run calls", f, err, runs)
+	}
 	if d.factsAhead(ctx, "o/r", job{ID: 1}) != nil {
 		t.Fatal("asked ahead for a job with no run")
 	}

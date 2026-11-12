@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/go-hclog"
@@ -166,17 +167,66 @@ func (d *Dispatcher) runnersJob(ctx context.Context, repo string, queued int64, 
 		select {
 		case <-ctx.Done():
 			return "", job{}, ctx.Err()
-		case <-time.After(jobLookupWait):
+		case <-time.After(jobLookupWait << min(try, 2)):
 		}
 	}
 }
 
-// jobLookupWait is how long runnersJob waits between tries, and
-// jobLookupTries how many it makes: GitHub names the runner on the job
-// within a second or so, and the job's steps wait for its disk.
+// jobLookupWait is how long runnersJob first waits between tries, doubling
+// to four times that, and jobLookupTries how many it makes: GitHub names
+// the runner on the job within a second or so, and the job's steps wait
+// for its disk.
 var jobLookupWait = 250 * time.Millisecond
 
-const jobLookupTries = 17
+const jobLookupTries = 7
+
+// How long what GitHub says is kept: a run's branch and event never
+// change, a repo's default branch rarely, a branch's protection may.
+const (
+	runFor  = 30 * time.Minute
+	repoFor = 10 * time.Minute
+	refFor  = time.Minute
+)
+
+// memo keeps answers for a while; errors are not kept. The zero value is
+// ready.
+type memo[V any] struct {
+	mu sync.Mutex
+	m  map[string]memoized[V]
+}
+
+type memoized[V any] struct {
+	v    V
+	till time.Time
+}
+
+func (m *memo[V]) get(key string, keep time.Duration, fetch func() (V, error)) (V, error) {
+	now := time.Now()
+	m.mu.Lock()
+	e, ok := m.m[key]
+	m.mu.Unlock()
+	if ok && now.Before(e.till) {
+		return e.v, nil
+	}
+	v, err := fetch()
+	if err != nil {
+		return v, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.m == nil {
+		m.m = map[string]memoized[V]{}
+	}
+	if len(m.m) >= 1024 {
+		for k, e := range m.m {
+			if !now.Before(e.till) {
+				delete(m.m, k)
+			}
+		}
+	}
+	m.m[key] = memoized[V]{v, now.Add(keep)}
+	return v, nil
+}
 
 // cacheFacts is what GitHub says of a job, for its cache disk.
 type cacheFacts struct {
@@ -192,12 +242,12 @@ type cacheFacts struct {
 
 func (d *Dispatcher) cacheFacts(ctx context.Context, repo string, j job) (cacheFacts, error) {
 	f := cacheFacts{repo: repo}
-	r, err := d.gh.repo(ctx, repo)
+	r, err := d.repoInfos.get(repo, repoFor, func() (repoInfo, error) { return d.gh.repo(ctx, repo) })
 	if err != nil {
 		return f, err
 	}
 	f.repoID, f.defaultBranch = r.ID, r.DefaultBranch
-	run, err := d.gh.run(ctx, repo, j.RunID)
+	run, err := d.runs.get(fmt.Sprintf("%s %d", repo, j.RunID), runFor, func() (workflowRun, error) { return d.gh.run(ctx, repo, j.RunID) })
 	if err != nil {
 		return f, err
 	}
@@ -208,10 +258,10 @@ func (d *Dispatcher) cacheFacts(ctx context.Context, repo string, j job) (cacheF
 	if isReview(f.event) || isFork(f) || !needsRef(d.cfg.CacheDisk.Rules(repo)) {
 		return f, nil
 	}
-	f.protected, err = d.gh.branchProtected(ctx, repo, f.branch)
+	f.protected, err = d.refs.get(repo+" branch "+f.branch, refFor, func() (bool, error) { return d.gh.branchProtected(ctx, repo, f.branch) })
 	if errors.Is(err, errNotFound) {
 		// Not a branch: a tag's run names the tag.
-		f.tag, err = d.gh.tagExists(ctx, repo, f.branch)
+		f.tag, err = d.refs.get(repo+" tag "+f.branch, refFor, func() (bool, error) { return d.gh.tagExists(ctx, repo, f.branch) })
 	}
 	if se := (statusError{}); errors.As(err, &se) && se.status == http.StatusForbidden {
 		err = fmt.Errorf("the writers' rules need the branch, which the app may not read (Contents: read): %w", err)

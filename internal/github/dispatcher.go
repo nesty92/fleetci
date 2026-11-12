@@ -211,6 +211,12 @@ type Dispatcher struct {
 
 	orphans []orphan // runners to remove once GitHub lets us
 
+	// What GitHub says of repos, runs and refs, for cache disks: jobs of
+	// one run, or one repo, ask the same.
+	repoInfos memo[repoInfo]
+	runs      memo[workflowRun]
+	refs      memo[bool]
+
 	// settle is how long a runner whose registration went unanswered is
 	// looked for, in case GitHub registers it late.
 	settle time.Duration
