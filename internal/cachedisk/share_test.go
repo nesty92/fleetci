@@ -199,3 +199,43 @@ func TestPulledDeepChainIsFlattened(t *testing.T) {
 		t.Fatalf("copied chain of %d left deep", len(h.Chain))
 	}
 }
+
+// TestPullNotAfterEvicting: a cache a node evicted, or would not take, is
+// copied again only when the neighbour's is newer, so evicting and copying
+// it back don't take turns.
+func TestPullNotAfterEvicting(t *testing.T) {
+	a, b := open(t, Config{}, &fakeImages{data: 10}), open(t, Config{}, &fakeImages{})
+	main := Scope{Forge: "gitlab", Instance: "gitlab.com", Project: "1", Ref: "main", Job: "go", Writer: true}
+	commitJob(t, a, main)
+	o := offerOf(t, a, main.key())
+	var got []string
+	if n, err := b.Pull(context.Background(), o, fetchFrom(a, &got)); n == 0 || err != nil {
+		t.Fatalf("first copy: %d, %v", n, err)
+	}
+	now := b.now
+	b.now = func() time.Time { return now().Add(365 * 24 * time.Hour) }
+	b.mu.Lock()
+	b.evict()
+	b.mu.Unlock()
+	b.now = now
+	if _, ok := b.Has(main.key()); ok {
+		t.Fatal("not evicted")
+	}
+	got = nil
+	if n, err := b.Pull(context.Background(), o, fetchFrom(a, &got)); n != 0 || err != nil || len(got) != 0 {
+		t.Fatalf("the evicted copy came back: %d, %v, fetched %v", n, err, got)
+	}
+	time.Sleep(time.Millisecond)
+	commitJob(t, a, main)
+	if n, err := b.Pull(context.Background(), offerOf(t, a, main.key()), fetchFrom(a, &got)); n == 0 || err != nil {
+		t.Fatalf("a newer copy: %d, %v", n, err)
+	}
+
+	small := open(t, Config{MaxPerCache: 1}, &fakeImages{})
+	if _, err := small.Pull(context.Background(), o, fetchFrom(a, &got)); err == nil {
+		t.Fatal("over max_per_cache: taken")
+	}
+	if n, err := small.Pull(context.Background(), o, fetchFrom(a, &got)); n != 0 || err != nil {
+		t.Fatalf("over max_per_cache again: %d, %v", n, err)
+	}
+}

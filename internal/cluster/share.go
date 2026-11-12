@@ -335,10 +335,7 @@ func (w *Worker) shareOnce(ctx context.Context, pool *x509.CertPool) {
 		start := time.Now()
 		var wire int64
 		n, err := p.store.Pull(ctx, p.c.o, fetchLayer(clients[p.c.near.ID], p.c.near.Addr, w.compressing(), &wire))
-		name := p.c.o.Scope.Key
-		if name == "" {
-			name = p.c.o.Scope.Ref
-		}
+		name := p.c.o.Scope.Label()
 		switch {
 		case errors.Is(err, cachedisk.ErrNoRoom):
 			w.log.Debug("no room for a neighbour's cache", "cache", name, "peer", p.c.near.ID)

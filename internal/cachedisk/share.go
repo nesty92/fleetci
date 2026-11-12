@@ -145,7 +145,12 @@ func (s *Store) Pull(ctx context.Context, o Offer, fetch Fetch) (int64, error) {
 		s.mu.Unlock()
 		return 0, nil
 	}
+	if c, ok := s.declined[o.Key]; ok && !o.Committed.After(c) {
+		s.mu.Unlock()
+		return 0, nil
+	}
 	if o.Size() > s.cfg.MaxPerCache {
+		s.declined[o.Key] = o.Committed
 		s.mu.Unlock()
 		return 0, fmt.Errorf("%d bytes, over max_per_cache", o.Size())
 	}

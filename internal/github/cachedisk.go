@@ -47,19 +47,39 @@ var ErrHookGaveUp = errors.New("the job's hook stopped waiting")
 
 // WaitJobHook waits for the VM's job-started hook to say which run the
 // job is in, "owner/repo run-id", and claims the decision.
+// The VM's SSH may not answer yet when its runner already has the job:
+// the wait retries a connection that fails, until the hook's own wait is
+// over, but not a script that ran and failed.
 func WaitJobHook(ctx context.Context, conn *proxy.Conn) (string, error) {
 	wctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
-	out, err := onVM(wctx, conn, waitJobScript, "")
-	var exit interface{ ExitStatus() int }
-	if errors.As(err, &exit) && exit.ExitStatus() == 4 {
-		return "", ErrHookGaveUp
+	for {
+		out, err := hookRun(wctx, conn, waitJobScript, "")
+		var exit interface{ ExitStatus() int }
+		switch {
+		case err == nil:
+			return strings.TrimSpace(out), nil
+		case errors.As(err, &exit) && exit.ExitStatus() == 4:
+			return "", ErrHookGaveUp
+		case errors.As(err, &exit) || errors.Is(err, errNoConn):
+			return "", fmt.Errorf("the job's hook did not say which job it is: %w", err)
+		}
+		select {
+		case <-wctx.Done():
+			return "", fmt.Errorf("the job's hook did not say which job it is: %w", err)
+		case <-time.After(hookRetry):
+		}
 	}
-	if err != nil {
-		return "", fmt.Errorf("the job's hook did not say which job it is: %w", err)
-	}
-	return strings.TrimSpace(out), nil
 }
+
+// errNoConn says there is no connection to the VM to retry.
+var errNoConn = errors.New("no connection to the vm")
+
+// hookRun runs a script on the VM; tests replace it.
+var hookRun = onVM
+
+// hookRetry is how long WaitJobHook waits before it connects again.
+var hookRetry = time.Second
 
 // AnswerJobHook gives the hook its answer, for the job's log; the job goes
 // on then.
@@ -421,7 +441,7 @@ func (d *Dispatcher) instance() string {
 // onVM runs a script on the VM as its user and returns its output.
 func onVM(ctx context.Context, conn *proxy.Conn, script, stdin string) (string, error) {
 	if conn == nil {
-		return "", errors.New("no connection to the vm")
+		return "", errNoConn
 	}
 	client, _, err := conn.Client(ctx)
 	if err != nil {

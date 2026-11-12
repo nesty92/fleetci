@@ -221,7 +221,11 @@ type Store struct {
 	flattening map[string]bool
 	// pulling: layers being copied from another node, as .part files.
 	pulling map[string]bool
-	wg      sync.WaitGroup
+	// declined: shared caches this store evicted or would not take, and
+	// the commit it had or was offered; a neighbour's copy comes again
+	// only when newer, so evicting and copying back don't take turns.
+	declined map[string]time.Time
+	wg       sync.WaitGroup
 }
 
 // Open opens the store in dir, making it if needed.
@@ -233,7 +237,8 @@ func Open(dir string, cfg Config, img Images, log hclog.Logger) (*Store, error) 
 		return nil, err
 	}
 	s := &Store{dir: dir, cfg: cfg.withDefaults(), img: img, log: log, now: time.Now,
-		leases: map[*Lease]struct{}{}, flattening: map[string]bool{}, pulling: map[string]bool{}}
+		leases: map[*Lease]struct{}{}, flattening: map[string]bool{}, pulling: map[string]bool{},
+		declined: map[string]time.Time{}}
 	// Layers a stopped fleetci left half-made, and chains it left deep.
 	s.mu.Lock()
 	s.sweep()
@@ -526,9 +531,11 @@ func (s *Store) evict() { s.evictFor(0) }
 // evictFor is evict with room left for need more bytes.
 func (s *Store) evictFor(need int64) {
 	type scope struct {
-		key    string
-		used   time.Time
-		maxAge time.Duration
+		key       string
+		used      time.Time
+		committed time.Time
+		shared    bool
+		maxAge    time.Duration
 	}
 	var heads []scope
 	for _, key := range s.keys() {
@@ -540,7 +547,7 @@ func (s *Store) evictFor(need int64) {
 		if !h.Scope.Writer {
 			age = s.cfg.ReaderMaxAge
 		}
-		heads = append(heads, scope{key, h.Used, age})
+		heads = append(heads, scope{key, h.Used, h.Committed, h.Scope.Writer, age})
 	}
 	sort.Slice(heads, func(i, j int) bool { return heads[i].used.Before(heads[j].used) })
 	leased := map[string]bool{}
@@ -561,6 +568,9 @@ func (s *Store) evictFor(need int64) {
 		}
 		s.log.Info("cache: evicting", "scope", h.key, "unused for", s.now().Sub(h.used).Round(time.Minute).String())
 		_ = os.Remove(filepath.Join(s.dir, "scopes", h.key, "head.json"))
+		if h.shared {
+			s.declined[h.key] = h.committed
+		}
 		s.sweep()
 	}
 }
