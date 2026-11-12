@@ -50,6 +50,49 @@ def log(*a):
     print(time.strftime("%H:%M:%S"), *a, file=sys.stderr, flush=True)
 
 
+# What the job's cache steps got, for the line the job's log ends with.
+STATS = {"hit": [0, 0], "fill": [0, 0, 0.0], "remote": 0, "none": 0,
+         "saved": [0, 0], "saved_remote": 0}
+STATS_MU = threading.Lock()
+
+
+def count(what, size=0, secs=0.0):
+    with STATS_MU:
+        v = STATS[what]
+        if isinstance(v, int):
+            STATS[what] = v + 1
+            return
+        v[0] += 1
+        v[1] += size
+        if len(v) > 2:
+            v[2] += secs
+
+
+def summary():
+    def mb(n):
+        return "%d MB" % round(n / 1e6)
+
+    with STATS_MU:
+        s = {k: (list(v) if isinstance(v, list) else v) for k, v in STATS.items()}
+    parts = []
+    if s["hit"][0]:
+        parts.append("%d restored from the cache disk (%s)" % (s["hit"][0], mb(s["hit"][1])))
+    if s["fill"][0]:
+        parts.append("%d downloaded to it (%s in %.1fs)" % (s["fill"][0], mb(s["fill"][1]), s["fill"][2]))
+    if s["remote"]:
+        parts.append("%d restored from the cache server only" % s["remote"])
+    if s["none"]:
+        parts.append("%d not in the cache" % s["none"])
+    if s["saved"][0]:
+        parts.append("%d saved, kept on the disk (%s)" % (s["saved"][0], mb(s["saved"][1])))
+    if s["saved_remote"]:
+        parts.append("%d saved to the cache server only" % s["saved_remote"])
+    line = "fleetci cache: " + (", ".join(parts) if parts else "no actions/cache calls")
+    if STORE_WHY[0]:
+        line += "; the cache disk wasn't used: " + STORE_WHY[0]
+    return line + "\n"
+
+
 STORE_WHY = [None]
 
 
@@ -359,7 +402,7 @@ class Handler(BaseHTTPRequestHandler):
     def route(self, method):
         p = urllib.parse.urlsplit(self.path)
         q = urllib.parse.parse_qs(p.query, keep_blank_values=True)
-        if p.path != "/fleetci/ping":
+        if p.path not in ("/fleetci/ping", "/fleetci/stats"):
             log(method, p.path[:80], "from", self.client_address[0])
         try:
             if method == "POST" and p.path == SVC + "GetCacheEntryDownloadURL":
@@ -370,6 +413,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.finalize()
             if method == "GET" and p.path == "/fleetci/ping":
                 return self.reply(200, [], b"ok")
+            if method == "GET" and p.path == "/fleetci/stats":
+                return self.reply(200, [], summary().encode())
             if method == "GET" and p.path.startswith("/fleetci/l1/"):
                 return self.serve_local(p.path.rsplit("/", 1)[1])
             if method == "GET" and p.path.startswith("/fleetci/fill/"):
@@ -417,7 +462,7 @@ class Handler(BaseHTTPRequestHandler):
             eid = entry_id(m, version)
             return self.reply_json(200, [], {"ok": True, "matched_key": m,
                                              "signed_download_url": self.local_url("/fleetci/l1/" + eid)})
-        if status != 200 or not disk:
+        if status != 200:
             return self.reply(status, headers, body)
         try:
             out = json.loads(body)
@@ -426,6 +471,10 @@ class Handler(BaseHTTPRequestHandler):
         m = out.get("matched_key") or out.get("matchedKey")
         url = out.get("signed_download_url") or out.get("signedDownloadUrl")
         if not out.get("ok") or not m or not url:
+            count("none")
+            return self.reply(status, headers, body)
+        if not disk:
+            count("remote")
             return self.reply(status, headers, body)
         eid = entry_id(m, version)
         if have(eid):
@@ -438,13 +487,15 @@ class Handler(BaseHTTPRequestHandler):
         out["signed_download_url"] = local
         self.reply_json(status, headers, out)
 
-    def serve_local(self, eid):
+    def serve_local(self, eid, hit=True):
         try:
             f = open(blob_path(eid), "rb")
         except OSError:
             return self.reply(404, [], b"not on the disk")
         with f:
             size = os.fstat(f.fileno()).st_size
+            if hit:
+                count("hit", size)
             try:
                 os.utime(blob_path(eid))
             except OSError:
@@ -469,14 +520,17 @@ class Handler(BaseHTTPRequestHandler):
                 start = time.time()
                 if fetch_ranges(url, tmp) is not None:
                     commit(tmp, key, version)
-                    log("fetched %s in %.1fs" % (key, time.time() - start))
-                    return self.serve_local(eid)
+                    secs = time.time() - start
+                    log("fetched %s in %.1fs" % (key, secs))
+                    count("fill", os.path.getsize(blob_path(eid)), secs)
+                    return self.serve_local(eid, hit=False)
             except Exception as e:
                 log("not keeping (ranges):", e)
             try:
                 os.remove(tmp)
             except OSError:
                 pass
+        start = time.time()
         conn, resp = self.upstream("GET", url)
         tmp, tee = None, None
         if resp.status == 200 and store_ok():
@@ -494,14 +548,19 @@ class Handler(BaseHTTPRequestHandler):
                     tee.close()
                 except OSError:
                     whole = False
+        kept = False
         if tmp is not None and tee is not None:
             try:
                 if whole:
                     commit(tmp, key, version)
+                    kept = True
+                    count("fill", os.path.getsize(blob_path(eid)), time.time() - start)
                 else:
                     os.remove(tmp)
             except OSError as e:
                 log("not keeping:", e)
+        if not kept and resp.status == 200:
+            count("remote")
 
     def create(self):
         raw = b"".join(self.body_chunks())
@@ -612,13 +671,19 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             ok = False
         whole = os.path.join(d, "whole")
+        kept = False
         if ok and os.path.isfile(whole):
             try:
                 want = int(req.get("size_bytes") or req.get("sizeBytes") or -1)
-                if want < 0 or os.path.getsize(whole) == want:
+                size = os.path.getsize(whole)
+                if want < 0 or size == want:
                     commit(whole, key, version)
+                    kept = True
+                    count("saved", size)
             except (OSError, ValueError) as e:
                 log("not keeping:", e)
+        if ok and not kept:
+            count("saved_remote")
         shutil.rmtree(d, ignore_errors=True)
         self.reply(status, headers, body)
 

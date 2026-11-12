@@ -402,6 +402,33 @@ func withQuery(url, q string) string {
 
 // A miss is fetched to the disk in parallel ranges, as actions/cache would
 // fetch it from Azure, then served from the disk.
+// The job's log ends with what its cache steps got: the L1's summary.
+func TestL1CacheSummary(t *testing.T) {
+	l2 := newFakeL2(t)
+	l1 := startL1(t, l2.srv.URL+"/", filepath.Join(t.TempDir(), "actions"), true)
+	stats := func() string {
+		code, out := do(t, http.MethodGet, l1+"/fleetci/stats", nil, nil)
+		if code != http.StatusOK {
+			t.Fatalf("stats: %d %s", code, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	if s := stats(); s != "fleetci cache: no actions/cache calls" {
+		t.Fatalf("before: %q", s)
+	}
+	l2.put("deps", "v1", bytes.Repeat([]byte("d"), 3_000_000))
+	restore(t, l1, "deps", nil)
+	restore(t, l1, "deps", nil)
+	restore(t, l1, "nope", nil)
+	save(t, l1, "build", bytes.Repeat([]byte("b"), 2_000_000), 0)
+	s := stats()
+	for _, want := range []string{"1 restored from the cache disk (3 MB)", "1 downloaded to it (3 MB in ", "1 not in the cache", "1 saved, kept on the disk (2 MB)"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("%q lacks %q", s, want)
+		}
+	}
+}
+
 func TestL1CacheFetchesInRanges(t *testing.T) {
 	l2 := newFakeL2(t)
 	store := filepath.Join(t.TempDir(), "actions")

@@ -84,9 +84,22 @@ L1PY
 fi
 if [ -n "$l1$cache" ]; then
   # The runner sets ACTIONS_RESULTS_URL for each job from GitHub's answer.
-  # Renaming the variable it writes (same length, UTF-16) keeps ours.
-  sed -i 's/A\x00C\x00T\x00I\x00O\x00N\x00S\x00_\x00R\x00E\x00S\x00U\x00L\x00T\x00S\x00_\x00U\x00R\x00L\x00/A\x00C\x00T\x00I\x00O\x00N\x00S\x00_\x00R\x00E\x00S\x00U\x00L\x00T\x00S\x00_\x00O\x00R\x00L\x00/g' bin/Runner.Worker.dll
+  # Renaming the variable it writes (same length, UTF-16) keeps ours. A
+  # runner that updates itself before its job brings an unpatched one: it
+  # is patched too, within a second, before the job's message comes.
+  patch() {
+    if LC_ALL=C grep -qaP 'A\x00C\x00T\x00I\x00O\x00N\x00S\x00_\x00R\x00E\x00S\x00U\x00L\x00T\x00S\x00_\x00U\x00R\x00L\x00' bin/Runner.Worker.dll 2>/dev/null; then
+      sed -i 's/A\x00C\x00T\x00I\x00O\x00N\x00S\x00_\x00R\x00E\x00S\x00U\x00L\x00T\x00S\x00_\x00U\x00R\x00L\x00/A\x00C\x00T\x00I\x00O\x00N\x00S\x00_\x00R\x00E\x00S\x00U\x00L\x00T\x00S\x00_\x00O\x00R\x00L\x00/g' bin/Runner.Worker.dll
+    fi
+  }
+  patch
+  (while sleep 1; do patch; done) < /dev/null > /dev/null 2>&1 &
   export ACTIONS_RESULTS_URL="${l1:-$cache}" FLEETCI_RESULTS_URL="${l1:-$cache}"
+fi
+if [ -n "$l1" ]; then
+  # The job's log ends with what its cache steps got.
+  echo 'curl -fsS -m 3 http://127.0.0.1:%[6]d/fleetci/stats || true' > fleetci-job-completed.sh
+  export ACTIONS_RUNNER_HOOK_JOB_COMPLETED="$dir/fleetci-job-completed.sh"
 fi
 if ! ls /usr/lib*/libicuuc.so.* /usr/lib/*/libicuuc.so.* 2>/dev/null | grep -q .; then
   if command -v dnf >/dev/null 2>&1; then sudo dnf install -y -q libicu >/dev/null
@@ -127,6 +140,11 @@ done
 # the job's, through GITHUB_ENV, has the cache server too.
 if [ -n "${FLEETCI_RESULTS_URL:-}" ] && [ -n "${GITHUB_ENV:-}" ]; then
   echo "ACTIONS_RESULTS_URL=$FLEETCI_RESULTS_URL" >> "$GITHUB_ENV"
+fi
+# An unpatched runner sends actions/cache to GitHub's cache and says nothing.
+if [ -n "${FLEETCI_RESULTS_URL:-}" ] &&
+  LC_ALL=C grep -qaP 'A\x00C\x00T\x00I\x00O\x00N\x00S\x00_\x00R\x00E\x00S\x00U\x00L\x00T\x00S\x00_\x00U\x00R\x00L\x00' "$(dirname "$0")/bin/Runner.Worker.dll" 2>/dev/null; then
+  echo "::warning::fleetci: this runner isn't patched, so actions/cache goes to GitHub's cache, not $FLEETCI_RESULTS_URL"
 fi
 # The L1 (l1cache.py) runs as this user and keeps its archives on the disk.
 if mountpoint -q /cache 2>/dev/null; then
