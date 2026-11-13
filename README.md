@@ -178,8 +178,11 @@ given, and points it at the server; the server passes everything that isn't
 cache (artifacts) to GitHub. It speaks the v2 cache protocol, which
 `actions/cache` v4 and later use.
 
-Install `zstd` on every image. The cache key includes the compression,
-so a VM without zstd (gzip) misses what a VM with it saved.
+Install `zstd` on every VM image. `actions/cache` compresses with zstd on
+all cores where it finds zstd, and with gzip on one core where it doesn't:
+fleetci lends the VM's zstd to job containers (`container:`), so a job in
+`golang` or `node` gets it too. The cache key includes the compression, so
+a VM without zstd misses what a VM with it saved.
 `hack/cache/up.sh` runs the server on RustFS for [hack/local](hack/local).
 
 ## Install
