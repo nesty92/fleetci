@@ -66,7 +66,7 @@ type Worker struct {
 	lists    map[string]time.Time // controller address → when it last listed this worker's assignments
 	// stores are the GitHub jobs' cache stores by their settings, kept
 	// for the issuer's keys and the bucket's client.
-	stores   map[string]github.CacheStore
+	stores map[string]github.CacheStore
 	// subnets hold the VM subnets this process claimed; see freeSubnets.
 	subnets  []net.Listener
 	changed  chan struct{}
