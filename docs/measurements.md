@@ -444,10 +444,15 @@ The jobs' own steps took about the same each way (Go 5–50 s: its tests
 reuse the results of packages a commit didn't touch; web 37–42 s); the
 rest of a job is its VM, image pull, checkout and the cache's restore and
 save. On GitHub, 13 restores of the 20 came from the job's own disk; the
-others downloaded Go's 986 MB from the store behind it, in 62–84 s from
+others found it empty and downloaded Go's 986 MB from the store behind it, in 62–84 s from
 GitHub's cache over the host's internet link and in 2.3–2.9 s from the
 bucket, here on the same host as the nodes: the best case for a bucket,
-whose case is one in the nodes' own network or region. After each job
+whose case is one in the nodes' own network or region. The disk was
+empty for two reasons. The lab's host was 98% full, so its nodes, keeping
+8 GB free (`min_free`), evicted main's disks between jobs; and a job that
+reached the other node within 30 s of main's job came before the copy,
+which nodes make every 30 s. On a host with room, most of these 7 would
+have restored from the disk. After each job
 the node uploaded its saves to the bucket, none failed. On GitLab, a car's
 disk starts from main's; gitlab-runner still downloaded each job's
 `cache:` from S3 as well, so the disk saved image pulls and the work in
