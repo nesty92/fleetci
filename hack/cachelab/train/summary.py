@@ -14,6 +14,7 @@ import re
 import sys
 
 OUT = os.path.expanduser("~/.local/share/fleetci-cachelab/train")
+STAMP = re.compile(r"^20\d\d-\d\d-\d\dT[\d:.]+Z (\d\d[OE]\+? )?")
 
 
 def t(s):
@@ -25,6 +26,8 @@ for run in sys.argv[1:]:
     print(f"== {run}: {recs[0]['forge']} {recs[0]['mode']}")
     tot = {}
     for r in recs:
+        # Runs recorded before drive.py dropped GitLab's timestamps.
+        r["lines"] = [STAMP.sub("", l) for l in r["lines"]]
         wall = (t(r["finished"]) - t(r["started"])).total_seconds()
         train = [l for l in r["lines"] if l.startswith("TRAIN ")]
         own = float(re.search(r"total=([\d.]+)", train[-1]).group(1)) if train else 0

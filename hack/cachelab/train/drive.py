@@ -18,6 +18,7 @@ Each job's timings and cache lines go to <out>/<run>.jsonl.
 """
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -34,6 +35,7 @@ GH = "WireZone/fleetci-playground"
 GL = "Nesty92%2Ffleetci-playground"
 REMOTE = {"github": "git@github.com:WireZone/fleetci-playground.git",
           "gitlab": "https://gitlab.com/Nesty92/fleetci-playground.git"}
+STAMP = re.compile(r"^20\d\d-\d\d-\d\dT[\d:.]+Z (\d\d[OE]\+? )?")
 # GitLab over HTTPS with glab's login: the SSH key may be another account's.
 CRED = ["-c", "credential.https://gitlab.com.helper=", "-c", "credential.https://gitlab.com.helper=!glab auth git-credential"]
 
@@ -145,7 +147,9 @@ class Train:
                        "queued": j["queued_duration"], "runner": (j.get("runner") or {}).get("description")}
             lines = []
             for line in text.splitlines():
-                line = line.split(" ", 1)[1] if self.forge == "github" and line[:2] == "20" else line
+                # GitHub's lines start with a timestamp, GitLab's with one
+                # and a stream ("01O", "00E+").
+                line = STAMP.sub("", line)
                 if any(k in line for k in ("TRAIN ", "fleetci cache:", "Cache disk", "Cache restored", "Cache not found",
                                            "Cache saved", "Cache Size", "cache.zip", "Downloading cache", "Successfully extracted",
                                            "No URL provided", "Uploading cache", "Created cache", "Checking cache", "Pulling docker image")):
