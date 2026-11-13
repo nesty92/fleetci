@@ -346,6 +346,32 @@ func TestEvictLeastRecentlyUsed(t *testing.T) {
 	}
 }
 
+// Short of room, a ref's own disk goes before the shared one it started
+// from, even when the shared one was used longer ago: the next ref starts
+// from the shared one, and the ref's own is a layer on it.
+func TestEvictOwnBeforeShared(t *testing.T) {
+	img := &fakeImages{data: 64 << 10}
+	s := open(t, Config{Budget: 150 << 10, MinFree: 1}, img)
+	now := time.Now()
+	s.now = func() time.Time { return now }
+	run(t, s, main_)
+	now = now.Add(time.Minute)
+	run(t, s, mr)
+	now = now.Add(time.Minute)
+	other := main_
+	other.Project = "2"
+	run(t, s, other)
+	if _, err := s.readHead(mr.key()); err == nil {
+		t.Fatal("the ref's own disk was kept")
+	}
+	if _, err := s.readHead(main_.key()); err != nil {
+		t.Fatalf("the shared disk went before a ref's own: %v", err)
+	}
+	if l, _ := s.Begin(mr); l.From() != main_.Label() {
+		t.Fatalf("the ref started from %q, not the shared disk", l.From())
+	}
+}
+
 func TestEvictSkipsLeased(t *testing.T) {
 	img := &fakeImages{data: 64 << 10}
 	s := open(t, Config{Budget: 100 << 10, MinFree: 1}, img)

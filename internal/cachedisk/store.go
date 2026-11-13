@@ -16,8 +16,9 @@
 //
 // Chains are flattened into one layer well before cloud-hypervisor's
 // nesting limit (MaxDepth, chainLimit). The store keeps to a budget: past it, or with less than
-// MinFree left on its filesystem, the least recently used caches go first,
-// never one a VM is using; a cache unused for MaxAge goes too.
+// MinFree left on its filesystem, refs' own caches go first, then the shared
+// ones, each least recently used first, never one a VM is using; a cache
+// unused for MaxAge goes too.
 package cachedisk
 
 import (
@@ -524,8 +525,8 @@ func (s *Store) sweep() {
 	}
 }
 
-// evict drops scopes, least recently used first, until the store is in
-// budget, and those past MaxAge. A scope with a lease on its layers stays.
+// evict drops scopes, refs' own before shared ones and each least recently
+// used first, until the store is in budget, and those past MaxAge. A scope with a lease on its layers stays.
 func (s *Store) evict() { s.evictFor(0) }
 
 // evictFor is evict with room left for need more bytes.
@@ -549,7 +550,16 @@ func (s *Store) evictFor(need int64) {
 		}
 		heads = append(heads, scope{key, h.Used, h.Committed, h.Scope.Writer, age})
 	}
-	sort.Slice(heads, func(i, j int) bool { return heads[i].used.Before(heads[j].used) })
+	// A ref's own cache goes before any shared one: it is read by its ref
+	// alone, and it is a layer on the shared cache it started from, so
+	// dropping the shared one first frees little and costs every ref that
+	// would start from it next.
+	sort.SliceStable(heads, func(i, j int) bool {
+		if heads[i].shared != heads[j].shared {
+			return !heads[i].shared
+		}
+		return heads[i].used.Before(heads[j].used)
+	})
 	leased := map[string]bool{}
 	for l := range s.leases {
 		for _, f := range l.chain {

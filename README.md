@@ -393,7 +393,7 @@ plugin = "fleeting-plugin-fleetingd"
 plugin_config = { vm_cache_directory = "/var/lib/fleetci/cache" }  # with the rest
 
 [classes.small.cache_disk]
-budget = "100GB"        # all of the class's caches; least recently used go first
+budget = "100GB"        # all of the class's caches; refs' own, then shared, least recently used first
 min_free = "20GB"       # left free on that disk
 max_per_cache = "30GB"  # one job's; past it, its next run starts empty
 max_age = "168h"        # a cache no job used for that long goes
