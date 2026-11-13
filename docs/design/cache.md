@@ -172,11 +172,20 @@ adapters (`internal/cachebucket`; listing, which they don't do, is ours).
 Tested with a fake bucket (`TestL1CacheBucket`) and against RustFS with
 real signed links (`TestL1CacheBucketS3`, `FLEETCI_TEST_S3`). GCS and
 Azure share the code path except listing; their emulators can't check
-signed links, which point at Google's and Azure's hosts.
+signed links, which point at Google's and Azure's hosts. Cases
+falcondev's suite has no counterpart for are in
+`bucketcache_edge_test.go`: the node unreachable, an upload refused and
+retried, a refused token, a key too long for a name, an object gone after
+its listing, a ranged first read, parallel restores, objects not in
+fleetci's layout, and a listing past one page.
+
+A real workflow on the lab's two nodes, with RustFS as the bucket: its
+first run saved 5 entries (380 MB), uploaded by the nodes after each job;
+the next run, on fresh disks, restored them from the bucket (200 MB in
+1.2 s, 100 MB in 0.2 s), and BuildKit's `type=gha` steps were `CACHED`.
 
 ## Open
 
 - GitLab's side: a setting that turns the cache behind the disk off, and
   uploading after the job from the node (the runner uploads it during the
   job now).
-- A real job on GitHub in bucket mode.
