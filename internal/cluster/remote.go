@@ -139,10 +139,11 @@ func (f fleetCapacity) Create(ctx context.Context, class string) (source.VM, err
 		for i, cl := range try {
 			ws, better := c.byCache(c.candidates(cl), cl, dirs)
 			if i == 0 && better && time.Now().Before(waitTill) {
-				// The worker with the job's cache is full: wait for it a
-				// while, rather than start the job cold elsewhere.
+				// The worker with the job's cache is full, or the cache is
+				// still being copied to one with room: wait a while, rather
+				// than start the job cold.
 				if !waiting {
-					c.log.Info("waiting for room on the worker with the job's cache", "class", cl, "for", time.Until(waitTill).Round(time.Second).String())
+					c.log.Info("waiting for the job's cache: its worker is full, or a copy is arriving", "class", cl, "for", time.Until(waitTill).Round(time.Second).String())
 					waiting = true
 				}
 				break
@@ -178,38 +179,56 @@ func (f fleetCapacity) Create(ctx context.Context, class string) (source.VM, err
 }
 
 // byCache puts first the workers that have the best of the caches a job
-// starts from (dirs, the best first), keeping the order otherwise. better
-// says a worker without room has one of them and none of ws has any: a
-// worker with the cache the job falls back on (main's) is good enough,
-// and the job doesn't wait for the one with its own.
+// starts from (dirs, the best first), and of those the newest copy,
+// keeping the order otherwise. better says none of ws has any of them,
+// but a worker without room has one, or one of ws is copying one from a
+// neighbour: the job waits a while (cache_wait) for either. A worker with
+// the cache the job falls back on (main's) is good enough, and the job
+// doesn't wait for the one with its own.
 func (c *Controller) byCache(ws []*workerConn, class string, dirs []string) (_ []*workerConn, better bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if spec := c.cfg.Classes[class]; spec == nil || !spec.CacheDisk || len(dirs) == 0 {
 		return ws, false
 	}
-	rank := func(w *workerConn) int {
+	rank := func(w *workerConn) (int, time.Time) {
 		for i, d := range dirs {
 			if _, ok := slices.BinarySearch(w.report.Caches, d); ok {
-				return i
+				return i, w.report.CacheCommitted[d]
 			}
 		}
-		return len(dirs)
+		return len(dirs), time.Time{}
 	}
 	best := len(dirs) // over the workers that run the class
 	for _, w := range c.workers {
 		if _, runs := w.report.Room[class]; runs && w.state() == Ready {
-			best = min(best, rank(w))
+			r, _ := rank(w)
+			best = min(best, r)
 		}
 	}
-	ranks := map[*workerConn]int{}
-	here := len(dirs)
-	for _, w := range ws {
-		ranks[w] = rank(w)
-		here = min(here, ranks[w])
+	type key struct {
+		rank      int
+		committed time.Time
 	}
-	slices.SortStableFunc(ws, func(a, b *workerConn) int { return ranks[a] - ranks[b] })
-	return ws, best < len(dirs) && here == len(dirs)
+	keys := map[*workerConn]key{}
+	here, arriving := len(dirs), false
+	for _, w := range ws {
+		r, t := rank(w)
+		keys[w] = key{r, t}
+		here = min(here, r)
+		for _, d := range dirs {
+			if slices.Contains(w.report.CachesArriving, d) {
+				arriving = true
+			}
+		}
+	}
+	slices.SortStableFunc(ws, func(a, b *workerConn) int {
+		if d := keys[a].rank - keys[b].rank; d != 0 {
+			return d
+		}
+		return keys[b].committed.Compare(keys[a].committed) // the newer first
+	})
+	return ws, here == len(dirs) && (best < len(dirs) || arriving)
 }
 
 // bootWait is how long a worker may take to boot an assignment's VM.

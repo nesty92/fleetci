@@ -73,9 +73,16 @@ type Report struct {
 	// lately.
 	Assignments []AssignmentStatus `json:"assignments,omitempty"`
 	Update      *UpdateStatus      `json:"update,omitempty"`
-	// Caches are the cache disks it keeps (cachedisk.Scope.Dirs' names):
-	// the controllers place a job where its cache is.
+	// Caches are the cache disks it keeps (cachedisk.Scope.Dirs' names),
+	// sorted: the controllers place a job where its cache is.
 	Caches []string `json:"caches,omitempty"`
+	// CacheCommitted is when each of Caches' newest layer was kept, on
+	// whichever node: of two workers with a job's cache, the job goes to
+	// the newer copy.
+	CacheCommitted map[string]time.Time `json:"cache_committed,omitempty"`
+	// CachesArriving are caches it is copying from a neighbour now: a job
+	// whose cache only they have waits a while for the copy.
+	CachesArriving []string `json:"caches_arriving,omitempty"`
 	// CacheStats are its cache disks' stores', for metrics.
 	CacheStats *cachedisk.Stats `json:"cache_stats,omitempty"`
 	// Neighbours are the workers it reaches, of those the controllers

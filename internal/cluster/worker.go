@@ -81,6 +81,8 @@ type Worker struct {
 	peerNet *peerNet
 	// shareKick has the worker look at its neighbours' caches now.
 	shareKick chan struct{}
+	// arriving are the caches it is copying from a neighbour now.
+	arriving map[string]bool
 }
 
 // task is an assignment as this worker carries it out.
@@ -149,7 +151,7 @@ func NewWorker(cfg *WorkerConfig, version string, log hclog.Logger) (*Worker, er
 	w := &Worker{cfg: cfg, pki: p, log: log, version: version,
 		checks: map[string]string{}, passed: map[string]bool{}, count: map[string]int{},
 		vms: map[string]*workerVM{}, drainBy: map[string]bool{}, clients: map[string]*client{},
-		tasks: map[string]*task{}, changed: make(chan struct{}, 1), started: time.Now(), peers: newNeighbourState(), shareKick: make(chan struct{}, 1)}
+		tasks: map[string]*task{}, changed: make(chan struct{}, 1), started: time.Now(), peers: newNeighbourState(), shareKick: make(chan struct{}, 1), arriving: map[string]bool{}}
 	f, err := GatherFacts(cfg, version)
 	if err != nil {
 		return nil, err
@@ -568,14 +570,23 @@ func (w *Worker) report() Report {
 	b := w.backend
 	w.mu.Unlock()
 	var caches []string
+	var committed map[string]time.Time
 	var stats *cachedisk.Stats
 	if b != nil {
-		caches = slices.Sorted(maps.Keys(b.HeldCaches())) // off the lock: it reads the disk
+		held := b.HeldCaches() // off the lock: it reads the disk
+		caches = slices.Sorted(maps.Keys(held))
+		if len(held) > 0 {
+			committed = make(map[string]time.Time, len(held))
+			for k, h := range held {
+				committed[k] = h.Committed
+			}
+		}
 		stats = b.CacheStats()
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	r := Report{Room: w.roomLocked(), UsedCPUs: w.used.CPUs, UsedMemory: w.used.MemoryMB, Checks: map[string]string{}, Caches: caches, CacheStats: stats}
+	r := Report{Room: w.roomLocked(), UsedCPUs: w.used.CPUs, UsedMemory: w.used.MemoryMB, Checks: map[string]string{},
+		Caches: caches, CacheCommitted: committed, CachesArriving: slices.Sorted(maps.Keys(w.arriving)), CacheStats: stats}
 	for name := range w.classes {
 		if k := w.idleVMs(name); k > 0 {
 			if r.Idle == nil {

@@ -698,16 +698,23 @@ func allocated(d fs.DirEntry) int64 {
 	return info.Size()
 }
 
-// Held are the caches the store has, by the name Dirs gives them, and when
-// a job last used each: what a node tells the controllers, which place a
-// job where its cache is.
-func (s *Store) Held() map[string]time.Time {
+// Held is a cache a store has: when a job last used it, and when its
+// newest layer was kept, on whichever node.
+type Held struct {
+	Used      time.Time
+	Committed time.Time
+}
+
+// Held are the caches the store has, by the name Dirs gives them: what a
+// node tells the controllers, which place a job where its cache is, the
+// newest copy first.
+func (s *Store) Held() map[string]Held {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := map[string]time.Time{}
+	out := map[string]Held{}
 	for _, key := range s.keys() {
 		if h, err := s.readHead(key); err == nil {
-			out[key] = h.Used
+			out[key] = Held{Used: h.Used, Committed: h.Committed}
 		}
 	}
 	return out

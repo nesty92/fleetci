@@ -334,7 +334,9 @@ func (w *Worker) shareOnce(ctx context.Context, pool *x509.CertPool) {
 		}
 		start := time.Now()
 		var wire int64
+		w.setArriving(p.c.o.Key, true)
 		n, err := p.store.Pull(ctx, p.c.o, fetchLayer(clients[p.c.near.ID], p.c.near.Addr, w.compressing(), &wire))
+		w.setArriving(p.c.o.Key, false)
 		name := p.c.o.Scope.Label()
 		switch {
 		case errors.Is(err, cachedisk.ErrNoRoom):
@@ -353,4 +355,17 @@ func (w *Worker) shareOnce(ctx context.Context, pool *x509.CertPool) {
 	if copied {
 		w.poke() // the report's caches change
 	}
+}
+
+// setArriving notes a cache being copied from a neighbour, or done, and
+// reports it: a job whose cache is arriving here may wait for it.
+func (w *Worker) setArriving(key string, on bool) {
+	w.mu.Lock()
+	if on {
+		w.arriving[key] = true
+	} else {
+		delete(w.arriving, key)
+	}
+	w.mu.Unlock()
+	w.poke()
 }

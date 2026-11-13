@@ -163,14 +163,14 @@ func (b *Backend) CacheStores() []*cachedisk.Store {
 	return stores
 }
 
-// HeldCaches are the caches this backend's stores have, and when a job
-// last used each (cachedisk.Store.Held).
-func (b *Backend) HeldCaches() map[string]time.Time {
-	out := map[string]time.Time{}
+// HeldCaches are the caches this backend's stores have
+// (cachedisk.Store.Held), the newest copy of each.
+func (b *Backend) HeldCaches() map[string]cachedisk.Held {
+	out := map[string]cachedisk.Held{}
 	for _, s := range b.CacheStores() {
-		for k, t := range s.Held() {
-			if t.After(out[k]) {
-				out[k] = t
+		for k, h := range s.Held() {
+			if h.Committed.After(out[k].Committed) {
+				out[k] = h
 			}
 		}
 	}

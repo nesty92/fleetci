@@ -403,13 +403,15 @@ min_free = "20GB"
 max_per_cache = "30GB"
 ```
 
-The workers report which caches they hold, and the leader boots a job's VM
+The workers report which caches they hold, when each was last written,
+and which they are copying from a neighbour. The leader boots a job's VM
 on the worker that has the best one: the job's own disk, then the same
-job's on the default branch, which it falls back on. If that worker is
-full, the job goes to one with the default branch's, rather than wait. Only
-when no worker with room has any of its caches does it wait, up to
-`cache_wait`, for room on one that has, then goes to any worker and starts
-empty. A GitHub job
+job's on the default branch, which it falls back on; of two workers with
+it, the one whose copy is newer. If that worker is full, the job goes to
+one with the default branch's, rather than wait. Only when no worker with
+room has any of its caches does it wait, up to `cache_wait`, for room on
+one that has or for a copy arriving at one with room, then goes to any
+worker and starts empty. A GitHub job
 is placed by what its queued job says; GitHub may give the runner another
 job, which then starts from what that worker has.
 

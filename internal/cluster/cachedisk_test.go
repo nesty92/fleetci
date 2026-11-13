@@ -172,3 +172,41 @@ func TestWorkerConfigCacheDisk(t *testing.T) {
 		t.Fatalf("after saving again: %v %v", again, err)
 	}
 }
+
+// TestPlaceByFreshness: of two workers with the job's cache, the newer
+// copy first; with none of its caches on a worker with room, the job
+// waits while one of them is copying one in.
+func TestPlaceByFreshness(t *testing.T) {
+	room := map[string]int{"small": 1}
+	now := time.Now()
+	c := cacheFleet(t,
+		Report{Room: room, Caches: []string{"main"}, CacheCommitted: map[string]time.Time{"main": now.Add(-time.Hour)}},
+		Report{Room: room, Caches: []string{"main"}, CacheCommitted: map[string]time.Time{"main": now}})
+	dirs := []string{"feature", "main"}
+	if ws, better := c.byCache(c.candidates("small"), "small", dirs); ids(ws)[0] != "w2" || better {
+		t.Fatalf("newer copy first: %v, better %v", ids(ws), better)
+	}
+	// Own cache beats a newer fallback.
+	c.workers["w1"].report.Caches = []string{"feature"}
+	c.workers["w1"].report.CacheCommitted = map[string]time.Time{"feature": now.Add(-48 * time.Hour)}
+	if ws, _ := c.byCache(c.candidates("small"), "small", dirs); ids(ws)[0] != "w1" {
+		t.Fatalf("own cache first: %v", ids(ws))
+	}
+	// Neither has any, one is copying main's in: wait.
+	for _, w := range c.workers {
+		w.report.Caches, w.report.CacheCommitted = nil, nil
+	}
+	if _, better := c.byCache(c.candidates("small"), "small", dirs); better {
+		t.Fatal("waits with no cache anywhere")
+	}
+	c.workers["w1"].report.CachesArriving = []string{"main"}
+	if _, better := c.byCache(c.candidates("small"), "small", dirs); !better {
+		t.Fatal("doesn't wait for main's cache arriving")
+	}
+	// Arrived: placed there, no wait.
+	c.workers["w1"].report.CachesArriving = nil
+	c.workers["w1"].report.Caches = []string{"main"}
+	if ws, better := c.byCache(c.candidates("small"), "small", dirs); ids(ws)[0] != "w1" || better {
+		t.Fatalf("after the copy: %v, better %v", ids(ws), better)
+	}
+}
