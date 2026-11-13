@@ -390,7 +390,7 @@ const lostAfter = 10 * time.Minute
 // it by the worker's reports.
 func (c *Controller) GitHubStart(cfg github.Config) github.StartFunc {
 	return func(ctx context.Context, vm github.VM, jit string, took func(job string)) error {
-		run := RunSpec{GitHub: &GitHubRun{JITConfig: jit, RunnerVersion: cfg.RunnerVersion, CacheURL: cfg.CacheURL, IdleTimeout: time.Duration(cfg.IdleTimeout), Cache: vm.Cache}}
+		run := RunSpec{GitHub: &GitHubRun{JITConfig: jit, RunnerVersion: cfg.RunnerVersion, CacheURL: cfg.CacheURL, CacheStore: cfg.CacheStore, CacheBucket: cfg.CacheBucket, CacheTokenIssuer: cfg.CacheTokenIssuer, IdleTimeout: time.Duration(cfg.IdleTimeout), Cache: vm.Cache}}
 		return c.runOn(ctx, vm.ID, run, took)
 	}
 }

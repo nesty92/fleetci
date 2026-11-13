@@ -63,6 +63,9 @@ type Worker struct {
 	clients  map[string]*client   // controller address → its client
 	tasks    map[string]*task     // assignment id → what this worker made of it
 	lists    map[string]time.Time // controller address → when it last listed this worker's assignments
+	// stores are the GitHub jobs' cache stores by their settings, kept
+	// for the issuer's keys and the bucket's client.
+	stores   map[string]github.CacheStore
 	changed  chan struct{}
 	update   *updater
 	started  time.Time          // when this process started
@@ -962,7 +965,11 @@ func (w *Worker) delete(ctx context.Context, id string) error {
 // that takes no job is stopped, as the leader's idle watch would; the
 // leader may be gone.
 func (w *Worker) runGitHub(ctx context.Context, cancel context.CancelFunc, t *task, v *workerVM, req GitHubRun, log hclog.Logger, took func(string)) error {
-	start := github.SSHStart(req.RunnerVersion, req.CacheURL, log)
+	cs, err := w.cacheStore(req, log)
+	if err != nil {
+		return err
+	}
+	start := github.SSHStart(req.RunnerVersion, cs, log)
 	var hook sync.WaitGroup
 	defer hook.Wait()
 	if req.Cache {
@@ -1179,4 +1186,27 @@ func (w *Worker) renewIfDue(ctx context.Context) error {
 		return nil
 	}
 	return err
+}
+
+// cacheStore is the cache store a GitHub job's settings say, made once
+// for each.
+func (w *Worker) cacheStore(req GitHubRun, log hclog.Logger) (github.CacheStore, error) {
+	k, err := json.Marshal([]any{req.CacheStore, req.CacheURL, req.CacheBucket, req.CacheTokenIssuer})
+	if err != nil {
+		return github.CacheStore{}, err
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if cs, ok := w.stores[string(k)]; ok {
+		return cs, nil
+	}
+	cs, err := github.NewCacheStore(req.CacheStore, req.CacheURL, req.CacheBucket, req.CacheTokenIssuer, w.log)
+	if err != nil {
+		return cs, err
+	}
+	if w.stores == nil {
+		w.stores = map[string]github.CacheStore{}
+	}
+	w.stores[string(k)] = cs
+	return cs, nil
 }

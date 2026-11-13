@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -63,7 +64,7 @@ if [ "$hook" = cache ] && command -v python3 >/dev/null 2>&1; then
 %[5]s
 L1PY
   mkdir -p _diag
-  nohup setsid python3 -I fleetci-l1cache.py %[6]d "${cache:-%[7]s}" /cache/actions >> _diag/fleetci-l1cache.log 2>&1 < /dev/null &
+  nohup setsid python3 -I fleetci-l1cache.py %[6]d "${cache:-%[7]s}" /cache/actions %[8]s>> _diag/fleetci-l1cache.log 2>&1 < /dev/null &
   # The address the VM's containers reach it at too: Docker's bridge. A
   # firewall that drops what comes in lets them through to it, and only it.
   at=$(ip -4 -o addr show docker0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1)
@@ -155,19 +156,24 @@ cat "$d/done"
 
 // SSHStart runs the runner on the VM over SSH and logs its output. An
 // empty version is the newest in the image, or DefaultRunnerVersion.
-// With cacheURL set, jobs use that cache server instead of GitHub's.
+// The cache store says where actions/cache keeps its caches, besides the
+// job's cache disk.
 //
 // The runner runs on the VM apart from fleetci's sessions (see vmjob):
 // fleetci follows its output, and losing the connection, or fleetci
 // stopping, leaves it running. A VM handed over to the next fleetci is
 // followed by that one to the job's end.
-func SSHStart(version, cacheURL string, log hclog.Logger) StartFunc {
-	return sshStart(vmScript(version, cacheURL), log)
+func SSHStart(version string, cs CacheStore, log hclog.Logger) StartFunc {
+	var node http.Handler
+	if cs.bucket != nil {
+		node = cs.bucket.Handler()
+	}
+	return startWith(vmScript(version, cs), node, log)
 }
 
-// vmScript is runScript for the runner version and cache server given.
-func vmScript(version, cacheURL string) string {
-	return fmt.Sprintf(runScript, version, cacheURL, DefaultRunnerVersion, jobStartedHook, l1CacheScript, l1CachePort, githubResultsURL)
+// vmScript is runScript for the runner version and cache store given.
+func vmScript(version string, cs CacheStore) string {
+	return fmt.Sprintf(runScript, version, cs.URL, DefaultRunnerVersion, jobStartedHook, l1CacheScript, l1CachePort, githubResultsURL, cs.l1Args())
 }
 
 // followTries is how many times in a row following the runner may fail
@@ -175,7 +181,15 @@ func vmScript(version, cacheURL string) string {
 const followTries = 5
 
 func sshStart(script string, log hclog.Logger) StartFunc {
+	return startWith(script, nil, log)
+}
+
+// startWith is sshStart with node, the node's cache service for a VM
+// with a cache disk, served on the VM through the SSH connection; the
+// job's saves are uploaded through it after the runner exits.
+func startWith(script string, node http.Handler, log hclog.Logger) StartFunc {
 	return func(ctx context.Context, vm VM, jit string, took func(job string)) error {
+		log := log.With("vm", vm.ID)
 		// The machine's connection, shared with its reclaim watch: the job
 		// opens sessions on it and leaves it open. A VM that dies mid-job
 		// closes lost in seconds, not when TCP gives up.
@@ -187,10 +201,17 @@ func sshStart(script string, log hclog.Logger) StartFunc {
 		if vm.Cache {
 			stdin += "cache\n"
 		}
+		if !vm.Cache {
+			node = nil
+		}
+		stop := func() {}
+		if node != nil {
+			stop = serveNode(client, node, log)
+		}
+		defer func() { stop() }()
 		if err := vmjob.Start(ctx, client, vm.ID, script, []byte(stdin)); err != nil {
 			return err
 		}
-		log := log.With("vm", vm.ID)
 		line := func(l string) {
 			l = strings.TrimSpace(l)
 			if l == "" {
@@ -204,6 +225,9 @@ func sshStart(script string, log hclog.Logger) StartFunc {
 		next, failed := 1, 0
 		for {
 			status, n, err := vmjob.Follow(ctx, client, vm.ID, next, line)
+			if err == nil && node != nil {
+				flushSaves(ctx, client, log)
+			}
 			switch {
 			case err == nil && status == 0:
 				return nil
@@ -235,6 +259,10 @@ func sshStart(script string, log hclog.Logger) StartFunc {
 					return ctx.Err()
 				}
 				return fmt.Errorf("lost the vm: %w (following the runner: %v)", derr, err)
+			}
+			if c != client && node != nil {
+				stop()
+				stop = serveNode(c, node, log)
 			}
 			client, lost = c, l
 			log.Warn("following the runner again", "err", err)

@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
-	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -31,6 +30,7 @@ import (
 
 	"github.com/hashicorp/go-hclog"
 
+	"github.com/nesty92/fleetci/internal/cachebucket"
 	"github.com/nesty92/fleetci/internal/cachedisk"
 	"github.com/nesty92/fleetci/internal/fleet"
 	"github.com/nesty92/fleetci/internal/proxy"
@@ -95,6 +95,21 @@ type Config struct {
 	// region. The runner is patched on the VM to accept it; other
 	// requests (artifacts) the server passes on to GitHub.
 	CacheURL string `json:"cache_url" toml:"cache_url"`
+	// CacheStore is where actions/cache keeps its caches, besides the
+	// VM's cache disk, which is in front of it: "github", the default,
+	// is GitHub's cache (or CacheURL's server); "bucket" is the bucket
+	// in CacheBucket; "off" is the cache disk alone. Jobs' workflows
+	// stay as they are.
+	CacheStore string `json:"cache_store" toml:"cache_store"`
+	// CacheBucket is the bucket for CacheStore "bucket", in the form of
+	// gitlab-runner's [runners.cache]: Type "s3", "gcs" or "azure", Path,
+	// and its [s3], [gcs] or [azure] table. The node lists it and signs
+	// links for its VMs; the credentials stay on the node.
+	CacheBucket *cachebucket.Config `json:"cache_bucket,omitempty" toml:"cache_bucket,omitempty"`
+	// CacheTokenIssuer issues the jobs' tokens, whose keys the node
+	// checks them with. Default https://token.actions.githubusercontent.com;
+	// GitHub Enterprise Server's is https://HOST/_services/token.
+	CacheTokenIssuer string `json:"cache_token_issuer" toml:"cache_token_issuer"`
 
 	// NameByJob, set by fleetci's controller and never by fleetci.toml,
 	// names each runner after the job it is started for and the try,
@@ -297,18 +312,13 @@ func New(ctx context.Context, cfg Config, capacity source.Capacity, start StartF
 	if cfg.RunnerGroupID == 0 {
 		cfg.RunnerGroupID = 1
 	}
-	if cfg.CacheURL != "" {
-		u, err := url.Parse(cfg.CacheURL)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || strings.ContainsAny(cfg.CacheURL, "'\"\\ $`") {
-			return nil, fmt.Errorf("github cache_url %q: want an http(s) URL", cfg.CacheURL)
-		}
-		// The cache client appends paths to it.
-		if !strings.HasSuffix(cfg.CacheURL, "/") {
-			cfg.CacheURL += "/"
-		}
+	cs, err := NewCacheStore(cfg.CacheStore, cfg.CacheURL, cfg.CacheBucket, cfg.CacheTokenIssuer, log)
+	if err != nil {
+		return nil, err
 	}
+	cfg.CacheURL = cs.URL
 	if start == nil {
-		start = SSHStart(cfg.RunnerVersion, cfg.CacheURL, log)
+		start = SSHStart(cfg.RunnerVersion, cs, log)
 	}
 	d := &Dispatcher{
 		cfg:          cfg,

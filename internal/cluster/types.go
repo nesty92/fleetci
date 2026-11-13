@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/nesty92/fleetci/internal/cachebucket"
 	"github.com/nesty92/fleetci/internal/cachedisk"
 )
 
@@ -186,10 +187,17 @@ type RunSpec struct {
 
 // GitHubRun is a just-in-time runner.
 type GitHubRun struct {
-	JITConfig     string        `json:"jit_config"`
-	RunnerVersion string        `json:"runner_version,omitempty"`
-	CacheURL      string        `json:"cache_url,omitempty"`
-	IdleTimeout   time.Duration `json:"idle_timeout"`
+	JITConfig     string `json:"jit_config"`
+	RunnerVersion string `json:"runner_version,omitempty"`
+	CacheURL      string `json:"cache_url,omitempty"`
+	// CacheStore, CacheBucket and CacheTokenIssuer are the [github]
+	// table's; the worker serves the bucket to its VMs, as the leader
+	// would. The bucket's credentials go only to workers, as a GitLab
+	// job's [runners.cache] does.
+	CacheStore       string              `json:"cache_store,omitempty"`
+	CacheBucket      *cachebucket.Config `json:"cache_bucket,omitempty"`
+	CacheTokenIssuer string              `json:"cache_token_issuer,omitempty"`
+	IdleTimeout      time.Duration       `json:"idle_timeout"`
 	// Cache: the VM's class has a cache disk, and each job waits at its
 	// start for the leader to say which (Assignment.Cache).
 	Cache bool `json:"cache,omitempty"`

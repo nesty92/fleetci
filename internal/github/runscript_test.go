@@ -56,7 +56,7 @@ func TestRunScriptPicksTheRunner(t *testing.T) {
 			_ = os.WriteFile(filepath.Join(bin, "dnf"), []byte("#!/bin/sh\n"), 0o755)
 			_ = os.WriteFile(filepath.Join(bin, "sudo"), []byte("#!/bin/sh\nexec \"$@\"\n"), 0o755)
 
-			cmd := exec.Command("sh", "-c", vmScript(tc.asked, ""))
+			cmd := exec.Command("sh", "-c", vmScript(tc.asked, CacheStore{}))
 			cmd.Env = []string{"HOME=" + home, "PATH=" + bin + ":" + os.Getenv("PATH")}
 			cmd.Stdin = strings.NewReader("the-jit\n")
 			out, err := cmd.CombinedOutput()
