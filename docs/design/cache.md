@@ -54,7 +54,7 @@ GitHub's order, pinned by their tests
 4. Keys compare byte for byte: case, accents and trailing spaces all count,
    and `%`, `_` and `\` in a restore key are literal, not patterns.
 
-fleetci's `local_match` (internal/github/l1cache.py) follows this order,
+fleetci's `localMatch` (internal/l1cache) follows this order,
 with their cases as tests (`TestL1CacheDiskOnly`). It reads the scopes from
 the job's own token without checking its signature: it runs inside the job
 and only decides what the job's own disk answers. Entries filled from
@@ -145,7 +145,7 @@ job needs a store fleetci writes itself. It is the user's bucket, set as
 gitlab-runner's `[runners.cache]` and signed with gitlab-runner's own
 adapters (`internal/cachebucket`; listing, which they don't do, is ours).
 
-- **No server.** The VM's L1 (`l1cache.py`, `remote=bucket`) asks the node
+- **No server.** The VM's L1 (`fleetci-l1`, `remote=bucket`) asks the node
   through the VM's SSH connection: a remote forward to the VM's loopback,
   set again when fleetci reconnects. Nothing new is reachable on any
   network, and the VM never holds the bucket's credentials.

@@ -6,11 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -18,6 +17,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/nesty92/fleetci/internal/l1cache"
 )
 
 // fakeL2 is a cache server as actions/cache sees GitHub's: the twirp calls
@@ -151,54 +152,46 @@ func (f *fakeL2) serve(w http.ResponseWriter, r *http.Request) {
 
 const svcPath = "/twirp/github.actions.results.api.v1.CacheService/"
 
-// startL1 runs l1cache.py in front of l2, keeping archives in store, with
-// opts after its arguments, e.g. "remote=off".
+// startL1 runs the L1 (internal/l1cache) in front of l2, keeping archives
+// in store, with opts as the VM's script passes them, e.g. "remote=off".
 func startL1(t *testing.T, l2, store string, anyStore bool, opts ...string) string {
 	t.Helper()
-	py, err := exec.LookPath("python3")
-	if err != nil {
-		t.Skip("no python3")
-	}
-	dir := t.TempDir()
-	script := filepath.Join(dir, "l1cache.py")
-	if err := os.WriteFile(script, []byte(l1CacheScript), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := l.Addr().(*net.TCPAddr).Port
-	l.Close()
-	args := []string{"-I", script, fmt.Sprint(port), l2, store}
+	args := []string{l2, store}
 	if anyStore {
 		args = append(args, "any")
 	}
-	args = append(args, opts...)
-	cmd := exec.Command(py, args...)
-	var logs bytes.Buffer
-	cmd.Stderr = &logs
-	if err := cmd.Start(); err != nil {
+	cfg, err := l1cache.ParseArgs(append(args, opts...))
+	if err != nil {
 		t.Fatal(err)
 	}
+	var logs syncBuffer
+	cfg.Log = log.New(&logs, "", log.Ltime)
+	srv := httptest.NewServer(l1cache.New(cfg))
 	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		srv.Close()
 		if t.Failed() {
-			t.Logf("l1cache.py:\n%s", logs.String())
+			t.Logf("l1:\n%s", logs.String())
 		}
 	})
-	url := fmt.Sprintf("http://127.0.0.1:%d", port)
-	for deadline := time.Now().Add(10 * time.Second); ; {
-		if c, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port)); err == nil {
-			c.Close()
-			return url
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("l1cache.py did not start: %s", logs.String())
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	return srv.URL
+}
+
+// syncBuffer is a bytes.Buffer the L1's requests may log to at once.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
 }
 
 // do sends a request as the job's actions/cache would.

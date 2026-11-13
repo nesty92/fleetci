@@ -41,6 +41,7 @@ IMAGE=fleetci-fleet-machine
 
 umask 077
 mkdir -p "$DATA/bin" "$DATA/artifacts"
+sh "$REPO/hack/build-l1.sh"
 (cd "$REPO" && CGO_ENABLED=0 go build -o "$DATA/bin/" ./cmd/fleetci)
 # What joining workers install, served by the controllers. main.go embeds
 # LICENSE and NOTICE, which upstream's CI puts there.

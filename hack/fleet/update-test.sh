@@ -57,6 +57,7 @@ docker network connect --alias releases fleetci-fleet-w2 fleetci-fleet-releases
 
 # The controllers: this checkout's fleetci, letting the workers take the
 # latest.
+sh "$REPO/hack/build-l1.sh"
 (cd "$REPO" && CGO_ENABLED=0 go build -o "$DATA/bin/" ./cmd/fleetci)
 for c in ctl-1 ctl-2; do
   asroot "grep -q '^worker_update' /data/$c/etc/controller.toml || sed -i 's/^\[controller\]\$/[controller]\nworker_update = \"latest\"/' /data/$c/etc/controller.toml"

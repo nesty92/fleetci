@@ -3,6 +3,11 @@
 version: 2
 project_name: fleetci
 
+# fleetci embeds the actions/cache L1 its VMs run, built first.
+before:
+  hooks:
+    - go generate ./internal/github
+
 builds:
   - id: fleetci
     main: ./cmd/fleetci

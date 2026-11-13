@@ -74,16 +74,14 @@ fi
 if [ -r /etc/os-release ]; then . /etc/os-release; fi
 if [ "${ID:-}" = ubuntu ]; then export ImageOS="ubuntu${VERSION_ID%%%%.*}"; fi
 cache='%[2]s'
-# With a cache disk, actions/cache goes through the L1 (l1cache.py), which
-# keeps the archives on the disk, in front of the cache server it would
-# have used. Without python3, or if it doesn't start, jobs go straight on.
+# With a cache disk, actions/cache goes through the L1 (fleetci-l1, which
+# fleetci copied to ~/%[5]s), which keeps the archives on the disk, in
+# front of the cache server it would have used. Without it, or if it
+# doesn't start, jobs go straight on.
 l1=
-if [ "$hook" = cache ] && command -v python3 >/dev/null 2>&1; then
-  cat > fleetci-l1cache.py <<'L1PY'
-%[5]s
-L1PY
+if [ "$hook" = cache ] && [ -x "$HOME/%[5]s" ]; then
   mkdir -p _diag
-  nohup setsid python3 -I fleetci-l1cache.py %[6]d "${cache:-%[7]s}" /cache/actions %[8]s>> _diag/fleetci-l1cache.log 2>&1 < /dev/null &
+  nohup setsid "$HOME/%[5]s" %[6]d "${cache:-%[7]s}" /cache/actions %[8]s>> _diag/fleetci-l1.log 2>&1 < /dev/null &
   # The address the VM's containers reach it at too: Docker's bridge. A
   # firewall that drops what comes in lets them through to it, and only it.
   at=$(ip -4 -o addr show docker0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1)
@@ -174,7 +172,7 @@ if [ -n "${FLEETCI_RESULTS_URL:-}" ] &&
   LC_ALL=C grep -qaP 'A\x00C\x00T\x00I\x00O\x00N\x00S\x00_\x00R\x00E\x00S\x00U\x00L\x00T\x00S\x00_\x00U\x00R\x00L\x00' "$(dirname "$0")/bin/Runner.Worker.dll" 2>/dev/null; then
   echo "::warning::fleetci: this runner isn't patched, so actions/cache goes to GitHub's cache, not $FLEETCI_RESULTS_URL"
 fi
-# The L1 (l1cache.py) runs as this user and keeps its archives on the disk.
+# The L1 (fleetci-l1) runs as this user and keeps its archives on the disk.
 if mountpoint -q /cache 2>/dev/null; then
   sudo -n mkdir -p /cache/actions && sudo -n chown "$(id -u):$(id -g)" /cache/actions
 fi
@@ -200,7 +198,7 @@ func SSHStart(version string, cs CacheStore, log hclog.Logger) StartFunc {
 
 // vmScript is runScript for the runner version and cache store given.
 func vmScript(version string, cs CacheStore) string {
-	return fmt.Sprintf(runScript, version, cs.URL, DefaultRunnerVersion, jobStartedHook, l1CacheScript, l1CachePort, githubResultsURL, cs.l1Args())
+	return fmt.Sprintf(runScript, version, cs.URL, DefaultRunnerVersion, jobStartedHook, l1Path, l1CachePort, githubResultsURL, cs.l1Args())
 }
 
 // followTries is how many times in a row following the runner may fail
@@ -211,10 +209,10 @@ func sshStart(script string, log hclog.Logger) StartFunc {
 	return startWith(script, nil, log)
 }
 
-// startWith is sshStart with node, the node's cache service for a VM
+// startWith is sshStart with nodeSvc, the node's cache service for a VM
 // with a cache disk, served on the VM through the SSH connection; the
 // job's saves are uploaded through it after the runner exits.
-func startWith(script string, node http.Handler, log hclog.Logger) StartFunc {
+func startWith(script string, nodeSvc http.Handler, log hclog.Logger) StartFunc {
 	return func(ctx context.Context, vm VM, jit string, took func(job string)) error {
 		log := log.With("vm", vm.ID)
 		// The machine's connection, shared with its reclaim watch: the job
@@ -228,8 +226,11 @@ func startWith(script string, node http.Handler, log hclog.Logger) StartFunc {
 		if vm.Cache {
 			stdin += "cache\n"
 		}
-		if !vm.Cache {
-			node = nil
+		// This job's: the closure serves every job of the node at once.
+		var node http.Handler
+		if vm.Cache {
+			node = nodeSvc
+			installL1(ctx, client, log)
 		}
 		stop := func() {}
 		if node != nil {
