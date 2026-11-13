@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"maps"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -66,6 +67,8 @@ type Worker struct {
 	// stores are the GitHub jobs' cache stores by their settings, kept
 	// for the issuer's keys and the bucket's client.
 	stores   map[string]github.CacheStore
+	// subnets hold the VM subnets this process claimed; see freeSubnets.
+	subnets  []net.Listener
 	changed  chan struct{}
 	update   *updater
 	started  time.Time          // when this process started
@@ -331,10 +334,18 @@ func (w *Worker) build(ctx context.Context, fit Fit) error {
 	}
 	classes := map[string]Class{}
 	fclasses := map[string]fleet.Class{}
-	subnets, err := freeSubnets(len(fit.Classes))
+	subnets, claims, err := freeSubnets(len(fit.Classes))
 	if err != nil {
 		return err
 	}
+	kept := false
+	defer func() {
+		if !kept {
+			for _, l := range claims {
+				l.Close()
+			}
+		}
+	}()
 	egress := w.cfg.EgressInterface
 	if egress == "" {
 		if egress, err = defaultInterface(); err != nil {
@@ -369,6 +380,7 @@ func (w *Worker) build(ctx context.Context, fit Fit) error {
 	}
 	w.mu.Lock()
 	w.backend = b
+	w.subnets, kept = claims, true
 	w.mu.Unlock()
 	return nil
 }
@@ -449,24 +461,41 @@ func groupName(worker, class string) string {
 }
 
 // freeSubnets picks /24s for the classes' VMs that clash with no route on
-// this machine, in fleetingd's form "172.16.N.".
-func freeSubnets(n int) ([]string, error) {
+// this machine, in fleetingd's form "172.16.N.", and claims each for this
+// process.
+//
+// A route shows only while a VM runs, so two workers on one network (one
+// machine, or one container) would otherwise both pick the first free
+// ones, and each dial the other's VMs at the same address. The claim is an
+// abstract unix socket: it belongs to the network namespace, which is what
+// the subnets share, and goes when the process does, however it ends. The
+// caller keeps the listeners open for as long as its VMs run.
+func freeSubnets(n int) ([]string, []net.Listener, error) {
 	out, err := exec.Command("ip", "-4", "route", "show", "table", "all").Output()
 	if err != nil {
-		return nil, fmt.Errorf("ip route: %w", err)
+		return nil, nil, fmt.Errorf("ip route: %w", err)
 	}
 	routes := string(out)
 	var subnets []string
+	var claims []net.Listener
 	for i := 200; i < 250 && len(subnets) < n; i++ {
 		s := fmt.Sprintf("172.16.%d.", i)
-		if !strings.Contains(routes, s) {
-			subnets = append(subnets, s)
+		if strings.Contains(routes, s) {
+			continue
 		}
+		l, err := net.Listen("unix", "@fleetci-vm-subnet-"+s+"0")
+		if err != nil {
+			continue // another worker on this network has it
+		}
+		subnets, claims = append(subnets, s), append(claims, l)
 	}
 	if len(subnets) < n {
-		return nil, errors.New("no free 172.16.200-249 subnet for the VMs")
+		for _, l := range claims {
+			l.Close()
+		}
+		return nil, nil, errors.New("no free 172.16.200-249 subnet for the VMs")
 	}
-	return subnets, nil
+	return subnets, claims, nil
 }
 
 // defaultInterface is the default route's interface.
