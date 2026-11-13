@@ -511,3 +511,29 @@ The runner can take the archives from a folder instead
 (`ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE`, `<owner>_<repo>/<sha>.tar.gz`); it
 still asks GitHub to resolve each action, so a disk would save the
 download, about 0.6 s per action, not the 0.5 s of resolving.
+
+### GitLab under steady load
+
+Twenty pull requests, one every 150 s, each running the playground's `go`
+and `web` jobs and merging to main (which runs them again), on four nodes
+of 4 CPUs and 4.5 GB, a cache budget of 10 GB each. One run of each,
+November 2026; GitLab's runner zips caches with fastzip and zstd.
+
+| | disk | disk, no copies | bucket only | no cache |
+|---|---|---|---|---|
+| jobs (failed) | 80 (0) | 78 (2) | 78 (0) | 82 (16) |
+| queue p95 | 4 s | 78 s | 88 s | 306 s |
+| queued under 30 s | 100% | 87% | 82% | 59% |
+| go p50 (p95) | 51 s (103 s) | 53 s (127 s) | 83 s (169 s) | 222 s (331 s) |
+| web p50 (p95) | 94 s (132 s) | 108 s (173 s) | 144 s (210 s) | 154 s (251 s) |
+| web pull requests p50 | 94 s | 116 s | | |
+| caches started empty | 20 of 80 | 27 of 78 | | |
+| copied between nodes | 119 GB | 0 | | |
+
+"disk" copied shared caches between nodes; "disk, no copies" ran with
+copies off (the default since) and the actions/cache L1 in Go. The
+failures are GitLab's: it cancels a pipeline on main still waiting when a
+newer push arrives (all 2, and 14 of 16), and Docker Hub's anonymous pull
+limit (2 of 16; the lab's VMs pull from Docker Hub directly). In "bucket
+only", 39% of the go job is preparing the VM, mostly pulling images, which
+the disk keeps.
