@@ -412,3 +412,41 @@ VM job found the container job's disk, which had come over from the other
 worker, and missed. A download from GitHub's cache in 8 MiB ranges, 8 at a
 time, took 16.6 s for the 200 MB archive, against 14–16 s for one stream:
 the host's internet link was the limit.
+
+### A merge train on GitHub
+
+A merge queue played on WireZone/fleetci-playground, whose plan has none
+([hack/cachelab/train/drive.py](../hack/cachelab/train/drive.py)): main
+gets a base commit, then 5 cars, 2 at once, each a commit on the car
+ahead pushed to `train/<run>/car-<n>`. A car merges, pushed to main, when
+it passes and the car ahead has merged, and main's workflow runs on it.
+Each car and each main commit runs two jobs, Go (vet and tests of fleetci)
+in `golang:1.27` and Next.js (install, lint, build of vercel/chatbot) in
+`node:24`, each keeping its tools' caches with `actions/cache` as a
+project would: about 990 MB for Go, 230–480 MB for web. The same fleet of
+a controller and two nodes, run one job at a time, so a train's length is
+the sum of its jobs; 22 jobs a train, with main's base.
+
+| | `fleetci-plain`, no cache disk | Cache disk, `cache_store = "github"` | Cache disk, `cache_store = "bucket"` |
+| --- | --- | --- | --- |
+| 5 cars merged | 3511 s | 2763 s (−21%) | 2292 s (−35%) |
+| Main's workflows done | 4360 s | 3316 s | 2810 s |
+| Job time after main's base | 4031 s | 3020 s | 2207 s (−45%) |
+| Go job, mean wall time on cars | 293 s | 187 s | 130 s |
+| Web job, mean wall time on cars | 150 s | 108 s | 90 s |
+| Restore of Go's 986 MB, from elsewhere | from GitHub's cache, not timed | 66–76 s from GitHub's cache | 2.1–3.1 s from the bucket |
+
+The jobs' own steps took the same in all three (Go 6–50 s, web 33–42 s:
+Go's tests reuse the results of packages a commit didn't touch); the rest
+of a job is its VM, image pull, checkout and the cache's restore and save.
+With the cache disk, an entry the job's disk had was restored in about a
+second either way. Every job had a disk of its own, so most of them
+restored from the store behind it: GitHub's cache over the host's
+internet link, or the bucket, here RustFS on the same host as the nodes.
+That is the best case for a bucket; one in the nodes' own region or
+network is the case it's for. After each job the node uploaded its saves
+to the bucket: 28 uploads in this train and the workflow before it, none
+failed.
+
+`fleetci-plain` jobs restore and save with GitHub's cache itself, as on
+GitHub's own runners.
