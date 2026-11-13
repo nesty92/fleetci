@@ -67,9 +67,8 @@ type ControllerTable struct {
 	// UpdateParallel is how many workers may update at once. Default 1.
 	UpdateParallel int `toml:"update_parallel"`
 	// CacheWait is how long a job of a class with cache_disk waits for
-	// room on the worker that has its cache, before it goes to another,
-	// where it starts from the cache it falls back on or from nothing.
-	// Default 30s.
+	// room on a worker with any of its caches, when the workers with room
+	// have none, before it starts from nothing on one of them. Default 10s.
 	CacheWait fleet.Duration `toml:"cache_wait"`
 }
 
@@ -133,7 +132,7 @@ func LoadController(path string) (*ControllerConfig, error) {
 		}
 	}
 	t.UpdateParallel = cmp.Or(t.UpdateParallel, 1)
-	t.CacheWait = cmp.Or(t.CacheWait, fleet.Duration(30*time.Second))
+	t.CacheWait = cmp.Or(t.CacheWait, fleet.Duration(10*time.Second))
 	if t.CacheWait < 0 {
 		return nil, fmt.Errorf("%s: cache_wait can't be negative", path)
 	}

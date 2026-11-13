@@ -179,7 +179,9 @@ func (f fleetCapacity) Create(ctx context.Context, class string) (source.VM, err
 
 // byCache puts first the workers that have the best of the caches a job
 // starts from (dirs, the best first), keeping the order otherwise. better
-// says a worker without room has a better one than any of ws.
+// says a worker without room has one of them and none of ws has any: a
+// worker with the cache the job falls back on (main's) is good enough,
+// and the job doesn't wait for the one with its own.
 func (c *Controller) byCache(ws []*workerConn, class string, dirs []string) (_ []*workerConn, better bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -207,7 +209,7 @@ func (c *Controller) byCache(ws []*workerConn, class string, dirs []string) (_ [
 		here = min(here, ranks[w])
 	}
 	slices.SortStableFunc(ws, func(a, b *workerConn) int { return ranks[a] - ranks[b] })
-	return ws, best < here
+	return ws, best < len(dirs) && here == len(dirs)
 }
 
 // bootWait is how long a worker may take to boot an assignment's VM.

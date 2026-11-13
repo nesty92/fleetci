@@ -47,8 +47,8 @@ func ids(ws []*workerConn) []string {
 }
 
 // TestPlaceByCache: a job goes first to the worker with its own cache,
-// then to one with the cache it falls back on; when the worker with the
-// best is full, Create says so, to wait for it.
+// then to one with the cache it falls back on; when only full workers
+// have any of its caches, Create says so, to wait for one.
 func TestPlaceByCache(t *testing.T) {
 	room := map[string]int{"small": 1, "plain": 1}
 	full := map[string]int{"small": 0, "plain": 0}
@@ -72,8 +72,14 @@ func TestPlaceByCache(t *testing.T) {
 
 	c.workers["w2"].report.Room = full
 	ws, better = c.byCache(c.candidates("small"), "small", dirs)
+	if got := ids(ws); len(got) != 1 || got[0] != "w1" || better {
+		t.Fatalf("own cache's worker full, main's free: %v, better %v", got, better)
+	}
+	// Waited for only when the workers with room have none of its caches.
+	c.workers["w1"].report.Caches = []string{"x"}
+	ws, better = c.byCache(c.candidates("small"), "small", dirs)
 	if got := ids(ws); len(got) != 1 || got[0] != "w1" || !better {
-		t.Fatalf("holder full: %v, better %v", got, better)
+		t.Fatalf("holder full, the rest cold: %v, better %v", got, better)
 	}
 	// A holder that isn't Ready isn't waited for.
 	c.workers["w2"].report.State = Draining
