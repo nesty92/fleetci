@@ -52,6 +52,25 @@ fi
 if [ -w /opt/hostedtoolcache ]; then
   export RUNNER_TOOL_CACHE=/opt/hostedtoolcache AGENT_TOOLSDIRECTORY=/opt/hostedtoolcache
 fi
+# actions/cache compresses with zstd only where zstd is: a job's container,
+# often an image without it, falls back to gzip, one core, several times
+# slower. The VM's zstd goes where the runner mounts into job containers
+# (externals, at /__e), with its libraries and the loader, so that it runs
+# in any of them, glibc or musl; the job-started hook puts it on the PATH.
+zd=externals/fleetci-zstd
+rm -rf "$zd"
+if zb=$(command -v zstd 2>/dev/null) && [ -d externals ] && command -v ldd >/dev/null 2>&1; then
+  ld=$(ldd "$zb" 2>/dev/null | awk '$1 ~ /^\/.*ld-linux/ { print $1 }')
+  if [ -n "$ld" ] && mkdir -p "$zd/lib" "$zd/bin" && cp -L "$zb" "$zd/zstd" && cp -L "$ld" "$zd/ld.so" &&
+    ldd "$zb" | awk '$3 ~ /^\// { print $3 }' | while read -r l; do cp -L "$l" "$zd/lib/"; done; then
+    for w in zstd: zstdmt:-T0 unzstd:-d; do
+      printf '#!/bin/sh\nexec /__e/fleetci-zstd/ld.so --library-path /__e/fleetci-zstd/lib /__e/fleetci-zstd/zstd %%s "$@"\n' "${w#*:}" > "$zd/bin/${w%%%%:*}"
+      chmod 755 "$zd/bin/${w%%%%:*}"
+    done
+  else
+    rm -rf "$zd"
+  fi
+fi
 if [ -r /etc/os-release ]; then . /etc/os-release; fi
 if [ "${ID:-}" = ubuntu ]; then export ImageOS="ubuntu${VERSION_ID%%%%.*}"; fi
 cache='%[2]s'
@@ -107,11 +126,19 @@ if ! ls /usr/lib*/libicuuc.so.* /usr/lib/*/libicuuc.so.* 2>/dev/null | grep -q .
   else sudo ./bin/installdependencies.sh >/dev/null
   fi
 fi
+: > fleetci-job-started.sh
+if [ -d "$zd" ]; then
+  # A path that is only there in a job's container: a job on the VM itself
+  # has the VM's zstd.
+  echo 'if [ -n "${GITHUB_PATH:-}" ]; then echo /__e/fleetci-zstd/bin >> "$GITHUB_PATH"; fi' >> fleetci-job-started.sh
+fi
 if [ "$hook" = cache ] && sudo -n true 2>/dev/null; then
   sudo mkdir -p /run/fleetci && sudo chown "$(id -u):$(id -g)" /run/fleetci
-  cat > fleetci-job-started.sh <<'HOOK'
+  cat >> fleetci-job-started.sh <<'HOOK'
 %[4]s
 HOOK
+fi
+if [ -s fleetci-job-started.sh ]; then
   export ACTIONS_RUNNER_HOOK_JOB_STARTED="$dir/fleetci-job-started.sh"
 fi
 exec ./run.sh --jitconfig "$jit"

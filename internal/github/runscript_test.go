@@ -129,3 +129,80 @@ func TestJobStartedHook(t *testing.T) {
 		})
 	}
 }
+
+// The VM's zstd goes into the runner's externals, which job containers
+// get at /__e, and the job-started hook puts it on the job's PATH. Without
+// zstd on the VM there is neither, and no hook.
+func TestRunScriptLendsZstd(t *testing.T) {
+	zstd, err := exec.LookPath("zstd")
+	if err != nil {
+		t.Skip("no zstd")
+	}
+	if _, err := exec.LookPath("ldd"); err != nil {
+		t.Skip("no ldd")
+	}
+	runSh := "#!/bin/sh\necho \"hook=$ACTIONS_RUNNER_HOOK_JOB_STARTED\"\n"
+	for _, has := range []bool{true, false} {
+		home, bin := t.TempDir(), t.TempDir()
+		dir := filepath.Join(home, "actions-runner-2.9.0")
+		_ = os.MkdirAll(filepath.Join(dir, "externals"), 0o755)
+		_ = os.WriteFile(filepath.Join(dir, "run.sh"), []byte(runSh), 0o755)
+		_ = os.WriteFile(filepath.Join(bin, "dnf"), []byte("#!/bin/sh\n"), 0o755)
+		path := bin + ":/usr/bin:/bin"
+		if has {
+			_ = os.Symlink(zstd, filepath.Join(bin, "zstd"))
+		} else {
+			// Only the tools the script needs, so the system's zstd isn't found.
+			for _, tool := range []string{"sh", "awk", "cp", "rm", "mkdir", "ldd", "chmod", "sort", "uname", "cat", "grep", "ls", "tail", "id", "cut", "printf", "sed"} {
+				if p, err := exec.LookPath(tool); err == nil {
+					_ = os.Symlink(p, filepath.Join(bin, tool))
+				}
+			}
+			path = bin
+		}
+		cmd := exec.Command("sh", "-c", vmScript("", CacheStore{}))
+		cmd.Env = []string{"HOME=" + home, "PATH=" + path}
+		cmd.Stdin = strings.NewReader("the-jit\n")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("zstd %v: %v: %s", has, err, out)
+		}
+		zd := filepath.Join(dir, "externals", "fleetci-zstd")
+		_, serr := os.Stat(filepath.Join(zd, "bin", "zstdmt"))
+		if has != (serr == nil) {
+			t.Fatalf("zstd %v: %v", has, serr)
+		}
+		hook := filepath.Join(dir, "fleetci-job-started.sh")
+		if !has {
+			if !strings.Contains(string(out), "hook=\n") {
+				t.Errorf("a hook without zstd: %s", out)
+			}
+			continue
+		}
+		if !strings.Contains(string(out), "hook="+hook) {
+			t.Fatalf("no hook: %s", out)
+		}
+		// The copy runs through its own loader and libraries, as in a
+		// container without them.
+		in := strings.Repeat("fleetci ", 1<<16)
+		z := exec.Command(filepath.Join(zd, "ld.so"), "--library-path", filepath.Join(zd, "lib"), filepath.Join(zd, "zstd"), "-T0")
+		z.Stdin = strings.NewReader(in)
+		packed, err := z.Output()
+		if err != nil || len(packed) == 0 || len(packed) >= len(in) {
+			t.Fatalf("the copy: %v, %d bytes", err, len(packed))
+		}
+		w, _ := os.ReadFile(filepath.Join(zd, "bin", "unzstd"))
+		if !strings.Contains(string(w), "/__e/fleetci-zstd/zstd -d \"$@\"") {
+			t.Errorf("unzstd: %s", w)
+		}
+		gp := filepath.Join(t.TempDir(), "path")
+		h := exec.Command("sh", hook)
+		h.Env = []string{"PATH=/usr/bin:/bin", "GITHUB_PATH=" + gp}
+		if out, err := h.CombinedOutput(); err != nil {
+			t.Fatalf("hook: %v: %s", err, out)
+		}
+		if got, _ := os.ReadFile(gp); string(got) != "/__e/fleetci-zstd/bin\n" {
+			t.Errorf("GITHUB_PATH %q", got)
+		}
+	}
+}
