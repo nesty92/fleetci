@@ -278,10 +278,15 @@ mount --bind /cache/containerd /var/lib/containerd
 systemctl start containerd.service docker.service
 `
 
-// unmountScript stops what uses the disk and unmounts it, so the layer is
-// whole when the plugin takes it out.
+// unmountScript stops what uses the disk, trims it and unmounts it, so the
+// layer is whole when the plugin takes it out. Without the trim, what the
+// job wrote and deleted (a container's layers, an archive already
+// extracted) stays allocated in the job's layer on the node, and every
+// job's layer grows the disk by that much: 1 to 3 GB a job in the merge
+// train. Trimmed, the layer keeps only what is on the disk at the end.
 const unmountScript = `
 systemctl stop docker.socket docker.service containerd.service
 sync
+fstrim /cache || true
 umount /var/lib/docker /var/lib/containerd /cache
 `
