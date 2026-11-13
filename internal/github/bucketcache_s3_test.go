@@ -6,10 +6,12 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -93,6 +95,32 @@ func TestL1CacheBucketS3(t *testing.T) {
 	}
 	if l2.gets.Load() != 0 || len(l2.entries) != 0 {
 		t.Error("GitHub's cache got cache calls")
+	}
+
+	// A scope with more entries than one page of a listing (1000): the
+	// entry is on the second page.
+	dir := path + "/" + entryDir("1", "refs/heads/many", "v1")
+	sem := make(chan struct{}, 32)
+	var wg sync.WaitGroup
+	for i := range 1100 {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			k := fmt.Sprintf("%sk-%04d", dir, i)
+			if _, err := raw.PutObject(ctx, &s3.PutObjectInput{Bucket: &name, Key: &k, Body: strings.NewReader("x")}); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	many := bare(is.token(t, map[string]any{"ac": `[{"Scope":"refs/heads/many","Permission":3}]`}))
+	if key, data, _ := restoreData(t, vm2, many, "k-1099"); key != "k-1099" || string(data) != "x" {
+		t.Fatalf("an entry on the listing's second page: %q", key)
+	}
+	if key, _, _ := restoreData(t, vm2, many, "nope", "k-10"); !strings.HasPrefix(key, "k-10") {
+		t.Fatalf("a prefix across pages: %q", key)
 	}
 }
 

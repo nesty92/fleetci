@@ -153,21 +153,29 @@ func (c *bucketCache) lookup(w http.ResponseWriter, r *http.Request) {
 	keys := append([]string{req.Key}, req.RestoreKeys...)
 	for _, scope := range g.Reads {
 		dir := entryDir(g.Repo, scope, req.Version)
-		objs, err := c.bucket.List(r.Context(), dir)
-		if err != nil {
-			c.log.Warn("cache bucket: listing failed", "err", err)
-			http.Error(w, "listing the bucket failed", http.StatusBadGateway)
-			return
-		}
-		var entries []entry
-		for _, o := range objs {
-			k, ok := unescapeName(strings.TrimPrefix(o.Name, dir))
-			if ok && !strings.Contains(strings.TrimPrefix(o.Name, dir), "/") {
-				entries = append(entries, entry{key: k, name: o.Name, modified: o.Modified})
+		// Each key lists only the names it prefixes, which escaping keeps:
+		// a scope's other entries, however many, aren't read.
+		var e entry
+		found := false
+		for _, k := range keys {
+			objs, err := c.bucket.List(r.Context(), dir+escapeName(k))
+			if err != nil {
+				c.log.Warn("cache bucket: listing failed", "err", err)
+				http.Error(w, "listing the bucket failed", http.StatusBadGateway)
+				return
+			}
+			var entries []entry
+			for _, o := range objs {
+				rest := strings.TrimPrefix(o.Name, dir)
+				if k, ok := unescapeName(rest); ok && !strings.Contains(rest, "/") {
+					entries = append(entries, entry{key: k, name: o.Name, modified: o.Modified})
+				}
+			}
+			sort.Slice(entries, func(i, j int) bool { return entries[i].name < entries[j].name })
+			if e, found = match(entries, []string{k}); found {
+				break
 			}
 		}
-		sort.Slice(entries, func(i, j int) bool { return entries[i].name < entries[j].name })
-		e, found := match(entries, keys)
 		if !found {
 			continue
 		}

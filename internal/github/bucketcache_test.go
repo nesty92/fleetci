@@ -29,6 +29,9 @@ type fakeBucket struct {
 	times   map[string]time.Time
 	lists   int
 	gets    int
+	// refusePuts is how many uploads to refuse next, as a bucket that
+	// fails does.
+	refusePuts int
 }
 
 func newFakeBucket(t *testing.T) *fakeBucket {
@@ -51,6 +54,11 @@ func newFakeBucket(t *testing.T) *fakeBucket {
 			b.gets++
 			http.ServeContent(w, r, name, b.times[name], bytes.NewReader(data))
 		case http.MethodPut:
+			if b.refusePuts > 0 {
+				b.refusePuts--
+				http.Error(w, "slow down", http.StatusServiceUnavailable)
+				return
+			}
 			if r.Header.Get("Content-Type") != "application/octet-stream" {
 				http.Error(w, "unsigned content type", http.StatusForbidden)
 				return
