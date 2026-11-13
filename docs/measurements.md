@@ -463,3 +463,34 @@ All 115 VMs were ready under 10 s after their restore. Before fleetci's
 nodes claimed their VM subnets, the lab's two nodes, sharing one network
 namespace, picked the same ones and dialed each other's VMs: 24–252 s to
 ready, and a GitLab job failed when its three SSH tries were reset.
+
+### Compressing the caches
+
+In the merge train above, most of the time a GitHub Go job spent saving
+its cache went to gzip: `actions/cache` compresses with zstd only when the
+step finds it, and the step runs in the job's container (`golang:1.27`,
+`node:24`), which has none. gzip then compresses on one core: 71 s of a
+74 s save of 986 MB, the upload 2 s. fleetci now lends the VM's zstd to
+the job's container (the runner's externals, which containers get at
+`/__e`, with the libraries and loader it needs) and puts it on the job's
+PATH. The same job, on a 4-CPU VM: `tar --use-compress-program zstdmt`,
+8 s to compress 3.4 GB of Go caches into 909 MB, 2 s to upload, 10 s in
+all.
+
+GitLab's helper zips with deflate on one core by default. Its own settings
+change that, in `[[runners]] environment` or a job's variables:
+
+| Helper v19.5.2, 1.3 GB in 25,561 files, 16 cores | Save | Size | Restore |
+| --- | --- | --- | --- |
+| zip (default) | 1.1 s | 400 MB | 1.1 s |
+| zip, `FF_USE_FASTZIP` | 1.1 s | 400 MB | 1.1 s |
+| zip, fastzip, level fast | 0.9 s | 432 MB | 1.1 s |
+| `tarzstd` | 2.4 s | 338 MB | 3.1 s |
+| `zipzstd`, fastzip, level fast | 0.9 s | 400 MB | 1.0 s |
+
+On a busier run the default zip took 3.4 s to save and 2.4 s to restore,
+`zipzstd` at level fast 2.3 s and 1.9 s. The lab's runner now sets
+`FF_USE_FASTZIP=true`, `CACHE_COMPRESSION_FORMAT=zipzstd` and
+`CACHE_COMPRESSION_LEVEL=fast`; the Go job's cache, 3.4 GB in 68,000
+files, is stored as 1015 MB of zstd zip entries (method 93), zipped in
+9 s on 4 CPUs.

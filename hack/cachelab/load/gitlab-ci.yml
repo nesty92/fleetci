@@ -1,0 +1,28 @@
+# A merge request's pipeline, or main's once it merges (load.py commits it
+# with @CLASS_GO@, @CLASS_WEB@, @CACHE_KEY@ and @POLICY@ filled in). Each
+# job keeps its tools' caches with cache:, as a project would; without
+# them, the key is one nothing writes.
+workflow:
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH =~ /^load\//
+default:
+  tags: [fleetci]
+  timeout: 40m
+go:
+  image: golang:1.27
+  variables:
+    FLEETCI_CLASS: "@CLASS_GO@"
+  cache:
+    key: @CACHE_KEY@-go
+    paths: [.tcache/]
+    policy: @POLICY@
+  script: [sh ci/job.sh go]
+web:
+  image: node:24
+  variables:
+    FLEETCI_CLASS: "@CLASS_WEB@"
+  cache:
+    key: @CACHE_KEY@-web
+    paths: [.tcache/]
+    policy: @POLICY@
+  script: [sh ci/job.sh web]
