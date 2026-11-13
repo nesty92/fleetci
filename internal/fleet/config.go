@@ -204,6 +204,17 @@ func (c Class) schedules() []taskscaler.Schedule {
 	return out
 }
 
+// CheckRegistryMirrors refuses registry_mirrors that aren't plain http(s)
+// URLs, so that they can go into a shell script as they are.
+func CheckRegistryMirrors(mirrors []string) error {
+	for _, m := range mirrors {
+		if u, err := url.Parse(m); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || strings.ContainsAny(m, `'"\ |&`) {
+			return fmt.Errorf("registry_mirrors: %q is not an http(s) URL", m)
+		}
+	}
+	return nil
+}
+
 func (c Class) validate(name string) error {
 	if c.Plugin == "" {
 		return fmt.Errorf("class %q: plugin is required", name)
@@ -217,10 +228,8 @@ func (c Class) validate(name string) error {
 	if c.Reclaim.Rebalance && !c.watchesReclaim() {
 		return fmt.Errorf("class %q: reclaim.rebalance needs reclaim.watch", name)
 	}
-	for _, m := range c.RegistryMirrors {
-		if u, err := url.Parse(m); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || strings.ContainsAny(m, `'"\ |&`) {
-			return fmt.Errorf("class %q: registry_mirrors: %q is not an http(s) URL", name, m)
-		}
+	if err := CheckRegistryMirrors(c.RegistryMirrors); err != nil {
+		return fmt.Errorf("class %q: %w", name, err)
 	}
 	if c.CPUs < 0 || c.Memory < 0 {
 		return fmt.Errorf("class %q: cpus and memory can't be negative", name)

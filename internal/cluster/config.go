@@ -96,6 +96,9 @@ type ClassSpec struct {
 	// its own in its [cache_disk]; jobs go to a worker that has their
 	// cache when it has room.
 	CacheDisk bool `toml:"cache_disk" json:"cache_disk,omitempty"`
+	// RegistryMirrors are the VMs' Docker Hub mirrors (see
+	// fleet.Class.RegistryMirrors).
+	RegistryMirrors []string `toml:"registry_mirrors" json:"registry_mirrors,omitempty"`
 }
 
 // LoadController reads controller.toml.
@@ -150,6 +153,9 @@ func LoadController(path string) (*ControllerConfig, error) {
 		cl.Arch = cmp.Or(cl.Arch, "amd64")
 		if cl.Overflow != "" && c.Classes[cl.Overflow] == nil {
 			return nil, fmt.Errorf("%s: class %s: overflow %q is no class", path, name, cl.Overflow)
+		}
+		if err := fleet.CheckRegistryMirrors(cl.RegistryMirrors); err != nil {
+			return nil, fmt.Errorf("%s: class %s: %w", path, name, err)
 		}
 	}
 	if c.DefaultClass == "" {

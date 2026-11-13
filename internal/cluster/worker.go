@@ -453,6 +453,8 @@ func (w *Worker) fleetClass(c Class, egress, images, subnet string) (fleet.Class
 		CPUs:      c.CPUs,
 		Memory:    c.Memory,
 		CacheDisk: cache,
+
+		RegistryMirrors: c.RegistryMirrors,
 	}, nil
 }
 
