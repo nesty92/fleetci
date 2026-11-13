@@ -590,3 +590,44 @@ func TestFailedFlattenIsRetried(t *testing.T) {
 		}
 	}
 }
+
+// With less than MinFree free, whatever took it, the store adds no layer
+// and evicts nothing: dropping its caches wouldn't give the space back.
+func TestLowSpaceAddsNothing(t *testing.T) {
+	img := &fakeImages{data: 64 << 10}
+	s := open(t, Config{Budget: 1 << 30}, img)
+	run(t, s, main_)
+	s.cfg.MinFree = 1 << 62 // more than any disk has
+	if _, err := s.Begin(mr); !errors.Is(err, ErrLowSpace) {
+		t.Fatalf("Begin short of space: %v, want ErrLowSpace", err)
+	}
+	if _, err := s.readHead(main_.key()); err != nil {
+		t.Fatalf("a cache was evicted for space it can't give back: %v", err)
+	}
+	s.cfg.MinFree = 1
+	if l, err := s.Begin(mr); err != nil || l.From() != main_.Label() {
+		t.Fatalf("with space again: %v, from %q", err, l.From())
+	}
+}
+
+// A job's own cache is leased before eviction makes room for its layer,
+// so it is never evicted just before the job would read it.
+func TestBeginKeepsItsSource(t *testing.T) {
+	img := &fakeImages{data: 64 << 10}
+	s := open(t, Config{Budget: 1 << 30}, img)
+	now := time.Now()
+	s.now = func() time.Time { return now }
+	run(t, s, main_)
+	now = now.Add(time.Minute)
+	other := main_
+	other.Project = "2"
+	run(t, s, other)
+	s.cfg.Budget = 100 << 10 // now only one fits: main_ is the older
+	l, err := s.Begin(main_)
+	if err != nil || l.From() != "own" {
+		t.Fatalf("its own cache was evicted before it read it: %v, from %q", err, l.From())
+	}
+	if _, err := s.readHead(other.key()); err == nil {
+		t.Fatal("over budget, the other cache was kept")
+	}
+}

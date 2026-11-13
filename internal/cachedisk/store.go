@@ -15,10 +15,12 @@
 // from the shared caches its From names, the default branch's, say.
 //
 // Chains are flattened into one layer well before cloud-hypervisor's
-// nesting limit (MaxDepth, chainLimit). The store keeps to a budget: past it, or with less than
-// MinFree left on its filesystem, refs' own caches go first, then the shared
-// ones, each least recently used first, never one a VM is using; a cache
-// unused for MaxAge goes too.
+// nesting limit (MaxDepth, chainLimit). The store keeps to a budget: past
+// it, refs' own caches go first, then the shared ones, each least recently
+// used first, never one a VM is using; a cache unused for MaxAge goes too.
+// With less than MinFree left on its filesystem, whatever took it, the
+// store adds nothing (no layer, copy or flattening) rather than evict
+// caches that would not give it back.
 package cachedisk
 
 import (
@@ -300,7 +302,9 @@ func (l *Lease) From() string {
 func (s *Store) Begin(scope Scope) (*Lease, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.evict()
+	if !s.leavesFree(0) {
+		return nil, ErrLowSpace
+	}
 	l := &Lease{scope: scope}
 	parent, from := s.readable(scope)
 	if parent != nil && len(parent.Chain) >= chainLimit {
@@ -334,6 +338,9 @@ func (s *Store) Begin(scope Scope) (*Lease, error) {
 		_ = os.Remove(layer)
 		return nil, fmt.Errorf("cache layer: %w", err)
 	}
+	// Only now, with the job's chain leased: evicting first could drop
+	// the cache it was about to start from.
+	s.evict()
 	return l, nil
 }
 
@@ -342,7 +349,7 @@ func (s *Store) Begin(scope Scope) (*Lease, error) {
 func (s *Store) readable(scope Scope) (*head, *source) {
 	for _, src := range scope.sources() {
 		h, err := s.readHead(src.dir)
-		if err != nil {
+		if err != nil || s.expired(h) {
 			continue
 		}
 		if size := s.chainSize(h.Chain); size > s.cfg.MaxPerCache {
@@ -446,7 +453,15 @@ func (s *Store) flatten(key string, chain []string) {
 	s.leases[hold] = struct{}{}
 	s.mu.Unlock()
 	start := s.now()
-	err := s.img.Flatten(layer, base, dst)
+	s.mu.Lock()
+	room := s.leavesFree(s.chainSize(chain))
+	s.mu.Unlock()
+	var err error
+	if room {
+		err = s.img.Flatten(layer, base, dst)
+	} else {
+		err = ErrLowSpace
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -544,11 +559,7 @@ func (s *Store) evictFor(need int64) {
 		if err != nil {
 			continue
 		}
-		age := s.cfg.MaxAge
-		if !h.Scope.Writer {
-			age = s.cfg.ReaderMaxAge
-		}
-		heads = append(heads, scope{key, h.Used, h.Committed, h.Scope.Writer, age})
+		heads = append(heads, scope{key, h.Used, h.Committed, h.Scope.Writer, s.maxAge(h)})
 	}
 	// A ref's own cache goes before any shared one: it is read by its ref
 	// alone, and it is a layer on the shared cache it started from, so
@@ -569,7 +580,7 @@ func (s *Store) evictFor(need int64) {
 	fits := false
 	for _, h := range heads {
 		old := s.now().Sub(h.used) > h.maxAge
-		fits = fits || s.fitsWith(need)
+		fits = fits || s.inBudget(need)
 		if !old && fits {
 			continue
 		}
@@ -585,17 +596,41 @@ func (s *Store) evictFor(need int64) {
 	}
 }
 
+// maxAge is how long a cache unused stays: a writer's MaxAge, a ref's own
+// ReaderMaxAge.
+func (s *Store) maxAge(h *head) time.Duration {
+	if !h.Scope.Writer {
+		return s.cfg.ReaderMaxAge
+	}
+	return s.cfg.MaxAge
+}
+
+// expired says the cache is past its age, for eviction to drop.
+func (s *Store) expired(h *head) bool { return s.now().Sub(h.Used) > s.maxAge(h) }
+
+// KeepUnder is what a VM keeps its cache disk's filesystem under, half of
+// MaxPerCache: room for a job's writes before the chain, flattened, would
+// be over it and start again from empty.
+func (s *Store) KeepUnder() int64 { return s.cfg.MaxPerCache / 2 }
+
+// ErrLowSpace: the store's filesystem has less than MinFree left, so it
+// adds nothing until something else frees it.
+var ErrLowSpace = errors.New("cache: the disk has less than min_free free; no cache disk until it has more")
+
 // fitsWith says whether the store, need bytes more, is within its budget
 // and leaves MinFree.
-func (s *Store) fitsWith(need int64) bool {
-	if s.used()+need > s.cfg.Budget {
-		return false
-	}
+func (s *Store) fitsWith(need int64) bool { return s.inBudget(need) && s.leavesFree(need) }
+
+// inBudget says whether the store, need bytes more, is within its budget:
+// all eviction makes room for.
+func (s *Store) inBudget(need int64) bool { return s.used()+need <= s.cfg.Budget }
+
+// leavesFree says whether need bytes more leave MinFree on the store's
+// filesystem.
+func (s *Store) leavesFree(need int64) bool {
 	var st syscall.Statfs_t
 	if err := syscall.Statfs(s.dir, &st); err == nil {
-		if int64(st.Bavail)*int64(st.Bsize)-need < s.cfg.MinFree {
-			return false
-		}
+		return int64(st.Bavail)*int64(st.Bsize)-need >= s.cfg.MinFree
 	}
 	return true
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -198,7 +199,7 @@ func (b *Backend) detachCache(id string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	start := time.Now()
-	if out, err := guest(ctx, cv.conn, unmountScript); err != nil {
+	if out, err := guest(ctx, cv.conn, unmountScript(cv.store.KeepUnder())); err != nil {
 		b.log.Warn("cache not unmounted; its layer is dropped", "vm", id, "err", err, "out", out)
 		_ = pluginDisk(ctx, cv.class, "detach", cv.inst)
 		cv.store.Abort(cv.lease)
@@ -284,7 +285,26 @@ systemctl start containerd.service docker.service
 // extracted) stays allocated in the job's layer on the node, and every
 // job's layer grows the disk by that much: 1 to 3 GB a job in the merge
 // train. Trimmed, the layer keeps only what is on the disk at the end.
-const unmountScript = `
+//
+// First it keeps what the disk holds under keep bytes, the least recently
+// used first: actions/cache's archives, then Docker's build cache, then
+// images older than a week. Otherwise a cache grows until the store
+// starts it again from empty (max_per_cache), images and all.
+func unmountScript(keep int64) string {
+	return strings.ReplaceAll(unmountTmpl, "@KEEP@", strconv.FormatInt(keep, 10))
+}
+
+const unmountTmpl = `
+keep=@KEEP@
+over() { [ "$(df -B1 --output=used /cache | tail -1)" -gt $keep ]; }
+if over && [ -d /cache/actions ]; then
+  for f in $(ls -tr /cache/actions/*.blob 2>/dev/null); do
+    over || break
+    rm -f "$f" "${f%.blob}.json"
+  done
+fi
+if over; then docker builder prune -f --keep-storage $((keep / 4)) >/dev/null 2>&1 || true; fi
+if over; then docker image prune -af --filter until=168h >/dev/null 2>&1 || true; fi
 systemctl stop docker.socket docker.service containerd.service
 sync
 fstrim /cache || true

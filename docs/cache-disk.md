@@ -209,10 +209,17 @@ On GitHub, the same tools' `setup-*` actions with `cache:` set, or
 
 - **One disk per job.** Docker's data and the job's cache archives are on
   the same disk. Unlike stickydisk, a job doesn't get one disk per path.
-- **Sizes.** A disk past `max_per_cache` starts again empty. Disks no job
+- **Sizes.** At the end of each job the disk is kept under half of
+  `max_per_cache`: actions/cache's archives go first, the least recently
+  used, then Docker's build cache, then images older than a week. A disk
+  that still grows past `max_per_cache` starts again empty. Disks no job
   has used for `max_age` (7 days) are deleted, a merge or pull request's
   sooner, after `reader_max_age` (2 days), and so are the least recently
   used when the class is over its `budget`.
+- **A full disk.** With less than `min_free` left on the disk the caches
+  are on, whatever filled it, jobs run without a cache disk and nothing
+  is copied or flattened until there is room again. The caches already
+  there are kept: deleting them wouldn't free what something else took.
 - **Emptying a cache.** Change the `cache:` key, as without fleetci.
 
 ## Who writes the shared caches
@@ -378,7 +385,7 @@ and sizes them in its own `worker.toml`:
 ```toml
 # controller.toml
 [controller]
-cache_wait = "30s"   # how long a job waits for the worker with its cache
+cache_wait = "10s"   # how long a job waits for a worker with any of its caches
 
 [classes.4vcpu-8gb]
 cpus = 4
@@ -395,8 +402,10 @@ max_per_cache = "30GB"
 The workers report which caches they hold, and the leader boots a job's VM
 on the worker that has the best one: the job's own disk, then the same
 job's on the default branch, which it falls back on. If that worker is
-full, the job waits up to `cache_wait` for room there, then goes to any
-worker, where it starts from what that worker has, or empty. A GitHub job
+full, the job goes to one with the default branch's, rather than wait. Only
+when no worker with room has any of its caches does it wait, up to
+`cache_wait`, for room on one that has, then goes to any worker and starts
+empty. A GitHub job
 is placed by what its queued job says; GitHub may give the runner another
 job, which then starts from what that worker has.
 

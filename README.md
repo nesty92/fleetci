@@ -397,8 +397,8 @@ plugin_config = { vm_cache_directory = "/var/lib/fleetci/cache" }  # with the re
 
 [classes.small.cache_disk]
 budget = "100GB"        # all of the class's caches; refs' own, then shared, least recently used first
-min_free = "20GB"       # left free on that disk
-max_per_cache = "30GB"  # one job's; past it, its next run starts empty
+min_free = "20GB"       # left free on that disk; short of it, jobs run without a cache disk
+max_per_cache = "30GB"  # one job's, trimmed to half after each job; past it, it starts empty
 max_age = "168h"        # a cache no job used for that long goes
 reader_max_age = "48h"  # sooner for merge and pull requests' own
 ```
