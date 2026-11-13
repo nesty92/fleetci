@@ -1,22 +1,24 @@
 # A merge train's car, or main once a car merges (hack/cachelab/train.sh
-# commits it with @CLASS@ and @RUN@ filled in). Each job keeps its tools'
+# commits it with @CLASS_GO@, @CLASS_WEB@ and @RUN@ filled in). Each job keeps its tools'
 # caches with cache:, as a project would.
 workflow:
   rules:
     - if: $CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH =~ /^train\//
-variables:
-  FLEETCI_CLASS: "@CLASS@"
 default:
   tags: [fleetci]
   timeout: 40m
 go:
   image: golang:1.27
+  variables:
+    FLEETCI_CLASS: "@CLASS_GO@"
   cache:
     key: train-@RUN@-go
     paths: [.tcache/]
   script: [sh ci/job.sh go]
 web:
   image: node:24
+  variables:
+    FLEETCI_CLASS: "@CLASS_WEB@"
   cache:
     key: train-@RUN@-web
     paths: [.tcache/]

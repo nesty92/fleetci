@@ -55,5 +55,7 @@ web)
 esac
 
 ref=${GITHUB_REF_NAME:-${CI_COMMIT_REF_NAME:-?}}
-echo "TRAIN $RUN car=$CAR job=$what ref=$ref total=$(since "$t0")$steps failed=$failed cache=$(du -sm "$C" | cut -f1)"
+# The most memory the job's container took, page cache included: what its class needs.
+peak=$(( $(cat /sys/fs/cgroup/memory.peak 2>/dev/null || echo 0) >> 20 ))
+echo "TRAIN $RUN car=$CAR job=$what ref=$ref total=$(since "$t0")$steps failed=$failed cache=$(du -sm "$C" | cut -f1) peak=${peak}MB"
 [ $failed = 0 ]

@@ -12,8 +12,10 @@ train's does. Up to <width> cars run at once. A car merges, its commit
 pushed to main, when it passes and the car ahead has merged; main's
 pipeline then runs on it. A car that fails stops the train.
 
-The class is fleetci's "cache", with cache disks, or "plain", without:
-then the jobs' caches come only from GitHub's cache or the runner's S3.
+Each job gets a class its size, as a project would pick: the Go tests
+4 vCPUs, the web build 2. In "cache" mode the classes have cache disks; in
+"plain" mode (the classes ending in -nodisk) they don't, and the jobs'
+caches come only from GitHub's cache or the runner's S3.
 Each job's timings and cache lines go to <out>/<run>.jsonl.
 """
 import json
@@ -33,6 +35,7 @@ WEB = ["c2f8235e1f3ea903ad8b7f61447c4f74164b5c58", "e1e1075a451359f82e155d29ba74
        "31b5487f62540d4b74f2d3114918c0ebe28f8a12", "a8989b522fa3672a2ae52f053105e40993b36ca1"]
 GH = "WireZone/fleetci-playground"
 GL = "Nesty92%2Ffleetci-playground"
+CLASSES = {"go": "4vcpu-4gb", "web": "2vcpu-2gb"}
 REMOTE = {"github": "git@github.com:WireZone/fleetci-playground.git",
           "gitlab": "https://gitlab.com/Nesty92/fleetci-playground.git"}
 STAMP = re.compile(r"^20\d\d-\d\d-\d\dT[\d:.]+Z (\d\d[OE]\+? )?")
@@ -83,6 +86,9 @@ class Train:
     def push(self, sha, ref):
         sh(*self.git, "push", "-q", "-f", "origin", f"{sha}:refs/heads/{ref}")
 
+    def cls(self, job):
+        return CLASSES[job] + ("" if self.mode == "cache" else "-nodisk")
+
     def setup(self):
         os.makedirs(os.path.dirname(self.dir), exist_ok=True)
         sh("rm", "-rf", self.dir)
@@ -92,10 +98,10 @@ class Train:
             g.write(f.read())
         if self.forge == "github":
             src, dst = "train.yml", ".github/workflows/train.yml"
-            fill = {"@LABEL@": "fleetci-" + self.mode, "@RUN@": self.run}
+            fill = {"@LABEL_GO@": "fleetci-" + self.cls("go"), "@LABEL_WEB@": "fleetci-" + self.cls("web"), "@RUN@": self.run}
         else:
             src, dst = "gitlab-ci.yml", ".gitlab-ci.yml"
-            fill = {"@CLASS@": self.mode, "@RUN@": self.run}
+            fill = {"@CLASS_GO@": self.cls("go"), "@CLASS_WEB@": self.cls("web"), "@RUN@": self.run}
         with open(os.path.join(HERE, src)) as f:
             s = f.read()
         for k, v in fill.items():
