@@ -17,7 +17,15 @@
 # have chosen among the same entries, and a save stays on the disk. The
 # job's other calls, artifacts', still go to it.
 #
-# Usage: python3 -I l1cache.py LISTEN_PORT UPSTREAM_URL STORE_DIR [any] [remote=off]
+# With "remote=bucket node=URL" the cache is in the user's own bucket,
+# behind the node at URL (fleetci, through the VM's SSH connection): the
+# node checks the job's token, says which entry a restore gets and signs
+# a link to it. A save stays on the disk; after the job, fleetci asks for
+# /fleetci/flush, which uploads the job's saves with links the node signs.
+# The job doesn't wait for its uploads.
+#
+# Usage: python3 -I l1cache.py LISTEN_PORT UPSTREAM_URL STORE_DIR [any]
+#        [remote=off | remote=bucket node=URL]
 # "any" stores in STORE_DIR whether or not its parent is a mount (tests).
 import base64, hashlib, http.client, json, os, re, secrets, shutil, socket, sys, threading, time, uuid
 import urllib.parse
@@ -28,6 +36,13 @@ UPSTREAM = sys.argv[2].rstrip("/")
 STORE = sys.argv[3]
 ANY_STORE = "any" in sys.argv[4:]
 REMOTE_OFF = "remote=off" in sys.argv[4:]
+BUCKET = "remote=bucket" in sys.argv[4:]
+NODE = next((a[5:].rstrip("/") for a in sys.argv[4:] if a.startswith("node=")), "")
+DISK_ONLY_SAVES = REMOTE_OFF or BUCKET
+# The job's saves the bucket doesn't have yet, by entry id: (key, version,
+# the job's token). The token stays in memory, never on the disk.
+PENDING = {}
+PENDING_MU = threading.Lock()
 SVC = "/twirp/github.actions.results.api.v1.CacheService/"
 CHUNK = 1 << 20
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -96,6 +111,10 @@ def summary():
         parts.append("%d saved, kept on the disk (%s)" % (s["saved"][0], mb(s["saved"][1])))
     if s["saved_remote"]:
         parts.append("%d saved to the cache server only" % s["saved_remote"])
+    with PENDING_MU:
+        pending = len(PENDING)
+    if pending:
+        parts.append("%d to upload to the cache bucket after the job" % pending)
     line = "fleetci cache: " + (", ".join(parts) if parts else "no actions/cache calls")
     if STORE_WHY[0]:
         line += "; the cache disk wasn't used: " + STORE_WHY[0]
@@ -167,15 +186,32 @@ def src_of(url):
     return p.netloc + p.path
 
 
-def same_entry(eid, url):
+def same_entry(eid, url=None, src=None):
     """The disk's copy is of the entry the cache server names now. The same
     key and version may be another entry in another ref's scope: a copy of
     the default branch's isn't served for a pull request's own."""
     try:
         with open(meta_path(eid)) as f:
-            return json.load(f).get("src") == src_of(url)
+            return json.load(f).get("src") == (src if src is not None else src_of(url))
     except (OSError, ValueError):
         return False
+
+
+def node_call(path, obj, auth):
+    """A call to the node's cache service with the job's token: (status, answer)."""
+    u = urllib.parse.urlsplit(NODE + path)
+    conn = http.client.HTTPConnection(u.hostname, u.port, timeout=30)
+    try:
+        conn.request("POST", u.path, body=json.dumps(obj).encode(),
+                     headers={"Content-Type": "application/json", "Authorization": auth or ""})
+        resp = conn.getresponse()
+        body = resp.read()
+    finally:
+        conn.close()
+    try:
+        return resp.status, json.loads(body)
+    except ValueError:
+        return resp.status, {}
 
 
 def commit(tmp, key, version, src="", scope=None):
@@ -469,6 +505,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.create()
             if method == "POST" and p.path == SVC + "FinalizeCacheEntryUpload":
                 return self.finalize()
+            if method == "POST" and p.path == "/fleetci/flush" and self.client_address[0].startswith("127."):
+                return self.flush()
             if method == "GET" and p.path == "/fleetci/ping":
                 return self.reply(200, [], b"ok")
             if method == "GET" and p.path == "/fleetci/stats":
@@ -510,7 +548,31 @@ class Handler(BaseHTTPRequestHandler):
         rks = req.get("restore_keys") or req.get("restoreKeys") or []
         disk = store_ok()
         _, scopes = token_scopes(self.headers)
-        if REMOTE_OFF:
+        if BUCKET:
+            try:
+                st, out = node_call("/lookup", {"key": key, "restore_keys": rks, "version": version},
+                                    self.headers.get("Authorization"))
+            except (ConnectionError, socket.timeout, OSError, http.client.HTTPException) as e:
+                st, out = None, {}
+                log("the node's cache unreachable:", e)
+            if st == 200 and out.get("ok"):
+                m, name, url = out["matched_key"], out["name"], out["url"]
+                eid = entry_id(m, version)
+                if disk and have(eid) and same_entry(eid, src=name):
+                    log("hit", m)
+                    local = self.local_url("/fleetci/l1/" + eid)
+                elif disk:
+                    log("miss", m)
+                    local = self.local_url("/fleetci/fill/" + link(url, m, version, name, out.get("scope")))
+                else:
+                    count("remote")
+                    local = url
+                return self.reply_json(200, [], {"ok": True, "matched_key": m, "signed_download_url": local})
+            if st is not None and st != 200:
+                log("the node's cache answered", st)
+            # Not in the bucket, or no answer: this job's own saves and what
+            # the disk came with, as the bucket would have chosen.
+        if REMOTE_OFF or BUCKET:
             m = local_match(key, rks, version, scopes) if disk else None
             if m is None:
                 count("none")
@@ -605,7 +667,10 @@ class Handler(BaseHTTPRequestHandler):
         v = linked(token)
         if v is None:
             return self.reply(404, [], b"no such download")
-        url, key, version = v
+        url, key, version = v[:3]
+        # A bucket's entry is named by the node; the cache server's by its URL.
+        src = v[3] if len(v) > 3 else src_of(url)
+        scope = v[4] if len(v) > 4 else None
         eid = entry_id(key, version)
         if store_ok():
             # To the disk in parallel ranges, then from it: one stream from
@@ -614,7 +679,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 start = time.time()
                 if fetch_ranges(url, tmp) is not None:
-                    commit(tmp, key, version, src_of(url))
+                    commit(tmp, key, version, src, scope)
                     secs = time.time() - start
                     log("fetched %s in %.1fs" % (key, secs))
                     count("fill", os.path.getsize(blob_path(eid)), secs)
@@ -647,7 +712,7 @@ class Handler(BaseHTTPRequestHandler):
         if tmp is not None and tee is not None:
             try:
                 if whole:
-                    commit(tmp, key, version, src_of(url))
+                    commit(tmp, key, version, src, scope)
                     kept = True
                     count("fill", os.path.getsize(blob_path(eid)), time.time() - start)
                 else:
@@ -660,7 +725,7 @@ class Handler(BaseHTTPRequestHandler):
     def create(self):
         raw = b"".join(self.body_chunks())
         req = json.loads(raw or b"{}")
-        if REMOTE_OFF:
+        if DISK_ONLY_SAVES:
             eid = entry_id(req.get("key", ""), req.get("version", ""))
             if not store_ok():
                 return self.reply_json(200, [], {"ok": False, "message": "no cache disk"})
@@ -800,6 +865,60 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(500, [], str(e).encode())
         self.put_reply(201, [], b"")
 
+    def flush(self):
+        """Uploads the job's saves to the bucket, with links the node signs
+        for the job's own token; asked for by fleetci after the job."""
+        with PENDING_MU:
+            todo = list(PENDING.items())
+        done = {"uploaded": 0, "bytes": 0, "exists": 0, "failed": 0}
+        for eid, (key, version, auth) in todo:
+            try:
+                st, out = node_call("/upload", {"key": key, "version": version}, auth)
+                if st == 409:
+                    done["exists"] += 1
+                elif st != 200 or not out.get("ok"):
+                    raise http.client.HTTPException("the node answered %s" % st)
+                else:
+                    size = os.path.getsize(blob_path(eid))
+                    conn, path, netloc = connect(out["url"])
+                    try:
+                        conn.putrequest("PUT", path, skip_host=True, skip_accept_encoding=True)
+                        conn.putheader("Host", netloc)
+                        conn.putheader("Content-Length", str(size))
+                        for k, v in (out.get("headers") or {}).items():
+                            conn.putheader(k, v)
+                        conn.endheaders()
+                        with open(blob_path(eid), "rb") as f:
+                            while True:
+                                b = f.read(CHUNK)
+                                if not b:
+                                    break
+                                conn.send(b)
+                        resp = conn.getresponse()
+                        resp.read()
+                    finally:
+                        conn.close()
+                    if resp.status >= 300:
+                        raise http.client.HTTPException("upload: %d" % resp.status)
+                    done["uploaded"] += 1
+                    done["bytes"] += size
+                    try:
+                        with open(meta_path(eid)) as f:
+                            meta = json.load(f)
+                        meta.update(src=out["name"], scope=out.get("scope"))
+                        with open(meta_path(eid) + ".tmp", "w") as f:
+                            json.dump(meta, f)
+                        os.replace(meta_path(eid) + ".tmp", meta_path(eid))
+                    except (OSError, ValueError):
+                        pass
+                with PENDING_MU:
+                    PENDING.pop(eid, None)
+            except Exception as e:
+                done["failed"] += 1
+                log("not uploaded:", key, e)
+        log("flushed", done)
+        self.reply_json(200, [], done)
+
     def passthrough_to(self, method, url):
         conn, resp = self.upstream(method, url, chunks=self.body_chunks())
         try:
@@ -810,7 +929,7 @@ class Handler(BaseHTTPRequestHandler):
     def finalize(self):
         raw = b"".join(self.body_chunks())
         req = json.loads(raw or b"{}")
-        if REMOTE_OFF:
+        if DISK_ONLY_SAVES:
             status, headers, body = 200, [], json.dumps({"ok": True, "entry_id": "0"}).encode()
         else:
             status, headers, body = self.call(raw)
@@ -832,9 +951,12 @@ class Handler(BaseHTTPRequestHandler):
                     commit(whole, key, version, src, token_scopes(self.headers)[0])
                     kept = True
                     count("saved", size)
+                    if BUCKET:
+                        with PENDING_MU:
+                            PENDING[entry_id(key, version)] = (key, version, self.headers.get("Authorization"))
             except (OSError, ValueError) as e:
                 log("not keeping:", e)
-        if REMOTE_OFF and not kept:
+        if DISK_ONLY_SAVES and not kept:
             shutil.rmtree(d, ignore_errors=True)
             return self.reply_json(200, [], {"ok": False, "message": "not kept on the cache disk"})
         if ok and not kept:
