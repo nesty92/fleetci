@@ -182,6 +182,39 @@ func TestPullNoRoom(t *testing.T) {
 	}
 }
 
+// A layer a job trimmed is mostly holes: it is offered with what it
+// stores, and a node takes it within a max_per_cache below its length.
+func TestPullSparse(t *testing.T) {
+	a := open(t, Config{}, &fakeImages{})
+	main := Scope{Forge: "gitlab", Instance: "gitlab.com", Project: "1", Ref: "main", Writer: true}
+	commitJob(t, a, main)
+	f := filepath.Join(a.dir, "scopes", offerOf(t, a, main.key()).Layers[0].Path)
+	w, err := os.OpenFile(f, os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.WriteAt([]byte(strings.Repeat("x", 64<<10)), 64<<20); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	o := offerOf(t, a, main.key())
+	if l := o.Layers[0]; l.Size != 64<<20+64<<10 || l.Stored >= 1<<20 {
+		t.Skipf("no holes on this filesystem: size %d, stored %d", l.Size, l.Stored)
+	}
+
+	b := open(t, Config{MaxPerCache: 8 << 20}, &fakeImages{})
+	var got []string
+	if _, err := b.Pull(context.Background(), o, fetchFrom(a, &got)); err != nil {
+		t.Fatalf("a sparse layer within max_per_cache: %v", err)
+	}
+	if _, ok := b.Has(main.key()); !ok {
+		t.Fatal("not kept")
+	}
+	if b.used() >= 8<<20 {
+		t.Fatalf("the copy takes %d bytes: holes filled", b.used())
+	}
+}
+
 // A neighbour's deep chain is flattened here as soon as it is copied, not
 // when a job finds it too deep.
 func TestPulledDeepChainIsFlattened(t *testing.T) {

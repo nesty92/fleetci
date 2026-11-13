@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -36,14 +37,26 @@ type Offer struct {
 // and its size.
 type OfferLayer struct {
 	Path string `json:"path"`
-	Size int64  `json:"size"`
+	// Size is the layer's length, what a copy of it checks.
+	Size int64 `json:"size"`
+	// Stored is what it takes on the disk: less than Size where a job's
+	// trim left holes. Zero from a node before it was sent.
+	Stored int64 `json:"stored,omitempty"`
 }
 
-// Size is what copying all of it takes.
+// stored is what the layer takes on the disk here once copied.
+func (l OfferLayer) stored() int64 {
+	if l.Stored > 0 {
+		return l.Stored
+	}
+	return l.Size
+}
+
+// Size is what keeping all of it takes.
 func (o Offer) Size() int64 {
 	var n int64
 	for _, l := range o.Layers {
-		n += l.Size
+		n += l.stored()
 	}
 	return n
 }
@@ -74,7 +87,7 @@ func (s *Store) sharedLocked() []Offer {
 				o.Layers = nil
 				break
 			}
-			o.Layers = append(o.Layers, OfferLayer{Path: rel, Size: st.Size()})
+			o.Layers = append(o.Layers, OfferLayer{Path: rel, Size: st.Size(), Stored: allocated(fs.FileInfoToDirEntry(st))})
 		}
 		if len(o.Layers) > 0 {
 			out = append(out, o)
@@ -159,7 +172,7 @@ func (s *Store) Pull(ctx context.Context, o Offer, fetch Fetch) (int64, error) {
 	for i, f := range chain {
 		if _, err := os.Stat(f); err != nil {
 			missing = append(missing, i)
-			need += o.Layers[i].Size
+			need += o.Layers[i].stored()
 		}
 	}
 	// Held as a lease, so sweep and evict leave the chain while it comes.
