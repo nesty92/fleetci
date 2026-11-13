@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"errors"
+	"github.com/nesty92/fleetci/internal/cachedisk"
 	"io"
 	"net"
 	"net/http"
@@ -331,7 +332,9 @@ func TestJobHistory(t *testing.T) {
 // TestMetrics: the fleet's gauges come out of a scrape.
 func TestMetrics(t *testing.T) {
 	f := newTestFleet(t)
-	f.report(t, Report{State: Ready, Room: map[string]int{"small": 3}, VMs: []VMInfo{{ID: "v", Class: "small", Job: "github"}}})
+	f.report(t, Report{State: Ready, Room: map[string]int{"small": 3}, VMs: []VMInfo{{ID: "v", Class: "small", Job: "github"}},
+		CacheStats: &cachedisk.Stats{Used: 5 << 30, Budget: 100 << 30, LowSpace: true, Evicted: 2, Flattens: 1, Copied: 677 << 20}})
+	f.c.metrics.jobDone(JobRecord{Forge: "gitlab", Class: "small", Result: PhaseSucceeded, CacheFrom: "fallback"})
 	// GitHub's API, through the transport the dispatcher is given.
 	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("X-RateLimit-Remaining", "4999")
@@ -360,6 +363,12 @@ func TestMetrics(t *testing.T) {
 		`fleetci_github_api_ratelimit_remaining{resource="core"} 4999`,
 		`fleetci_fleet_queue_wait_seconds_sum{class="small",forge="github"} 42`,
 		`fleetci_fleet_leader_changes_total 0`,
+		`fleetci_fleet_job_cache_total{class="small",forge="gitlab",from="fallback"} 1`,
+		`fleetci_fleet_worker_cache_used_bytes{worker="w1"} 5.36870912e+09`,
+		`fleetci_fleet_worker_cache_low_space{worker="w1"} 1`,
+		`fleetci_fleet_worker_cache_evictions_total{worker="w1"} 2`,
+		`fleetci_fleet_worker_cache_flattens_total{worker="w1"} 1`,
+		`fleetci_fleet_worker_cache_copied_bytes_total{worker="w1"} 7.09885952e+08`,
 	} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("no %s", want)

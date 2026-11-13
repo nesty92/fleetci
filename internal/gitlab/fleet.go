@@ -51,7 +51,7 @@ func NewDispatch(ctx context.Context, c Config, capacity source.Capacity, remote
 	p := l.mr.executorProviders.GetByName(executorName).(*provider)
 	l.mr.dispatch = &dispatcher{ctx: ctx, capacity: capacity, remote: remote, log: log,
 		classes: source.Names(classes), defaultClass: defaultClass, classOf: p.classOf,
-		held: held(c.HeldDir), resume: c.Held, exiting: c.Exiting, cacheDisk: c.CacheDisk}
+		held: held(c.HeldDir), resume: c.Held, exiting: c.Exiting, cacheDisk: c.CacheDisk, queueWait: c.QueueWait}
 	if c.Concurrent == 0 {
 		// The fleet grows as workers join; room, not this, holds jobs back.
 		l.mr.config.Concurrent = 256
@@ -71,6 +71,7 @@ type dispatcher struct {
 	resume       *Held       // the jobs the last process left waiting
 	exiting      func() bool // whether the controller exits, not only stops leading
 	cacheDisk    *CacheDisk  // which jobs write their project's shared caches
+	queueWait    func(class string, wait time.Duration)
 }
 
 // dispatchBuild takes one job from GitLab and runs it on a worker. It
@@ -116,7 +117,8 @@ func (mr *RunCommand) dispatchBuild(runner *common.RunnerConfig, runners chan *c
 	if err != nil {
 		return mr.failJob(rc, creds, err, log)
 	}
-	n := heldJob{ID: job.ID, Token: job.Token, URL: runner.URL, Class: class, Job: jobJSON, Runner: runnerJSON}
+	queued := time.Now().Add(-time.Duration(job.JobInfo.TimeInQueueSeconds * float64(time.Second)))
+	n := heldJob{ID: job.ID, Token: job.Token, URL: runner.URL, Class: class, Job: jobJSON, Runner: runnerJSON, Queued: queued}
 	// The leader decides the job's cache, which only it has the policy
 	// for: the worker attaches it, and the fleet places the VM by it.
 	if cj, err := cacheFor(d.cacheDisk, &common.Build{Job: *job, Runner: &rc}); err != nil {
@@ -152,6 +154,9 @@ func (mr *RunCommand) place(rc common.RunnerConfig, n heldJob, log hclog.Logger)
 		return mr.failJob(rc, creds, fmt.Errorf("no %s VM: %w", n.Class, err), log)
 	}
 	log.Info("job placed", "class", n.Class, "vm", vm.ID)
+	if d.queueWait != nil && !n.Queued.IsZero() {
+		d.queueWait(n.Class, time.Since(n.Queued))
+	}
 	d.held.drop(n.ID) // the worker has it now, and ends it
 	if err := d.remote(d.ctx, vm, n.Job, n.Runner, n.Cache); err != nil {
 		if d.ctx.Err() != nil {

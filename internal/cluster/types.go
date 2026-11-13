@@ -76,6 +76,8 @@ type Report struct {
 	// Caches are the cache disks it keeps (cachedisk.Scope.Dirs' names):
 	// the controllers place a job where its cache is.
 	Caches []string `json:"caches,omitempty"`
+	// CacheStats are its cache disks' stores', for metrics.
+	CacheStats *cachedisk.Stats `json:"cache_stats,omitempty"`
 	// Neighbours are the workers it reaches, of those the controllers
 	// name to it.
 	Neighbours []Neighbour `json:"neighbours,omitempty"`
@@ -237,8 +239,12 @@ type AssignmentStatus struct {
 	// JobHint is what the GitHub job's hook said of the job, "owner/repo
 	// run-id", for the leader to decide its cache disk; CacheNote is what
 	// the job was told of its disk, once it was.
-	JobHint   string    `json:"job_hint,omitempty"`
-	CacheNote string    `json:"cache_note,omitempty"`
+	JobHint   string `json:"job_hint,omitempty"`
+	CacheNote string `json:"cache_note,omitempty"`
+	// CacheFrom is what its cache disk started from, for metrics: "own"
+	// (its own cache), "fallback" (one it falls back on, main's), "empty"
+	// (a cache's first job), or "none" (its class has disks, it got none).
+	CacheFrom string    `json:"cache_from,omitempty"`
 	Since     time.Time `json:"since"`
 	// Job is the forge of the job it ran, "github" or "gitlab"; the times
 	// are when the leader wrote it, its VM was up, its job started, and it

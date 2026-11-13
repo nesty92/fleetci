@@ -229,6 +229,32 @@ type Store struct {
 	// only when newer, so evicting and copying back don't take turns.
 	declined map[string]time.Time
 	wg       sync.WaitGroup
+	// counts since it opened, for Stats
+	evicted, flattened, copied int64
+}
+
+// Stats are what a store holds and has done since it opened, for metrics.
+type Stats struct {
+	Used     int64 `json:"used"`      // bytes its files take
+	Budget   int64 `json:"budget"`    // bytes it may take
+	LowSpace bool  `json:"low_space"` // under MinFree: it adds nothing
+	Evicted  int64 `json:"evicted"`   // caches it dropped
+	Flattens int64 `json:"flattens"`  // chains it flattened
+	Copied   int64 `json:"copied"`    // bytes it copied from neighbours
+}
+
+// Add is s and o together, for a node's stores.
+func (s Stats) Add(o Stats) Stats {
+	return Stats{Used: s.Used + o.Used, Budget: s.Budget + o.Budget, LowSpace: s.LowSpace || o.LowSpace,
+		Evicted: s.Evicted + o.Evicted, Flattens: s.Flattens + o.Flattens, Copied: s.Copied + o.Copied}
+}
+
+// Stats says what the store holds and has done.
+func (s *Store) Stats() Stats {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return Stats{Used: s.used(), Budget: s.cfg.Budget, LowSpace: !s.leavesFree(0),
+		Evicted: s.evicted, Flattens: s.flattened, Copied: s.copied}
 }
 
 // Open opens the store in dir, making it if needed.
@@ -492,6 +518,7 @@ func (s *Store) flatten(key string, chain []string) {
 			_ = os.Remove(dst)
 			return
 		}
+		s.flattened++
 		s.log.Info("cache: flattened", "cache", h.Scope.Label(), "on", len(keep), "took", s.now().Sub(start).Round(time.Second).String())
 		s.sweep()
 	}
@@ -589,6 +616,7 @@ func (s *Store) evictFor(need int64) {
 		}
 		s.log.Info("cache: evicting", "scope", h.key, "unused for", s.now().Sub(h.used).Round(time.Minute).String())
 		_ = os.Remove(filepath.Join(s.dir, "scopes", h.key, "head.json"))
+		s.evicted++
 		if h.shared {
 			s.declined[h.key] = h.committed
 		}

@@ -225,6 +225,7 @@ func (s *Store) Pull(ctx context.Context, o Offer, fetch Fetch) (int64, error) {
 	// A neighbour's chain may be deep: flattened here before a job needs it.
 	s.keepShallow(o.Key, h)
 	release()
+	s.copied += need
 	s.evict()
 	return need, nil
 }

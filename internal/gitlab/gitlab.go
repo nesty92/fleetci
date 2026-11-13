@@ -22,6 +22,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/hashicorp/go-hclog"
 
@@ -74,6 +75,9 @@ type Config struct {
 	// than only stops leading: a job still waiting for a VM is then left
 	// noted, not failed.
 	Exiting func() bool `json:"-" toml:"-"`
+	// QueueWait, set by fleetci's controller, is told how long each job
+	// waited, from GitLab queuing it to its VM being up.
+	QueueWait func(class string, wait time.Duration) `json:"-" toml:"-"`
 }
 
 // Runner is one class's GitLab runner.

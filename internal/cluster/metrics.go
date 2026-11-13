@@ -29,6 +29,7 @@ type metrics struct {
 	duration *prometheus.HistogramVec
 	boot     *prometheus.HistogramVec
 
+	cacheFrom     *prometheus.CounterVec
 	leaderChanges prometheus.Counter
 	queueWait     *prometheus.HistogramVec
 	ghRequests    *prometheus.CounterVec
@@ -54,11 +55,15 @@ func newMetrics(c *Controller) *metrics {
 			Name: "fleetci_fleet_vm_boot_seconds", Help: "From the leader's assignment to the VM being up, for the VMs jobs ran on.",
 			Buckets: []float64{1, 2, 5, 10, 20, 30, 60, 120, 300, 600},
 		}, []string{"class"}),
+		cacheFrom: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "fleetci_fleet_job_cache_total",
+			Help: "Jobs of classes with cache disks, by what their disk started from: own, fallback (main's), empty (the first), none (no disk).",
+		}, []string{"forge", "class", "from"}),
 		leaderChanges: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "fleetci_fleet_leader_changes_total", Help: "Times this controller saw the lead change hands.",
 		}),
 		queueWait: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name: "fleetci_fleet_queue_wait_seconds", Help: "From the forge queuing a job to its VM being up, as this controller led. GitHub only: GitLab gives no queue time.",
+			Name: "fleetci_fleet_queue_wait_seconds", Help: "From the forge queuing a job to its VM being up, as this controller led.",
 			Buckets: []float64{1, 2, 5, 10, 20, 30, 60, 120, 300, 600, 1800, 3600},
 		}, []string{"forge", "class"}),
 		ghRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -72,7 +77,7 @@ func newMetrics(c *Controller) *metrics {
 			Name: "fleetci_github_api_ratelimit_remaining", Help: "The calls GitHub's rate limit had left, as its last answer said, by resource.",
 		}, []string{"resource"}),
 	}
-	m.reg.MustRegister(m.jobs, m.vms, m.duration, m.boot, m.leaderChanges, m.queueWait, m.ghRequests, m.ghSeconds, m.ghRemaining, fleetCollector{c},
+	m.reg.MustRegister(m.jobs, m.vms, m.duration, m.boot, m.cacheFrom, m.leaderChanges, m.queueWait, m.ghRequests, m.ghSeconds, m.ghRemaining, fleetCollector{c},
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	return m
 }
@@ -101,6 +106,9 @@ func (m *metrics) jobDone(r JobRecord) {
 	if d := r.Boot(); d > 0 {
 		m.boot.WithLabelValues(r.Class).Observe(d.Seconds())
 	}
+	if r.CacheFrom != "" {
+		m.cacheFrom.WithLabelValues(r.Forge, r.Class, r.CacheFrom).Inc()
+	}
 }
 
 // fleetCollector reads the fleet's gauges from the controller's status at
@@ -119,11 +127,19 @@ var (
 	descUsedMem    = prometheus.NewDesc("fleetci_fleet_worker_used_memory_bytes", "The memory a worker's VMs have.", []string{"worker"}, nil)
 	descRoom       = prometheus.NewDesc("fleetci_fleet_worker_room", "How many more VMs of a class a worker has room for.", []string{"worker", "class"}, nil)
 	descVMs        = prometheus.NewDesc("fleetci_fleet_worker_vms", "A worker's VMs, by class and job: github, gitlab, or idle.", []string{"worker", "class", "job"}, nil)
+
+	descCacheUsed     = prometheus.NewDesc("fleetci_fleet_worker_cache_used_bytes", "What a worker's cache disks take.", []string{"worker"}, nil)
+	descCacheBudget   = prometheus.NewDesc("fleetci_fleet_worker_cache_budget_bytes", "What a worker's cache disks may take.", []string{"worker"}, nil)
+	descCacheLow      = prometheus.NewDesc("fleetci_fleet_worker_cache_low_space", "1 when a worker's cache disks' filesystem is under min_free: its jobs get no cache disk.", []string{"worker"}, nil)
+	descCacheEvicted  = prometheus.NewDesc("fleetci_fleet_worker_cache_evictions_total", "Caches a worker dropped, over budget or too old, since it started.", []string{"worker"}, nil)
+	descCacheFlattens = prometheus.NewDesc("fleetci_fleet_worker_cache_flattens_total", "Cache chains a worker flattened since it started.", []string{"worker"}, nil)
+	descCacheCopied   = prometheus.NewDesc("fleetci_fleet_worker_cache_copied_bytes_total", "Bytes of cache a worker copied from its neighbours since it started.", []string{"worker"}, nil)
 )
 
 func (fleetCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, d := range []*prometheus.Desc{descController, descLeader, descLive, descWorker, descState,
-		descBudgetCPU, descBudgetMem, descUsedCPU, descUsedMem, descRoom, descVMs} {
+		descBudgetCPU, descBudgetMem, descUsedCPU, descUsedMem, descRoom, descVMs,
+		descCacheUsed, descCacheBudget, descCacheLow, descCacheEvicted, descCacheFlattens, descCacheCopied} {
 		ch <- d
 	}
 }
@@ -174,6 +190,21 @@ func (f fleetCollector) Collect(ch chan<- prometheus.Metric) {
 		for k, v := range n {
 			gauge(descVMs, float64(v), w.ID, k.class, k.job)
 		}
+		if cs := w.Report.CacheStats; cs != nil {
+			low := 0.0
+			if cs.LowSpace {
+				low = 1
+			}
+			gauge(descCacheUsed, float64(cs.Used), w.ID)
+			gauge(descCacheBudget, float64(cs.Budget), w.ID)
+			gauge(descCacheLow, low, w.ID)
+			counter := func(d *prometheus.Desc, v int64) {
+				ch <- prometheus.MustNewConstMetric(d, prometheus.CounterValue, float64(v), w.ID)
+			}
+			counter(descCacheEvicted, cs.Evicted)
+			counter(descCacheFlattens, cs.Flattens)
+			counter(descCacheCopied, cs.Copied)
+		}
 	}
 }
 
@@ -183,6 +214,14 @@ func (c *Controller) GitHubMetrics() (http.RoundTripper, func(class string, wait
 	m := c.metrics
 	return githubTransport{m: m, next: http.DefaultTransport}, func(class string, wait time.Duration) {
 		m.queueWait.WithLabelValues("github", class).Observe(wait.Seconds())
+	}
+}
+
+// GitLabQueueWait is what the GitLab dispatcher tells how long each job
+// waited, from GitLab queuing it to its VM being up.
+func (c *Controller) GitLabQueueWait() func(class string, wait time.Duration) {
+	return func(class string, wait time.Duration) {
+		c.metrics.queueWait.WithLabelValues("gitlab", class).Observe(wait.Seconds())
 	}
 }
 

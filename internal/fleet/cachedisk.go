@@ -177,6 +177,19 @@ func (b *Backend) HeldCaches() map[string]time.Time {
 	return out
 }
 
+// CacheStats are this backend's stores' stats together, nil without any.
+func (b *Backend) CacheStats() *cachedisk.Stats {
+	var out *cachedisk.Stats
+	for _, s := range b.CacheStores() {
+		st := s.Stats()
+		if out != nil {
+			st = out.Add(st)
+		}
+		out = &st
+	}
+	return out
+}
+
 // HasCache says whether the VM's class has a cache disk.
 func (b *Backend) HasCache(id string) bool {
 	b.mu.Lock()

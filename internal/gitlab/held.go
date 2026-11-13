@@ -46,6 +46,8 @@ type heldJob struct {
 	Runner json.RawMessage `json:"runner,omitempty"`
 	// Cache is the job's cache disk, as the leader decided it.
 	Cache *cachedisk.Scope `json:"cache,omitempty"`
+	// Queued is when GitLab queued it, as its time in the queue says.
+	Queued time.Time `json:"queued,omitzero"`
 }
 
 // held is the directory of notes; "" keeps none.

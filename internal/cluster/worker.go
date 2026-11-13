@@ -568,12 +568,14 @@ func (w *Worker) report() Report {
 	b := w.backend
 	w.mu.Unlock()
 	var caches []string
+	var stats *cachedisk.Stats
 	if b != nil {
 		caches = slices.Sorted(maps.Keys(b.HeldCaches())) // off the lock: it reads the disk
+		stats = b.CacheStats()
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	r := Report{Room: w.roomLocked(), UsedCPUs: w.used.CPUs, UsedMemory: w.used.MemoryMB, Checks: map[string]string{}, Caches: caches}
+	r := Report{Room: w.roomLocked(), UsedCPUs: w.used.CPUs, UsedMemory: w.used.MemoryMB, Checks: map[string]string{}, Caches: caches, CacheStats: stats}
 	for name := range w.classes {
 		if k := w.idleVMs(name); k > 0 {
 			if r.Idle == nil {
@@ -856,7 +858,11 @@ func (w *Worker) run(ctx context.Context, t *task) {
 		w.setJob(v, "gitlab")
 		job := GitLabJob{Job: run.GitLab.Job, Runner: run.GitLab.Runner}
 		if run.GitLab.Cache != nil {
-			job.Cache, job.CacheNote = w.attachCache(rctx, v, *run.GitLab.Cache, log)
+			var from string
+			job.Cache, job.CacheNote, from = w.attachCache(rctx, v, *run.GitLab.Cache, log)
+			w.mu.Lock()
+			t.status.CacheFrom = from
+			w.mu.Unlock()
 		}
 		err = w.GitLab(rctx, v.vm, job)
 	case run.GitLab != nil:
@@ -1033,13 +1039,14 @@ func (w *Worker) runGitHub(ctx context.Context, cancel context.CancelFunc, t *ta
 // says of the job to the leader, which decides the disk, attaches that,
 // and answers the hook. A job that ends first leaves it.
 func (w *Worker) relayCache(ctx context.Context, t *task, v *workerVM, log hclog.Logger) {
+	from := "none"
 	set := func(hint, note string) {
 		w.mu.Lock()
 		if hint != "" {
 			t.status.JobHint = hint
 		}
 		if note != "" {
-			t.status.CacheNote = note
+			t.status.CacheNote, t.status.CacheFrom = note, from
 		}
 		w.mu.Unlock()
 		w.poke()
@@ -1073,8 +1080,8 @@ func (w *Worker) relayCache(ctx context.Context, t *task, v *workerVM, log hclog
 	}
 	note := cmp.Or(grant.Note, "No cache disk")
 	if grant.Scope != nil {
-		if _, n := w.attachCache(ctx, v, *grant.Scope, log); n != "" {
-			note = n
+		if _, n, f := w.attachCache(ctx, v, *grant.Scope, log); n != "" {
+			note, from = n, f
 		}
 	}
 	if err := github.AnswerJobHook(context.WithoutCancel(ctx), v.vm.Conn, note); err != nil {
@@ -1084,24 +1091,32 @@ func (w *Worker) relayCache(ctx context.Context, t *task, v *workerVM, log hclog
 }
 
 // attachCache gives the VM its job's cache disk, when its class has one.
-// It returns the scope attached, or nil, and what to tell the job.
-func (w *Worker) attachCache(ctx context.Context, v *workerVM, scope cachedisk.Scope, log hclog.Logger) (*cachedisk.Scope, string) {
+// It returns the scope attached, or nil, what to tell the job, and what
+// the disk started from (AssignmentStatus.CacheFrom).
+func (w *Worker) attachCache(ctx context.Context, v *workerVM, scope cachedisk.Scope, log hclog.Logger) (*cachedisk.Scope, string, string) {
 	w.mu.Lock()
 	b := w.backend
 	w.mu.Unlock()
 	if b == nil || !b.HasCache(v.vm.ID) {
-		return nil, ""
+		return nil, "", ""
 	}
 	st, err := b.AttachCache(ctx, v.vm, scope)
 	switch {
 	case err != nil:
 		log.Warn("no cache disk", "err", err)
-		return nil, "No cache disk: " + err.Error()
+		return nil, "No cache disk: " + err.Error(), "none"
 	case st == nil:
-		return nil, ""
+		return nil, "", ""
 	}
 	w.poke() // the report's caches change
-	return &scope, cachedisk.Describe(scope, *st)
+	from := "fallback"
+	switch {
+	case st.Empty:
+		from = "empty"
+	case st.Own:
+		from = "own"
+	}
+	return &scope, cachedisk.Describe(scope, *st), from
 }
 
 // idleVM is how long a VM may wait for the job it was made for; one a

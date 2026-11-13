@@ -124,6 +124,7 @@ func fleetSources(ctx context.Context, c *cluster.Controller, held *gitlab.Held,
 	if cfg.GitLab != nil {
 		gcfg := *cfg.GitLab
 		gcfg.HeldDir, gcfg.Held, gcfg.Exiting = heldDir(cfg), held, exiting
+		gcfg.QueueWait = c.GitLabQueueWait()
 		l, err := gitlab.NewDispatch(ctx, gcfg, capacity, c.GitLabRemote(), log.Named("gitlab"))
 		if err != nil {
 			return err

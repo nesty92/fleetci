@@ -20,7 +20,8 @@ type JobRecord struct {
 	Class      string    `json:"class"`
 	Forge      string    `json:"forge"`
 	Took       string    `json:"took,omitempty"` // the GitHub job
-	Result     string    `json:"result"`         // succeeded or failed
+	CacheFrom  string    `json:"cache_from,omitempty"`
+	Result     string    `json:"result"` // succeeded or failed
 	Err        string    `json:"err,omitempty"`
 	Created    time.Time `json:"created,omitzero"`
 	Booted     time.Time `json:"booted,omitzero"`
@@ -105,7 +106,7 @@ func (h *history) observe(worker string, ss []AssignmentStatus) {
 		if s.Job == "" {
 			continue // a VM no job ran on
 		}
-		r := JobRecord{Assignment: s.ID, Worker: worker, Class: s.Class, Forge: s.Job, Took: s.Took,
+		r := JobRecord{Assignment: s.ID, Worker: worker, Class: s.Class, Forge: s.Job, Took: s.Took, CacheFrom: s.CacheFrom,
 			Result: s.Phase, Err: s.Err, Created: s.Created, Booted: s.Booted, Started: s.Started, Ended: s.Ended}
 		if r.Ended.IsZero() {
 			r.Ended = s.Since
