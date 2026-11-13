@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -29,6 +30,10 @@ type Class struct {
 	CacheDisk *CacheDisk `json:"cache_disk" toml:"cache_disk"`
 	// Connector is how to log in to this class's VMs.
 	Connector Connector `json:"connector_config" toml:"connector_config"`
+	// RegistryMirrors are Docker Hub pull-through mirrors, as URLs, the
+	// VMs' Docker pulls through: written into its daemon.json before a VM
+	// takes a job. An http:// mirror is also made an insecure registry.
+	RegistryMirrors []string `json:"registry_mirrors" toml:"registry_mirrors"`
 
 	// MaxInstances caps the VMs of this class, running jobs and idle.
 	MaxInstances int `json:"max_instances" toml:"max_instances"`
@@ -211,6 +216,11 @@ func (c Class) validate(name string) error {
 	}
 	if c.Reclaim.Rebalance && !c.watchesReclaim() {
 		return fmt.Errorf("class %q: reclaim.rebalance needs reclaim.watch", name)
+	}
+	for _, m := range c.RegistryMirrors {
+		if u, err := url.Parse(m); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || strings.ContainsAny(m, `'"\ |&`) {
+			return fmt.Errorf("class %q: registry_mirrors: %q is not an http(s) URL", name, m)
+		}
 	}
 	if c.CPUs < 0 || c.Memory < 0 {
 		return fmt.Errorf("class %q: cpus and memory can't be negative", name)

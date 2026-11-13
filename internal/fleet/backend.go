@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"iter"
 	"maps"
+	"net/url"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -378,9 +379,9 @@ func startPool(ctx context.Context, name string, c Class, groups map[string]stri
 
 	conns := newVMConns(group, c.Connector.UseExternalAddr, log.Named("conn"))
 	p := &pool{name: name, class: c, group: group, conns: conns, timeout: c.acquireTimeout(), stored: st != nil, ready: make(chan struct{})}
-	ready := dockerReady(group, c.Connector.UseExternalAddr, log)
+	ready := dockerReady(group, c.Connector.UseExternalAddr, c.RegistryMirrors, log)
 	if st != nil {
-		ready = adoptUp(dockerUp(group, c.Connector.UseExternalAddr, log), func(key, instance string) { adopt(p, key, instance) })
+		ready = adoptUp(dockerUp(group, c.Connector.UseExternalAddr, c.RegistryMirrors, log), func(key, instance string) { adopt(p, key, instance) })
 	}
 	p.died = newDeaths(log)
 	scaled, up, reclaim := withReclaim(c, group, conns, p.died, ready, sshTunnel(conns), log)
@@ -975,8 +976,8 @@ func sweep(ctx context.Context, group provider.InstanceGroup, keep map[string]bo
 // dockerReady admits an instance once its setup has finished and Docker
 // answers over SSH. Instances that existed before fleetci started may have
 // run a job already, so they are removed instead.
-func dockerReady(group provider.InstanceGroup, external bool, log hclog.Logger) taskscaler.UpFunc {
-	up := dockerUp(group, external, log)
+func dockerReady(group provider.InstanceGroup, external bool, mirrors []string, log hclog.Logger) taskscaler.UpFunc {
+	up := dockerUp(group, external, mirrors, log)
 	return func(ts taskscaler.Taskscaler, inst taskscaler.UpFuncInstance) error {
 		if inst.Cause == fleeting.CausePreexisted {
 			return errors.New("instance existed before fleetci started; removing it")
@@ -1012,7 +1013,10 @@ func adoptUp(up taskscaler.UpFunc, adopt func(key, instance string)) taskscaler.
 // so it can stay locked out of Docker after setup adds the user to the
 // docker group. Short-lived keys (EC2 Instance Connect's last 60 seconds)
 // need the fresh ConnectInfo anyway.
-func dockerUp(group provider.InstanceGroup, external bool, log hclog.Logger) taskscaler.UpFunc {
+//
+// With mirrors, Docker is then pointed at them. A VM whose Docker can't be
+// is still admitted: its pulls go to the registries themselves.
+func dockerUp(group provider.InstanceGroup, external bool, mirrors []string, log hclog.Logger) taskscaler.UpFunc {
 	return func(_ taskscaler.Taskscaler, inst taskscaler.UpFuncInstance) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
@@ -1021,6 +1025,11 @@ func dockerUp(group provider.InstanceGroup, external bool, log hclog.Logger) tas
 		for {
 			version, err := dockerVersion(ctx, group, inst.ID, external)
 			if err == nil {
+				if len(mirrors) > 0 {
+					if out, err := runOn(ctx, group, inst.ID, external, mirrorScript(mirrors)); err != nil {
+						log.Warn("registry mirrors not set; pulls go to the registries", "instance", inst.ID, "err", err, "out", out)
+					}
+				}
 				log.Info("instance ready", "instance", inst.ID, "docker", version)
 				return nil
 			}
@@ -1046,6 +1055,51 @@ const readyScript = `if [ ! -e /run/cloud-init/result.json ] && command -v cloud
 docker version --format '{{.Server.Version}}'`
 
 func dockerVersion(ctx context.Context, group provider.InstanceGroup, id string, external bool) (string, error) {
+	version, err := runOn(ctx, group, id, external, readyScript)
+	if err != nil {
+		return "", fmt.Errorf("%w: %s", err, version)
+	}
+	if version == "" || strings.ContainsAny(version, " \n") {
+		return "", fmt.Errorf("docker server did not answer: %q", version)
+	}
+	return version, nil
+}
+
+// mirrorScript points the VM's Docker at mirrors, unless its daemon.json
+// names registry mirrors already (the image's own choice). Both settings
+// are reloaded without restarting Docker.
+func mirrorScript(mirrors []string) string {
+	var ms, insecure []string
+	for _, m := range mirrors {
+		ms = append(ms, `"`+m+`"`)
+		if u, err := url.Parse(m); err == nil && u.Scheme == "http" {
+			insecure = append(insecure, `"`+u.Host+`"`)
+		}
+	}
+	add := `"registry-mirrors": [` + strings.Join(ms, ", ") + `]`
+	ins := ""
+	if len(insecure) > 0 {
+		ins = `"insecure-registries": [` + strings.Join(insecure, ", ") + `]`
+	}
+	return `set -eu
+s=; [ "$(id -u)" = 0 ] || s="sudo -n"
+f=/etc/docker/daemon.json
+grep -q '"registry-mirrors"' "$f" 2>/dev/null && exit 0
+add='` + add + `'
+ins='` + ins + `'
+if [ -n "$ins" ] && ! grep -q '"insecure-registries"' "$f" 2>/dev/null; then add="$add, $ins"; fi
+if [ -s "$f" ] && grep -q '[^[:space:]{}]' "$f"; then
+  $s sed -i "0,/{/s|{|{$add,|" "$f"
+else
+  $s mkdir -p /etc/docker
+  printf '{%s}\n' "$add" | $s tee "$f" >/dev/null
+fi
+$s systemctl reload docker 2>/dev/null || $s kill -HUP "$(pidof dockerd)"
+`
+}
+
+// runOn runs script on the instance and returns its output, trimmed.
+func runOn(ctx context.Context, group provider.InstanceGroup, id string, external bool, script string) (string, error) {
 	info, err := group.ConnectInfo(ctx, id)
 	if err != nil {
 		return "", err
@@ -1061,15 +1115,8 @@ func dockerVersion(ctx context.Context, group provider.InstanceGroup, id string,
 		return "", err
 	}
 	defer s.Close()
-	out, err := s.CombinedOutput(readyScript)
-	version := strings.TrimSpace(string(out))
-	if err != nil {
-		return "", fmt.Errorf("%w: %s", err, version)
-	}
-	if version == "" || strings.ContainsAny(version, " \n") {
-		return "", fmt.Errorf("docker server did not answer: %q", version)
-	}
-	return version, nil
+	out, err := s.CombinedOutput(script)
+	return strings.TrimSpace(string(out)), err
 }
 
 // target picks the address to dial. As in fleeting's connector, a VM

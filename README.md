@@ -364,6 +364,12 @@ waits for a VM, default 10m, or 50m with an `overflow`). Unknown keys are errors
 relative to the file. Each class's `plugin_config` goes to its fleeting plugin
 as it is.
 
+A class's `registry_mirrors`, Docker Hub pull-through mirrors such as
+`["http://10.0.0.5:5000"]`, are written into each VM's Docker `daemon.json`
+before it takes a job, so its pulls don't count against Docker Hub's limit
+for the network's address. An image whose `daemon.json` names mirrors
+already keeps its own.
+
 ### Reusing VMs
 
 By default each VM runs one job and is removed. A class can reuse them, as
