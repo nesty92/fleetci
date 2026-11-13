@@ -219,7 +219,7 @@ certificate against the fleet's CA, never the system's.
 
 #### Neighbours: which workers reach each other
 
-Workers on one network copy shared caches to each other, directly,
+With `share_caches = true` (off by default), workers on one network copy shared caches to each other, directly,
 without anything passing through a controller or another network (see
 [docs/cache-disk.md](../cache-disk.md#on-a-fleet-of-machines)). For that,
 each worker first finds which of the others it reaches:

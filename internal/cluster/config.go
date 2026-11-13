@@ -193,7 +193,9 @@ type WorkerConfig struct {
 	// unless that looks like a VPN.
 	PeerNetwork string `toml:"peer_network,omitempty"`
 	// ShareCaches copies the shared caches, those writers make, to and from
-	// the other workers it reaches. Default true.
+	// the other workers it reaches. Default false: in the lab the copies
+	// moved 119 GB an hour between four workers and still left a quarter
+	// of the jobs starting empty, so they stay off until reworked.
 	ShareCaches *bool `toml:"share_caches,omitempty"`
 	// ShareCompress asks for the layers it copies compressed (S2), which
 	// takes about half the network and two cores on the sending worker

@@ -46,7 +46,7 @@ const (
 func (w *Worker) compressing() bool { return w.cfg.ShareCompress == nil || *w.cfg.ShareCompress }
 
 // sharing says whether this worker copies caches to and from others.
-func (w *Worker) sharing() bool { return w.cfg.ShareCaches == nil || *w.cfg.ShareCaches }
+func (w *Worker) sharing() bool { return w.cfg.ShareCaches != nil && *w.cfg.ShareCaches }
 
 func (w *Worker) cacheStores() []*cachedisk.Store {
 	w.mu.Lock()

@@ -416,7 +416,12 @@ is placed by what its queued job says; GitHub may give the runner another
 job, which then starts from what that worker has.
 
 The writers' rules are the controllers', as on one machine. Each job
-writes its own worker's copy of a cache, and the workers then copy each
+writes its own worker's copy of a cache.
+
+**Copies between workers are off by default** (`share_caches = true` turns
+them on). In the lab, four workers refreshing each other's copies after
+every merge moved 119 GB in an hour and a quarter of the jobs still
+started empty; they will be reworked. Turned on, the workers copy each
 other's newer copies of the shared caches, those writers make: never a
 merge request's or another ref's own cache.
 
@@ -439,7 +444,7 @@ merge request's or another ref's own cache.
 
 ```toml
 # worker.toml
-share_caches = false     # neither copy caches to others nor from them
+share_caches = true      # copy shared caches to and from the others (default off)
 share_compress = false   # copy them uncompressed: on links faster than 10 Gbit
 peer_network = "eth1"    # or "192.168.10.0/24": copy over this network
 ```
