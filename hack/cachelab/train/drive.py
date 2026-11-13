@@ -33,7 +33,9 @@ WEB = ["c2f8235e1f3ea903ad8b7f61447c4f74164b5c58", "e1e1075a451359f82e155d29ba74
 GH = "WireZone/fleetci-playground"
 GL = "Nesty92%2Ffleetci-playground"
 REMOTE = {"github": "git@github.com:WireZone/fleetci-playground.git",
-          "gitlab": "git@gitlab.com:Nesty92/fleetci-playground.git"}
+          "gitlab": "https://gitlab.com/Nesty92/fleetci-playground.git"}
+# GitLab over HTTPS with glab's login: the SSH key may be another account's.
+CRED = ["-c", "credential.https://gitlab.com.helper=", "-c", "credential.https://gitlab.com.helper=!glab auth git-credential"]
 
 
 def sh(*args, check=True):
@@ -62,7 +64,7 @@ class Train:
     def __init__(self, forge, mode, run, cars, width):
         self.forge, self.mode, self.run, self.cars, self.width = forge, mode, run, cars, width
         self.dir = os.path.join(OUT, "work", f"{forge}-{run}")
-        self.git = ["git", "-C", self.dir, "-c", "user.name=nesty92", "-c", "user.email=nesty92@users.noreply.github.com"]
+        self.git = ["git", "-C", self.dir, "-c", "user.name=nesty92", "-c", "user.email=nesty92@users.noreply.github.com"] + CRED
         self.out = open(os.path.join(OUT, f"{run}.jsonl"), "a")
         self.t0 = time.time()
 
@@ -82,7 +84,7 @@ class Train:
     def setup(self):
         os.makedirs(os.path.dirname(self.dir), exist_ok=True)
         sh("rm", "-rf", self.dir)
-        sh("git", "clone", "-q", "--depth", "1", REMOTE[self.forge], self.dir)
+        sh("git", *CRED, "clone", "-q", "--depth", "1", REMOTE[self.forge], self.dir)
         os.makedirs(os.path.join(self.dir, "ci"), exist_ok=True)
         with open(os.path.join(HERE, "ci", "job.sh")) as f, open(os.path.join(self.dir, "ci", "job.sh"), "w") as g:
             g.write(f.read())
