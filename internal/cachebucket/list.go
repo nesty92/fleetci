@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"time"
 
@@ -33,8 +34,9 @@ const (
 // newS3Lister is gitlab-runner's newRawS3Client (cache/s3v2/s3.go; MIT, see
 // LICENSE.gitlab-runner), fleetci: without detecting the bucket's region,
 // which needs s3:GetBucketLocation; BucketLocation or AWS_REGION say it.
-func newS3Lister(c *cacheconfig.CacheS3Config) (lister, error) {
-	var opts []func(*config.LoadOptions) error
+func newS3Lister(c *cacheconfig.CacheS3Config) (lister, func(), error) {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	opts := []func(*config.LoadOptions) error{config.WithHTTPClient(&http.Client{Transport: tr})}
 	if c.AuthType() == cacheconfig.S3AuthTypeAccessKey {
 		opts = append(opts, config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(c.AccessKey, c.SecretKey, c.SessionToken)))
 	}
@@ -60,7 +62,7 @@ func newS3Lister(c *cacheconfig.CacheS3Config) (lister, error) {
 	defer cancel()
 	cfg, err := config.LoadDefaultConfig(ctx, opts...)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
 		if custom {
@@ -85,11 +87,11 @@ func newS3Lister(c *cacheconfig.CacheS3Config) (lister, error) {
 			}
 		}
 		return out, nil
-	}, nil
+	}, tr.CloseIdleConnections, nil
 }
 
 // newGCSLister lists as gitlab-runner's gcsv2 adapter authenticates.
-func newGCSLister(c *cacheconfig.CacheGCSConfig) (lister, error) {
+func newGCSLister(c *cacheconfig.CacheGCSConfig) (lister, func(), error) {
 	var opts []option.ClientOption
 	if c.CredentialsFile != "" {
 		opts = append(opts, option.WithCredentialsFile(c.CredentialsFile)) // nolint:staticcheck
@@ -101,7 +103,7 @@ func newGCSLister(c *cacheconfig.CacheGCSConfig) (lister, error) {
 	defer cancel()
 	client, err := storage.NewClient(ctx, opts...)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	b := client.Bucket(c.BucketName)
 	return func(ctx context.Context, prefix string) ([]Object, error) {
@@ -117,12 +119,12 @@ func newGCSLister(c *cacheconfig.CacheGCSConfig) (lister, error) {
 			}
 			out = append(out, Object{Name: a.Name, Size: a.Size, Modified: a.Updated})
 		}
-	}, nil
+	}, func() { _ = client.Close() }, nil
 }
 
 // newAzureLister lists as gitlab-runner's azure adapter authenticates: the
 // account key, else Azure's default credential (a managed identity).
-func newAzureLister(c *cacheconfig.CacheAzureConfig) (lister, error) {
+func newAzureLister(c *cacheconfig.CacheAzureConfig) (lister, func(), error) {
 	domain := c.StorageDomain
 	if domain == "" {
 		domain = "blob.core.windows.net"
@@ -132,20 +134,20 @@ func newAzureLister(c *cacheconfig.CacheAzureConfig) (lister, error) {
 	if c.AccountKey != "" {
 		cred, err := azblob.NewSharedKeyCredential(c.AccountName, c.AccountKey)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		client, err = container.NewClientWithSharedKeyCredential(u, cred, nil)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	} else {
 		cred, err := azidentity.NewDefaultAzureCredential(nil)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		client, err = container.NewClient(u, cred, nil)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	return func(ctx context.Context, prefix string) ([]Object, error) {
@@ -170,5 +172,5 @@ func newAzureLister(c *cacheconfig.CacheAzureConfig) (lister, error) {
 			}
 		}
 		return out, nil
-	}, nil
+	}, nil, nil
 }

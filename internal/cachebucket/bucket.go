@@ -79,19 +79,20 @@ func New(cfg *Config) (Bucket, error) {
 		return nil, err
 	}
 	var l lister
+	var closer func()
 	var err error
 	switch cfg.Type {
 	case "s3", "s3v2":
-		l, err = newS3Lister(cfg.S3)
+		l, closer, err = newS3Lister(cfg.S3)
 	case "gcs", "gcsv2":
-		l, err = newGCSLister(cfg.GCS)
+		l, closer, err = newGCSLister(cfg.GCS)
 	case "azure":
-		l, err = newAzureLister(cfg.Azure)
+		l, closer, err = newAzureLister(cfg.Azure)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("cache bucket %s: %w", cfg.Type, err)
 	}
-	return &bucket{cfg: cfg, list: l, prefix: pathPrefix(cfg.Path)}, nil
+	return &bucket{cfg: cfg, list: l, closer: closer, prefix: pathPrefix(cfg.Path)}, nil
 }
 
 type lister func(ctx context.Context, prefix string) ([]Object, error)
@@ -99,7 +100,15 @@ type lister func(ctx context.Context, prefix string) ([]Object, error)
 type bucket struct {
 	cfg    *Config
 	list   lister
+	closer func()
 	prefix string
+}
+
+// Close lets go of the bucket's connections.
+func (b *bucket) Close() {
+	if b.closer != nil {
+		b.closer()
+	}
 }
 
 func pathPrefix(p string) string {
