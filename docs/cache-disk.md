@@ -319,10 +319,54 @@ GitHub's cache for anything not on the disk.
   directly, as any runner does. The job's log says so in a warning, and the
   job still works.
 
+### Where the caches are kept
+
+The disk is in front of a store, and `cache_store` picks it. The workflows
+stay the same under all three.
+
+| `cache_store` | Behind the disk | A save |
+|---|---|---|
+| `"github"`, the default | GitHub's cache, or the server at `cache_url` | goes to it during the job, as without fleetci |
+| `"bucket"` | your own bucket, in `[github.cache_bucket]` | stays on the disk; it is uploaded after the job, which doesn't wait |
+| `"off"` | nothing | stays on the disk |
+
+The bucket is set as gitlab-runner's `[runners.cache]`, with the same keys,
+so one bucket can serve both forges:
+
+```toml
+[github]
+cache_store = "bucket"
+
+[github.cache_bucket]
+Type = "s3"                      # or "gcs", "azure"
+Path = "fleetci"                 # a prefix in the bucket
+
+[github.cache_bucket.s3]
+BucketName = "my-ci-caches"
+BucketLocation = "eu-north-1"
+# AccessKey and SecretKey, or the machine's IAM role when they're left out
+```
+
+The credentials stay on fleetci's machine (on a fleet, on its workers). A
+VM never sees them: fleetci checks the job's token, which GitHub signed,
+lists the bucket for the caches the token grants, and gives the VM a link
+to one object for an hour. A job reads its own branch's caches and its
+default branch's and writes only its own branch's, as on GitHub. Entries
+are `<Path>/github/<repo id>/<ref>/<version>/<key>`; expire them with the
+bucket's lifecycle rules, for example after 7 days.
+
+A cache in the bucket that another machine's disk already has is not
+downloaded again. A save isn't uploaded when its key is already in the
+bucket, since an entry never changes.
+
+`"bucket"` and `"off"` need a class with `cache_disk`. A VM without a disk
+uses GitHub's cache.
+
 The approach of pointing the runner at a cache service of one's own comes
 from [falcondev-oss/github-actions-cache-server](https://github.com/falcondev-oss/github-actions-cache-server)
-(MIT), which serves `actions/cache` from its own storage. fleetci keeps
-GitHub's cache behind the disk instead, so it needs no server of its own.
+(MIT), which serves `actions/cache` from its own storage. fleetci needs no
+server of its own: the disk is the store during the job, and fleetci's
+machine signs links to the bucket.
 
 ## On a fleet of machines
 

@@ -1,8 +1,9 @@
 # Caches behind the cache disk
 
 Status: the cache disk is built, with GitHub's cache or the GitLab runner's
-S3 cache behind it, saved through (#18). What comes behind the disk next,
-and when it is written, is open. This page keeps what the reference
+S3 cache behind it, saved through (#18). On GitHub, `cache_store` also
+puts the user's own bucket behind it, uploaded after the job, or nothing.
+GitLab's side of both is open. This page keeps what the reference
 projects and our own tests found, so it isn't learned twice.
 
 The rule: a workflow written for GitHub's or GitLab's own runners runs
@@ -137,10 +138,45 @@ listed. So GitHub's cache can only be written during the job, and a save to
 it costs the job its upload time (about 100 s for 1 GB in the train).
 GitLab's has no such limit: the runner uploads it.
 
+## The user's bucket (`cache_store = "bucket"`)
+
+Since GitHub's cache can't be written after the job, uploading after the
+job needs a store fleetci writes itself. It is the user's bucket, set as
+gitlab-runner's `[runners.cache]` and signed with gitlab-runner's own
+adapters (`internal/cachebucket`; listing, which they don't do, is ours).
+
+- **No server.** The VM's L1 (`l1cache.py`, `remote=bucket`) asks the node
+  through the VM's SSH connection: a remote forward to the VM's loopback,
+  set again when fleetci reconnects. Nothing new is reachable on any
+  network, and the VM never holds the bucket's credentials.
+- **The node checks the token** (`actionstoken.go`): the job's
+  `ACTIONS_RUNTIME_TOKEN`, against the issuer's keys by OIDC discovery, as
+  falcondev does. Its `ac` scopes say what a restore searches, in order,
+  and where a save goes. The node lists the bucket under those scopes only.
+- **Names keep prefixes.** Each part of
+  `github/<repository_id>/<scope>/<version>/<key>` is escaped byte by byte
+  outside `[A-Za-z0-9._~-]`, so a restore key's prefix is the object name's
+  prefix, a scope's `/` can't reach a sibling scope, and keys compare byte
+  for byte (`TestBucketMatching`, falcondev's cases).
+- **Saves upload after the job.** A save is finalized on the disk during
+  the job; once the runner exits, fleetci asks the L1 for `/fleetci/flush`,
+  which gets an upload link from the node for each save (409 when the
+  entry exists) and PUTs it. The job's token, valid for hours, is kept in
+  the L1's memory only. The disk isn't detached until the flush is done or
+  15 minutes pass; a save it misses stays on the disk.
+- **Restores fill the disk** from the signed link in ranges, as from
+  GitHub's cache. An entry whose object name the disk already has is
+  served from the disk; if the node can't be reached, the disk answers
+  alone.
+
+Tested with a fake bucket (`TestL1CacheBucket`) and against RustFS with
+real signed links (`TestL1CacheBucketS3`, `FLEETCI_TEST_S3`). GCS and
+Azure share the code path except listing; their emulators can't check
+signed links, which point at Google's and Azure's hosts.
+
 ## Open
 
-- Uploading after the job, which needs a store fleetci writes itself on
-  GitHub, the way the GitLab runner writes S3.
-- A setting that turns the cache behind the disk off, for both forges. The
-  in-VM service has it (`remote=off`); the config and GitLab's side don't
-  yet.
+- GitLab's side: a setting that turns the cache behind the disk off, and
+  uploading after the job from the node (the runner uploads it during the
+  job now).
+- A real job on GitHub in bucket mode.
