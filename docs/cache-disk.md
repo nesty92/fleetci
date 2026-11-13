@@ -43,7 +43,11 @@ in front of where they store their archives:
 - **GitLab:** the runner's cache directory (`/cache`, or its `cache_dir`)
   is on the disk. A `cache:` restore finds the archive there, as new as
   S3's copy, and skips the download. Uploads go to S3 as before, so jobs on
-  other nodes and runners without a disk still get them.
+  other nodes and runners without a disk still get them. The runner skips
+  only when S3's copy is not newer than the disk's, and a job archives
+  before it uploads, so after the job fleetci dates the archives it saved
+  or fetched to when it ended. An archive another job saves later is
+  newer, and downloaded.
 - **GitHub:** an `actions/cache` restore asks fleetci's cache service in
   the VM. It asks GitHub which entry the key names, serves that entry from
   the disk if the disk has it, and otherwise downloads it from GitHub,

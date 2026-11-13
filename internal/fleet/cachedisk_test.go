@@ -109,3 +109,40 @@ func TestUnmountKeepsUnder(t *testing.T) {
 		t.Errorf("docker asked %q, want a builder prune", b)
 	}
 }
+
+// The cache.zip files GitLab's cache: saved or fetched in the job get the
+// time it ended, after their upload, so the next job's runner finds them
+// up to date. One the job didn't touch keeps its time: the bucket may
+// have a newer one.
+func TestUnmountDatesTheJobsCacheZips(t *testing.T) {
+	dir := t.TempDir()
+	disk, run := filepath.Join(dir, "cache"), filepath.Join(dir, "run")
+	vol := filepath.Join(disk, "docker", "volumes", "runner-x-cache-1", "_data", "group", "proj")
+	for _, d := range []string{filepath.Join(vol, "old-key"), filepath.Join(vol, "new-key"), run} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	past := time.Now().Add(-time.Hour).Truncate(time.Second)
+	old, saved := filepath.Join(vol, "old-key", "cache.zip"), filepath.Join(vol, "new-key", "cache.zip")
+	_ = os.WriteFile(old, []byte("old"), 0o644)
+	_ = os.Chtimes(old, past, past)
+	time.Sleep(20 * time.Millisecond)
+	_ = os.WriteFile(filepath.Join(run, "fleetci-cache-mounted"), nil, 0o644) // the disk is mounted
+	time.Sleep(20 * time.Millisecond)
+	_ = os.WriteFile(saved, []byte("new"), 0o644) // the job's save, archived before its upload
+	_ = os.Chtimes(saved, past, past)
+
+	script := unmountScript(1 << 40)
+	script = script[strings.Index(script, "if [ -f /run"):strings.Index(script, "systemctl stop")]
+	script = strings.ReplaceAll(strings.ReplaceAll(script, "/run", run), "/cache", disk)
+	if out, err := exec.Command("sh", "-euc", script).CombinedOutput(); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	if fi, _ := os.Stat(saved); time.Since(fi.ModTime()) > time.Minute {
+		t.Errorf("the job's cache.zip kept its time %v", fi.ModTime())
+	}
+	if fi, _ := os.Stat(old); !fi.ModTime().Equal(past) {
+		t.Errorf("a cache.zip the job didn't touch was dated %v", fi.ModTime())
+	}
+}

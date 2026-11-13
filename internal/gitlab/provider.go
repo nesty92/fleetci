@@ -317,7 +317,8 @@ func (e *executor) attachCache(options common.ExecutorPrepareOptions, vm source.
 // cacheDirVolume keeps the runner's cache directory, where the job's
 // cache: archives land, on the cache disk: a Docker volume, as
 // gitlab-runner register writes in config.toml. The next job's restore
-// then finds cache.zip as new as the one in S3 and skips the download.
+// then finds cache.zip as new as the one in S3 and skips the download
+// (fleet's unmount script dates the ones the job saved after their upload).
 // Nothing when the config has the volume already, or turns caches off.
 func cacheDirVolume(rc *common.RunnerConfig) []string {
 	if rc == nil || rc.Docker == nil || rc.Docker.DisableCache {

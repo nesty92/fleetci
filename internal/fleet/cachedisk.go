@@ -274,6 +274,7 @@ func guest(ctx context.Context, conn *proxy.Conn, script string) (string, error)
 
 // mountScript waits for the disk, formats it the first time, and puts
 // Docker's and containerd's data on it. The disk's serial names it.
+// /run/fleetci-cache-mounted marks when, for unmountScript.
 // No single quotes: guest wraps it in them.
 const mountScript = `
 dev=/dev/disk/by-id/virtio-cache
@@ -286,6 +287,7 @@ blkid $dev >/dev/null 2>&1 || mkfs.ext4 -q -E lazy_itable_init=1,lazy_journal_in
 systemctl stop docker.socket docker.service containerd.service
 mkdir -p /cache
 mount -o noatime $dev /cache
+touch /run/fleetci-cache-mounted
 mkdir -p /cache/docker /cache/containerd
 mount --bind /cache/docker /var/lib/docker
 mount --bind /cache/containerd /var/lib/containerd
@@ -303,6 +305,15 @@ systemctl start containerd.service docker.service
 // used first: actions/cache's archives, then Docker's build cache, then
 // images older than a week. Otherwise a cache grows until the store
 // starts it again from empty (max_per_cache), images and all.
+//
+// Then the cache.zip files of GitLab's cache: the job made or fetched get
+// the time it ended. gitlab-runner skips a restore's download when the
+// bucket's copy is not newer than its local file, but the job that saves
+// one archives it before uploading it, so the bucket's copy is always
+// newer, and the next job downloads what its disk already holds. Uploads
+// end before the job does, so now is after them; one another job makes
+// later is still newer, and downloaded. Files the job didn't touch keep
+// their time: the bucket may have a newer one.
 func unmountScript(keep int64) string {
 	return strings.ReplaceAll(unmountTmpl, "@KEEP@", strconv.FormatInt(keep, 10))
 }
@@ -318,6 +329,9 @@ if over && [ -d /cache/actions ]; then
 fi
 if over; then docker builder prune -f --keep-storage $((keep / 4)) >/dev/null 2>&1 || true; fi
 if over; then docker image prune -af --filter until=168h >/dev/null 2>&1 || true; fi
+if [ -f /run/fleetci-cache-mounted ] && [ -d /cache/docker/volumes ]; then
+  find /cache/docker/volumes -name cache.zip -cnewer /run/fleetci-cache-mounted -exec touch -c {} + 2>/dev/null || true
+fi
 systemctl stop docker.socket docker.service containerd.service
 sync
 fstrim /cache || true
