@@ -47,7 +47,8 @@ go)
 web)
   export COREPACK_HOME=$C/corepack COREPACK_ENABLE_DOWNLOAD_PROMPT=0 NEXT_TELEMETRY_DISABLED=1
   step install "corepack enable && pnpm install --frozen-lockfile --store-dir $C/pnpm-store"
-  step lint "corepack enable && pnpm check"
+  # Older commits name their checks lint, newer ones check.
+  step lint "corepack enable && if grep -q '\"check\":' package.json; then pnpm check; else pnpm run --if-present lint; fi"
   # The build needs its services' settings, not the services.
   step build "corepack enable && mkdir -p $C/next .next && ln -sfn $C/next .next/cache &&
     AUTH_SECRET=placeholder POSTGRES_URL=postgres://ci@localhost/ci REDIS_URL=redis://localhost BLOB_READ_WRITE_TOKEN=placeholder pnpm exec next build"
