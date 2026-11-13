@@ -494,3 +494,20 @@ On a busier run the default zip took 3.4 s to save and 2.4 s to restore,
 `CACHE_COMPRESSION_LEVEL=fast`; the Go job's cache, 3.4 GB in 68,000
 files, is stored as 1015 MB of zstd zip entries (method 93), zipped in
 9 s on 4 CPUs.
+
+### Downloading actions
+
+A GitHub runner downloads every action a job uses in "Set up job", before
+the first step; on a fresh VM nothing is kept from the job before. From
+the logs of 110 jobs on the lab (November 2026, the playground's `go` and
+`web` jobs, each using `actions/checkout@v4` and `actions/cache@v4`):
+
+| job | resolving (GitHub's API) p50 | downloading p50 | p90 | max | per action | share of the job |
+|---|---|---|---|---|---|---|
+| go  | 0.51 s | 1.20 s | 1.59 s | 2.79 s | 0.60 s | 0.7% |
+| web | 0.51 s | 1.27 s | 2.61 s | 3.28 s | 0.64 s | 1.2% |
+
+The runner can take the archives from a folder instead
+(`ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE`, `<owner>_<repo>/<sha>.tar.gz`); it
+still asks GitHub to resolve each action, so a disk would save the
+download, about 0.6 s per action, not the 0.5 s of resolving.
