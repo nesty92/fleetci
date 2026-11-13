@@ -572,6 +572,15 @@ func (w *writer) Write(b []byte) (int, error) {
 	return w.ResponseWriter.Write(b)
 }
 
+// ReadFrom keeps net/http's own, which sends a file with sendfile.
+func (w *writer) ReadFrom(r io.Reader) (int64, error) {
+	w.began = true
+	if rf, ok := w.ResponseWriter.(io.ReaderFrom); ok {
+		return rf.ReadFrom(r)
+	}
+	return io.Copy(struct{ io.Writer }{w.ResponseWriter}, r)
+}
+
 // upstream sends r's method and headers on to u, with body.
 func (s *Server) upstream(r *http.Request, method, u string, body io.Reader, length int64) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(r.Context(), method, u, body)
@@ -1003,7 +1012,12 @@ func (s *Server) serveLocal(w http.ResponseWriter, r *http.Request, eid string, 
 	if r.Method == http.MethodHead {
 		return
 	}
-	_, _ = io.Copy(w, io.NewSectionReader(f, start, end-start+1))
+	// A LimitedReader of the file itself, so net/http sends it with
+	// sendfile, not through this process.
+	if _, err := f.Seek(start, io.SeekStart); err != nil {
+		return
+	}
+	_, _ = io.Copy(w, &io.LimitedReader{R: f, N: end - start + 1})
 }
 
 // fill serves a download the disk lacks and keeps a copy.
