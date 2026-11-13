@@ -137,6 +137,34 @@ var ErrNoRoom = errors.New("no room for it")
 // jobs here use. It says how much it copied; nothing when the store's
 // copy is as new.
 func (s *Store) Pull(ctx context.Context, o Offer, fetch Fetch) (int64, error) {
+	return s.pull(ctx, o, fetch, false)
+}
+
+// PullForJob copies a neighbour's shared cache for a job about to start
+// here with none of its caches (Wants): unlike Pull, it evicts others to
+// fit, and counts as used now.
+func (s *Store) PullForJob(ctx context.Context, o Offer, fetch Fetch) (int64, error) {
+	return s.pull(ctx, o, fetch, true)
+}
+
+// Wants are the shared caches a job of scope could start from, in order,
+// when the store has none it could: the ones a neighbour could give it.
+func (s *Store) Wants(scope Scope) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if h, _ := s.readable(scope); h != nil {
+		return nil
+	}
+	var out []string
+	for i, src := range scope.sources() {
+		if i > 0 || scope.Writer { // the first is a ref's own unless a writer's
+			out = append(out, src.dir)
+		}
+	}
+	return out
+}
+
+func (s *Store) pull(ctx context.Context, o Offer, fetch Fetch, forJob bool) (int64, error) {
 	if !o.Scope.Writer || o.Scope.key() != o.Key || len(o.Layers) == 0 || o.Committed.IsZero() {
 		return 0, errors.New("not a shared cache")
 	}
@@ -189,7 +217,7 @@ func (s *Store) Pull(ctx context.Context, o Offer, fetch Fetch) (int64, error) {
 		}
 		s.sweep()
 	}
-	if local != nil {
+	if local != nil || forJob {
 		s.evictFor(need)
 	}
 	if !s.fitsWith(need) {
@@ -208,13 +236,16 @@ func (s *Store) Pull(ctx context.Context, o Offer, fetch Fetch) (int64, error) {
 		return 0, err
 	}
 	used := o.Used
+	if forJob {
+		used = s.now()
+	}
 	local, lerr := s.readHead(o.Key)
 	switch {
 	case lerr == nil && !local.Committed.Before(o.Committed):
 		// A job here kept a newer copy meanwhile.
 		release()
 		return 0, nil
-	case lerr == nil:
+	case lerr == nil && !forJob:
 		used = local.Used
 	}
 	h := &head{Scope: o.Scope, Chain: chain, Used: used, Committed: o.Committed}

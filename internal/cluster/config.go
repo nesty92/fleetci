@@ -203,6 +203,12 @@ type WorkerConfig struct {
 	// moved 119 GB an hour between four workers and still left a quarter
 	// of the jobs starting empty, so they stay off until reworked.
 	ShareCaches *bool `toml:"share_caches,omitempty"`
+	// FetchCaches copies a shared cache from the nearest worker that has
+	// it when a job starts here with none of its caches (a pull request's
+	// first job on this worker gets its target branch's), waiting for it
+	// up to a minute. Only that one, as the job needs it. Default false.
+	// The other workers must have it on too, to answer.
+	FetchCaches *bool `toml:"fetch_caches,omitempty"`
 	// ShareCompress asks for the layers it copies compressed (S2), which
 	// takes about half the network and two cores on the sending worker
 	// while one comes. Default true.

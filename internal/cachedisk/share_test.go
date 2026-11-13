@@ -272,3 +272,53 @@ func TestPullNotAfterEvicting(t *testing.T) {
 		t.Fatalf("over max_per_cache again: %d, %v", n, err)
 	}
 }
+
+// A pull request's job on a node with none of its caches wants its own
+// shared cache, then main's; fetched for the job, main's comes in even
+// where the budget only has room once another cache goes, and the job
+// starts from it.
+func TestWantsAndPullForJob(t *testing.T) {
+	a := open(t, Config{}, &fakeImages{data: 1 << 20})
+	main := Scope{Forge: "gitlab", Instance: "gitlab.com", Project: "1", Ref: "main", Writer: true}
+	commitJob(t, a, main)
+	f := filepath.Join(a.dir, "scopes", offerOf(t, a, main.key()).Layers[0].Path)
+	if err := os.WriteFile(f, []byte(strings.Repeat("x", 1<<20)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	o := offerOf(t, a, main.key())
+
+	b := open(t, Config{Budget: 3 << 19}, &fakeImages{data: 1 << 20})
+	other := Scope{Forge: "gitlab", Instance: "gitlab.com", Project: "2", Ref: "main", Writer: true}
+	commitJob(t, b, other)
+	pr := Scope{Forge: "gitlab", Instance: "gitlab.com", Project: "1", Ref: "pr-1", From: []string{"main"}}
+	want := b.Wants(pr)
+	if len(want) != 2 || want[0] != pr.shared("pr-1") || want[1] != main.key() {
+		t.Fatalf("wants %v", want)
+	}
+	if w := b.Wants(other); w != nil {
+		t.Fatalf("has other's, wants %v", w)
+	}
+
+	var got []string
+	if _, err := b.Pull(context.Background(), o, fetchFrom(a, &got)); !errors.Is(err, ErrNoRoom) {
+		t.Fatalf("a background pull made room: %v", err)
+	}
+	n, err := b.PullForJob(context.Background(), o, fetchFrom(a, &got))
+	if err != nil || n == 0 {
+		t.Fatalf("for a job: %d, %v", n, err)
+	}
+	if _, ok := b.Has(other.key()); ok {
+		t.Fatal("other's cache was kept over the budget")
+	}
+	if w := b.Wants(pr); w != nil {
+		t.Fatalf("has main's, still wants %v", w)
+	}
+	l, err := b.Begin(pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Abort(l)
+	if l.From() != "main" {
+		t.Fatalf("starts from %q", l.From())
+	}
+}

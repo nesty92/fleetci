@@ -426,6 +426,15 @@ job, which then starts from what that worker has.
 The writers' rules are the controllers', as on one machine. Each job
 writes its own worker's copy of a cache.
 
+**A job's cache from another worker** (`fetch_caches = true`, off by
+default): a job that lands on a worker with none of the caches it could
+start from (a merge request's first job there, say, without main's) has
+its worker fetch the first of them another worker has, the newest copy,
+before its VM starts, and waits for it up to a minute. Only that cache
+moves, when a job needs it, and it may evict others to fit. The other
+workers must have `fetch_caches` on too, to answer. It is checked and
+compressed as the copies below are.
+
 **Copies between workers are off by default** (`share_caches = true` turns
 them on). In the lab, four workers refreshing each other's copies after
 every merge moved 119 GB in an hour and a quarter of the jobs still
@@ -452,6 +461,7 @@ merge request's or another ref's own cache.
 
 ```toml
 # worker.toml
+fetch_caches = true      # fetch a job's cache from another worker when it has none here (default off)
 share_caches = true      # copy shared caches to and from the others (default off)
 share_compress = false   # copy them uncompressed: on links faster than 10 Gbit
 peer_network = "eth1"    # or "192.168.10.0/24": copy over this network

@@ -118,6 +118,14 @@ func (b *Backend) AttachCache(ctx context.Context, vm VM, scope cachedisk.Scope)
 	if p.cache == nil || has {
 		return nil, nil
 	}
+	b.mu.Lock()
+	fetch := b.fetch
+	b.mu.Unlock()
+	if fetch != nil {
+		if keys := p.cache.Wants(scope); len(keys) > 0 {
+			fetch(ctx, p.cache, keys)
+		}
+	}
 	lease, err := p.cache.Begin(scope)
 	if err != nil {
 		return nil, err
@@ -143,6 +151,19 @@ func (b *Backend) AttachCache(ctx context.Context, vm VM, scope cachedisk.Scope)
 	st := lease.Start()
 	b.log.Info("cache attached", "vm", id, "ref", scope.Ref, "key", scope.Key, "job", scope.Job, "writer", scope.Writer, "from", lease.From(), "took", time.Since(start).Round(time.Millisecond).String())
 	return &st, nil
+}
+
+// FetchCache copies onto store, for a job about to start, the first of
+// the shared caches keys that another machine has. It returns when the
+// job should go on, with the cache or without.
+type FetchCache func(ctx context.Context, store *cachedisk.Store, keys []string)
+
+// SetFetch makes jobs whose VMs have none of their caches here ask fetch
+// for one first.
+func (b *Backend) SetFetch(fetch FetchCache) {
+	b.mu.Lock()
+	b.fetch = fetch
+	b.mu.Unlock()
 }
 
 // CacheStores are this backend's cache stores, one per

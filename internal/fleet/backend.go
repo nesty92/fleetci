@@ -167,6 +167,8 @@ type Backend struct {
 	adopted  map[string]string
 	// caches are the VMs with a cache disk.
 	caches map[string]*cacheVM
+	// fetch gets a job's cache from elsewhere (SetFetch).
+	fetch FetchCache
 
 	stateDir string
 	// ctx ends when the backend stops, and with it adopted jobs' follows.

@@ -3,6 +3,7 @@ package cluster
 import (
 	"cmp"
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -83,6 +84,8 @@ type Worker struct {
 	shareKick chan struct{}
 	// arriving are the caches it is copying from a neighbour now.
 	arriving map[string]bool
+	// peerPool verifies the other workers, once they are reachable.
+	peerPool *x509.CertPool
 }
 
 // task is an assignment as this worker carries it out.
@@ -236,6 +239,9 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 	var wg sync.WaitGroup
 	if lis != nil {
+		w.mu.Lock()
+		w.peerPool = pool
+		w.mu.Unlock()
 		wg.Go(func() { w.peerLoop(ctx, lis, pool) })
 		wg.Go(func() { w.shareLoop(ctx, pool) })
 	}
@@ -379,6 +385,9 @@ func (w *Worker) build(ctx context.Context, fit Fit) error {
 	b, err := fleet.New(bctx, fclasses, w.cfg.Host, w.log.Named("fleet"))
 	if err != nil {
 		return err
+	}
+	if w.fetching() {
+		b.SetFetch(w.fetchFor)
 	}
 	w.mu.Lock()
 	w.backend = b

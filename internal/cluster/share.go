@@ -48,11 +48,16 @@ func (w *Worker) compressing() bool { return w.cfg.ShareCompress == nil || *w.cf
 // sharing says whether this worker copies caches to and from others.
 func (w *Worker) sharing() bool { return w.cfg.ShareCaches != nil && *w.cfg.ShareCaches }
 
+// fetching says whether this worker copies a job's cache from another
+// when the job has none here (fetchFor).
+func (w *Worker) fetching() bool { return w.cfg.FetchCaches != nil && *w.cfg.FetchCaches }
+
+// cacheStores are the stores this worker offers the others.
 func (w *Worker) cacheStores() []*cachedisk.Store {
 	w.mu.Lock()
 	b := w.backend
 	w.mu.Unlock()
-	if b == nil || !w.sharing() {
+	if b == nil || (!w.sharing() && !w.fetching()) {
 		return nil
 	}
 	return b.CacheStores()
@@ -223,6 +228,81 @@ func fetchLayer(hc *http.Client, addr string, compress bool, wire *int64) cached
 			return errors.New("its SHA-256 doesn't match the neighbour's")
 		}
 		return nil
+	}
+}
+
+// fetchWait is the longest a job waits for its cache from a neighbour.
+const fetchWait = time.Minute
+
+// fetchFor copies the first of keys a neighbour has, the newest copy of
+// the nearest, for a job about to start here with none of them.
+func (w *Worker) fetchFor(ctx context.Context, store *cachedisk.Store, keys []string) {
+	w.mu.Lock()
+	pool := w.peerPool
+	w.mu.Unlock()
+	near := w.peers.list()
+	if pool == nil || len(near) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, fetchWait)
+	defer cancel()
+	w.peers.mu.Lock()
+	hints := map[string]PeerHint{}
+	for _, h := range w.peers.unionLocked() {
+		hints[h.ID] = h
+	}
+	w.peers.mu.Unlock()
+	slices.SortFunc(near, func(a, b Neighbour) int { return int(a.RTT - b.RTT) })
+
+	want := map[string]int{}
+	for i, k := range keys {
+		want[k] = i
+	}
+	var best *candidate
+	var hc *http.Client
+	for _, n := range near {
+		h, ok := hints[n.ID]
+		if !ok {
+			continue
+		}
+		c := peerClient(w, pool, h)
+		defer c.CloseIdleConnections()
+		offs, err := neighbourOffers(ctx, c, n.Addr)
+		if err != nil {
+			w.log.Debug("no caches from a neighbour", "peer", n.ID, "err", err)
+			continue
+		}
+		for _, o := range offs {
+			i, ok := want[o.Key]
+			if !ok {
+				continue
+			}
+			// The first key wanted, then its newest copy; the nearest
+			// of equals, as they come nearest first.
+			if best == nil || i < want[best.o.Key] || (o.Key == best.o.Key && o.Committed.After(best.o.Committed)) {
+				best, hc = &candidate{o, n, h}, c
+			}
+		}
+	}
+	if best == nil {
+		return
+	}
+	start := time.Now()
+	var wire int64
+	w.setArriving(best.o.Key, true)
+	n, err := store.PullForJob(ctx, best.o, fetchLayer(hc, best.near.Addr, w.compressing(), &wire))
+	w.setArriving(best.o.Key, false)
+	name := best.o.Scope.Label()
+	if err != nil {
+		w.log.Warn("cache not fetched for a job; it starts without", "cache", name, "project", best.o.Scope.Project, "peer", best.near.ID, "err", err)
+		return
+	}
+	took := time.Since(start)
+	w.log.Info("cache fetched for a job", "cache", name, "project", best.o.Scope.Project, "peer", best.near.ID,
+		"size", fmt.Sprintf("%.1fMB", float64(n)/(1<<20)), "wire", fmt.Sprintf("%.1fMB", float64(wire)/(1<<20)),
+		"took", took.Round(time.Millisecond).String())
+	if n > 0 {
+		w.poke()
 	}
 }
 

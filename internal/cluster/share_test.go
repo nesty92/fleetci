@@ -146,3 +146,54 @@ func TestShareOverPeers(t *testing.T) {
 		c.Abort(l)
 	}
 }
+
+// A job on w2 with none of its caches: w2 fetches main's, the first a
+// neighbour has of those the job wants, and the job starts from it.
+func TestFetchForJob(t *testing.T) {
+	ca := newCA(t)
+	p1, id1 := peerPKI(t, ca, "w1")
+	p2, id2 := peerPKI(t, ca, "w2")
+	pool, _ := p2.Pool()
+	n1 := newNeighbourState()
+	n1.set("ctl", &[]PeerHint{{ID: "w2", Serial: id2.Serial}})
+
+	a, b := testStore(t), testStore(t)
+	main := cachedisk.Scope{Forge: "gitlab", Instance: "gitlab.com", Project: "1", Ref: "main", Writer: true}
+	l, err := a.Begin(main)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Commit(l); err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	shareHandlers(mux, func() []*cachedisk.Store { return []*cachedisk.Store{a} })
+	addr := servePeer(t, p1, n1, mux)
+
+	n2 := newNeighbourState()
+	n2.set("ctl", &[]PeerHint{{ID: "w1", Serial: id1.Serial}})
+	n2.neighbours = []Neighbour{{ID: "w1", Addr: addr, RTT: time.Millisecond}}
+	w := &Worker{cfg: &WorkerConfig{}, pki: p2, log: hclog.NewNullLogger(), peers: n2, peerPool: pool,
+		arriving: map[string]bool{}, changed: make(chan struct{}, 1)}
+
+	pr := cachedisk.Scope{Forge: "gitlab", Instance: "gitlab.com", Project: "1", Ref: "pr-1", From: []string{"main"}}
+	keys := b.Wants(pr)
+	if len(keys) != 2 {
+		t.Fatalf("wants %v", keys)
+	}
+	w.fetchFor(context.Background(), b, keys)
+	if b.Wants(pr) != nil {
+		t.Fatal("main's cache wasn't fetched")
+	}
+	l, err = b.Begin(pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Abort(l)
+	if l.From() != "main" {
+		t.Fatalf("the job starts from %q", l.From())
+	}
+	if len(w.arriving) != 0 {
+		t.Fatalf("still arriving: %v", w.arriving)
+	}
+}
