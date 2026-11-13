@@ -241,6 +241,9 @@ func New(ctx context.Context, c Config, capacity source.Capacity, log hclog.Logg
 	if config.Concurrent == 0 {
 		config.Concurrent = concurrent
 	}
+	for _, rc := range config.Runners {
+		rc.Environment = withCacheCompression(rc.Environment)
+	}
 
 	p := newProvider(docker.NewProvider(), capacityVMs{capacity}, func(rc *common.RunnerConfig) string { return classOf[rc] }, names, defaultClass)
 	p.cacheDisk = c.CacheDisk
@@ -274,6 +277,30 @@ func (l *Loop) Run(ctx context.Context) error {
 	<-ctx.Done()
 	l.log.Info("stopping: aborting running GitLab jobs")
 	return l.mr.Stop()
+}
+
+// cacheCompression are the runner's settings for its cache archives that
+// fleetci sets unless the runner's environment does: fastzip, zstd inside
+// the zip at its fast level. In the lab they saved a busy job's cache in
+// 2.3 s instead of 3.4 s, and restored it in 1.9 s instead of 2.4 s (see
+// docs/measurements.md). A job's own variables still win, as over any of
+// the runner's environment.
+var cacheCompression = []string{
+	"FF_USE_FASTZIP=true",
+	"CACHE_COMPRESSION_FORMAT=zipzstd",
+	"CACHE_COMPRESSION_LEVEL=fast",
+}
+
+// withCacheCompression adds cacheCompression's settings to env, a
+// runner's environment, those it doesn't set already.
+func withCacheCompression(env []string) []string {
+	for _, kv := range cacheCompression {
+		key, _, _ := strings.Cut(kv, "=")
+		if !slices.ContainsFunc(env, func(e string) bool { return strings.HasPrefix(e, key+"=") }) {
+			env = append(env, kv)
+		}
+	}
+	return env
 }
 
 // systemID is this machine's id among a runner's managers, the same on

@@ -189,7 +189,7 @@ func TestConfigFileRunnersKeepTheirSettings(t *testing.T) {
 	r := c.Runners[0]
 	if r.Executor != executorName || r.Token != "glrt-file" || r.URL != "https://gitlab.example.com" ||
 		r.Docker.Image != "alpine" || !r.Docker.Privileged || r.Cache == nil || r.Cache.S3 == nil ||
-		r.Cache.S3.BucketName != "runner" || len(r.Environment) != 1 || r.SystemID == "" {
+		r.Cache.S3.BucketName != "runner" || len(r.Environment) != 1+len(cacheCompression) || r.Environment[0] != "A=b" || r.SystemID == "" {
 		t.Errorf("config.toml runner lost settings: %+v", r)
 	}
 	p := l.mr.executorProviders.GetByName(executorName).(*provider)
@@ -241,5 +241,18 @@ func TestAFullHostRequestsNoJob(t *testing.T) {
 	}
 	if n := vms.reserves.Load(); n != int32(len(classes())) || net.requests.Load() != 0 {
 		t.Fatalf("%d reservations tried, %d job requests; want every class, 0", n, net.requests.Load())
+	}
+}
+
+func TestCacheCompressionDefaults(t *testing.T) {
+	got := withCacheCompression(nil)
+	if strings.Join(got, " ") != strings.Join(cacheCompression, " ") {
+		t.Fatalf("empty environment: %v", got)
+	}
+	// The runner's own value stays, the others are added.
+	got = withCacheCompression([]string{"CACHE_COMPRESSION_LEVEL=slowest", "FOO=1"})
+	want := "CACHE_COMPRESSION_LEVEL=slowest FOO=1 FF_USE_FASTZIP=true CACHE_COMPRESSION_FORMAT=zipzstd"
+	if strings.Join(got, " ") != want {
+		t.Fatalf("got %v, want %s", got, want)
 	}
 }

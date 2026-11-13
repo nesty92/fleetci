@@ -97,6 +97,9 @@ check_interval = 3
   url = {{q .URL}}
   token = {{q .Token}}
   executor = "docker-autoscaler"
+  # Cache archives: fastzip, zstd inside the zip at its fast level, which
+  # save and restore faster than the default zip. A job's variables win.
+  environment = ["FF_USE_FASTZIP=true", "CACHE_COMPRESSION_FORMAT=zipzstd", "CACHE_COMPRESSION_LEVEL=fast"]
   [runners.docker]
     image = {{q .Image}}
   [runners.autoscaler]

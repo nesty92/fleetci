@@ -224,6 +224,14 @@ On GitHub, the same tools' `setup-*` actions with `cache:` set, or
   are on, whatever filled it, jobs run without a cache disk and nothing
   is copied or flattened until there is room again. The caches already
   there are kept: deleting them wouldn't free what something else took.
+- **Compression (GitLab).** fleetci's runners zip caches with fastzip and
+  zstd inside the zip at its fast level (`FF_USE_FASTZIP=true`,
+  `CACHE_COMPRESSION_FORMAT=zipzstd`, `CACHE_COMPRESSION_LEVEL=fast`),
+  which save and restore faster than the default zip (see
+  [measurements](measurements.md)). `fleetci runner-config` writes them
+  into config.toml; a runner's own `environment` or a job's variables
+  win. GitHub's actions/cache uses zstd, which fleetci lends to job
+  containers.
 - **Emptying a cache.** Change the `cache:` key, as without fleetci.
 
 ## Who writes the shared caches
