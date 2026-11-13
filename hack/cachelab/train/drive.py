@@ -13,8 +13,8 @@ pushed to main, when it passes and the car ahead has merged; main's
 pipeline then runs on it. A car that fails stops the train.
 
 Each job gets a class its size, as a project would pick: the Go tests
-4 vCPUs and 4 GB, the web build 2 vCPUs and 3 GB (its Next.js build runs
-out of memory in 2 GB). In "cache" mode the classes have cache disks; in
+4 vCPUs and 4 GB, the web build 2 vCPUs and 4 GB (its Next.js build runs
+out of memory in 3 GB). In "cache" mode the classes have cache disks; in
 "plain" mode (the classes ending in -nodisk) they don't, and the jobs'
 caches come only from GitHub's cache or the runner's S3.
 Each job's timings and cache lines go to <out>/<run>.jsonl.
@@ -36,7 +36,7 @@ WEB = ["c2f8235e1f3ea903ad8b7f61447c4f74164b5c58", "e1e1075a451359f82e155d29ba74
        "31b5487f62540d4b74f2d3114918c0ebe28f8a12", "a8989b522fa3672a2ae52f053105e40993b36ca1"]
 GH = "WireZone/fleetci-playground"
 GL = "Nesty92%2Ffleetci-playground"
-CLASSES = {"go": "4vcpu-4gb", "web": "2vcpu-3gb"}
+CLASSES = {"go": "4vcpu-4gb", "web": "2vcpu-4gb"}
 REMOTE = {"github": "git@github.com:WireZone/fleetci-playground.git",
           "gitlab": "https://gitlab.com/Nesty92/fleetci-playground.git"}
 STAMP = re.compile(r"^20\d\d-\d\d-\d\dT[\d:.]+Z (\d\d[OE]\+? )?")
