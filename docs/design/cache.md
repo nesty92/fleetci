@@ -189,3 +189,7 @@ the next run, on fresh disks, restored them from the bucket (200 MB in
 - GitLab's side: a setting that turns the cache behind the disk off, and
   uploading after the job from the node (the runner uploads it during the
   job now).
+- GitLab's `cache:` from the disk: in the merge train, gitlab-runner
+  downloaded each job's cache from S3 even when the car's disk, started
+  from main's, held it, so the disk saved image pulls but not the
+  download.

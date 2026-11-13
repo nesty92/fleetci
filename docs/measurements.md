@@ -413,40 +413,48 @@ worker, and missed. A download from GitHub's cache in 8 MiB ranges, 8 at a
 time, took 16.6 s for the 200 MB archive, against 14–16 s for one stream:
 the host's internet link was the limit.
 
-### A merge train on GitHub
+### A merge train on both forges
 
-A merge queue played on WireZone/fleetci-playground, whose plan has none
+A merge queue played on both playgrounds, whose plans have none
 ([hack/cachelab/train/drive.py](../hack/cachelab/train/drive.py)): main
 gets a base commit, then 5 cars, 2 at once, each a commit on the car
 ahead pushed to `train/<run>/car-<n>`. A car merges, pushed to main, when
-it passes and the car ahead has merged, and main's workflow runs on it.
+it passes and the car ahead has merged, and main's pipeline runs on it.
 Each car and each main commit runs two jobs, Go (vet and tests of fleetci)
 in `golang:1.27` and Next.js (install, lint, build of vercel/chatbot) in
-`node:24`, each keeping its tools' caches with `actions/cache` as a
-project would: about 990 MB for Go, 230–480 MB for web. The same fleet of
-a controller and two nodes, run one job at a time, so a train's length is
-the sum of its jobs; 22 jobs a train, with main's base.
+`node:24`, each keeping its tools' caches as a project would: with
+`actions/cache` on GitHub, `cache:` on GitLab; about 990 MB for Go,
+230–480 MB for web. The same fleet of a controller and two nodes, a VM of
+4 CPUs and 6 GB each; 22 jobs a train with main's base. GitLab's runner
+takes up to 2 jobs at once, its cache in the lab's S3 (RustFS).
 
-| | `fleetci-plain`, no cache disk | Cache disk, `cache_store = "github"` | Cache disk, `cache_store = "bucket"` |
-| --- | --- | --- | --- |
-| 5 cars merged | 3511 s | 2763 s (−21%) | 2292 s (−35%) |
-| Main's workflows done | 4360 s | 3316 s | 2810 s |
-| Job time after main's base | 4031 s | 3020 s | 2207 s (−45%) |
-| Go job, mean wall time on cars | 293 s | 187 s | 130 s |
-| Web job, mean wall time on cars | 150 s | 108 s | 90 s |
-| Restore of Go's 986 MB, from elsewhere | from GitHub's cache, not timed | 66–76 s from GitHub's cache | 2.1–3.1 s from the bucket |
+| | 5 cars merged | Main done | Job time¹ | Go job² | Web job² |
+| --- | --- | --- | --- | --- | --- |
+| GitHub, no cache disk | 1677 s | 2153 s | 3748 s | 245 s | 135 s |
+| GitHub, disk + GitHub's cache | 1443 s (−14%) | 1886 s | 3157 s (−16%) | 220 s | 106 s |
+| GitHub, disk + bucket | 1009 s (−40%) | 1412 s | 2244 s (−40%) | 140 s | 89 s |
+| GitLab, S3 only | 728 s | 878 s | 2197 s | 95 s | 132 s |
+| GitLab, disk + S3 | 682 s (−6%) | 812 s | 1543 s (−30%) | 67 s³ | 108 s³ |
 
-The jobs' own steps took the same in all three (Go 6–50 s, web 33–42 s:
-Go's tests reuse the results of packages a commit didn't touch); the rest
-of a job is its VM, image pull, checkout and the cache's restore and save.
-With the cache disk, an entry the job's disk had was restored in about a
-second either way. Every job had a disk of its own, so most of them
-restored from the store behind it: GitHub's cache over the host's
-internet link, or the bucket, here RustFS on the same host as the nodes.
-That is the best case for a bucket; one in the nodes' own region or
-network is the case it's for. After each job the node uploaded its saves
-to the bucket: 28 uploads in this train and the workflow before it, none
-failed.
+¹ Every job's wall time after main's base, added up. ² Mean wall time on
+the cars. ³ Over 3 cars: the driver lost the job records of cars 2 and 5,
+whose pipelines passed.
 
-`fleetci-plain` jobs restore and save with GitHub's cache itself, as on
-GitHub's own runners.
+The jobs' own steps took about the same each way (Go 5–50 s: its tests
+reuse the results of packages a commit didn't touch; web 37–42 s); the
+rest of a job is its VM, image pull, checkout and the cache's restore and
+save. On GitHub, 13 restores of the 20 came from the job's own disk; the
+others downloaded Go's 986 MB from the store behind it, in 62–84 s from
+GitHub's cache over the host's internet link and in 2.3–2.9 s from the
+bucket, here on the same host as the nodes: the best case for a bucket,
+whose case is one in the nodes' own network or region. After each job
+the node uploaded its saves to the bucket, none failed. On GitLab, a car's
+disk starts from main's; gitlab-runner still downloaded each job's
+`cache:` from S3 as well, so the disk saved image pulls and the work in
+the VM but not the download: making the disk GitLab's local copy is open
+([design](design/cache.md)).
+
+All 115 VMs were ready under 10 s after their restore. Before fleetci's
+nodes claimed their VM subnets, the lab's two nodes, sharing one network
+namespace, picked the same ones and dialed each other's VMs: 24–252 s to
+ready, and a GitLab job failed when its three SSH tries were reset.
