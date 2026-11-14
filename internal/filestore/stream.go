@@ -196,4 +196,3 @@ func (t *tarFramer) end() error {
 	_, err := t.w.Write(enc.EncodeAll(t.buf.Bytes(), nil))
 	return err
 }
-

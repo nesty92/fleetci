@@ -6,10 +6,12 @@
 // The entries are given in the order they were saved, and can be named
 // pipes filled from the bucket. For each, as a job would:
 //
-//   - archive restore: the entry is unpacked into a folder (download,
-//     zstd and tar, streamed);
+//   - the entry is unpacked into a folder, untimed: its source may have
+//     been read ahead;
 //   - archive save: the folder is packed again with tar and zstd -T0 into a
 //     file and uploaded whole, as actions/cache does;
+//   - archive restore: that archive is downloaded from the bucket in 8 MiB
+//     ranges, 8 at a time, and unpacked into an empty folder as it comes;
 //   - store save: the folder is saved into the store, knowing the last
 //     save's snapshot, as the node does;
 //   - cold restore: a store that has read nothing restores it into an
@@ -93,19 +95,31 @@ func main() {
 		cur := filepath.Join(*work, fmt.Sprintf("e%03d", i))
 		must(os.RemoveAll(cur))
 
-		t := time.Now()
+		// The entry as the job left it; its source may be read ahead, so
+		// this is not timed.
 		n, err := unpack(path, cur)
 		if err != nil {
 			fail(fmt.Errorf("%s: %w", path, err))
 		}
-		r.ArchiveBytes, r.ArchiveRestore = n, time.Since(t).Seconds()
+		r.ArchiveBytes = n
 
-		t = time.Now()
+		t := time.Now()
 		r.ArchiveSaveBytes, err = archiveSave(ctx, b, client, cur, *prefix+"-archives/last", *work)
 		if err != nil {
 			fail(err)
 		}
 		r.ArchiveSave = time.Since(t).Seconds()
+
+		// Restoring the archive just saved, from the bucket into an empty
+		// folder: downloaded in 8 MiB ranges, 8 at a time, as actions/cache
+		// downloads, and unpacked as it comes.
+		arch := filepath.Join(*work, "arch")
+		t = time.Now()
+		if err := archiveRestore(ctx, remote, *prefix+"-archives/last", r.ArchiveSaveBytes, arch); err != nil {
+			fail(fmt.Errorf("archive restore %d: %w", i, err))
+		}
+		r.ArchiveRestore = time.Since(t).Seconds()
+		must(os.RemoveAll(arch))
 
 		snap, st, err := s.Save(ctx, cur, fmt.Sprintf("%03d", i), prevSnap)
 		if err != nil {
@@ -234,6 +248,67 @@ func (c *countW) Write(p []byte) (int, error) {
 	return n, err
 }
 
+// archiveRestore downloads the object name, size bytes long, in ranges
+// of 8 MiB, 8 at a time, and unpacks it into dir in order as they come.
+func archiveRestore(ctx context.Context, r filestore.Remote, name string, size int64, dir string) error {
+	const part, par = 8 << 20, 8
+	n := int((size + part - 1) / part)
+	parts := make([]chan []byte, n)
+	for i := range parts {
+		parts[i] = make(chan []byte, 1)
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	errc := make(chan error, 1)
+	sem := make(chan struct{}, par)
+	go func() {
+		for i := range n {
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			go func() {
+				off := int64(i) * part
+				b, err := r.Get(ctx, name, off, min(part, size-off))
+				if err != nil {
+					select {
+					case errc <- err:
+					default:
+					}
+					cancel()
+					return
+				}
+				parts[i] <- b
+			}()
+		}
+	}()
+	pr, pw := io.Pipe()
+	go func() {
+		for i := range n {
+			select {
+			case b := <-parts[i]:
+				<-sem
+				if _, err := pw.Write(b); err != nil {
+					return
+				}
+			case <-ctx.Done():
+				select {
+				case err := <-errc:
+					pw.CloseWithError(err)
+				default:
+					pw.CloseWithError(ctx.Err())
+				}
+				return
+			}
+		}
+		pw.Close()
+	}()
+	_, err := unpackR(pr, dir)
+	pr.Close()
+	return err
+}
+
 // unpack streams a tar.zst into dir, and says how many bytes it read.
 func unpack(path, dir string) (int64, error) {
 	f, err := os.Open(path)
@@ -241,6 +316,10 @@ func unpack(path, dir string) (int64, error) {
 		return 0, err
 	}
 	defer f.Close()
+	return unpackR(f, dir)
+}
+
+func unpackR(f io.Reader, dir string) (int64, error) {
 	c := &counter{r: f}
 	d, err := zstd.NewReader(c, zstd.WithDecoderMaxWindow(1<<31))
 	if err != nil {

@@ -84,11 +84,20 @@ type listed struct {
 	Tree  string      `json:"d,omitempty"`
 }
 
-// snapObj is a snapshot's object.
+// snapObj is a snapshot's object. Trees is where its folders' listings
+// are: they are packed apart from files, as restic packs trees, so a
+// restore reads them all at once instead of a folder level at a time.
 type snapObj struct {
-	Root  string `json:"root"`
-	Files int    `json:"files"`
-	Bytes int64  `json:"bytes"`
+	Root  string     `json:"root"`
+	Files int        `json:"files"`
+	Bytes int64      `json:"bytes"`
+	Trees []treeSpan `json:"trees,omitempty"`
+}
+
+// treeSpan is a run of listings' frames in a pack of listings.
+type treeSpan struct {
+	Pack     string `json:"pack"`
+	Off, End int64
 }
 
 // Snapshot is one save.
@@ -235,6 +244,7 @@ func (s *Store) Save(ctx context.Context, root, name string, prev *Snapshot) (*S
 	}
 
 	p := newPacker(ctx, s, &st)
+	tp := newPacker(ctx, s, &st) // listings, in packs of their own
 	// pending is the hashes being packed by this save, so two paths with
 	// one content pack it once.
 	var pmu sync.Mutex
@@ -284,14 +294,23 @@ func (s *Store) Save(ctx context.Context, root, name string, prev *Snapshot) (*S
 		p.abort()
 		return nil, st, err
 	}
-	top, err := s.trees(snap, p, &pmu, pending)
+	top, lists, err := s.trees(snap, tp, &pmu, pending)
 	if err != nil {
 		p.abort()
+		tp.abort()
 		return nil, st, err
 	}
 	written, err := p.close()
 	if err != nil {
+		tp.abort()
 		return nil, st, err
+	}
+	wt, err := tp.close()
+	if err != nil {
+		return nil, st, err
+	}
+	for h, w := range wt {
+		written[h] = w
 	}
 	// The index, then the snapshot: a snapshot never names a file no index
 	// has.
@@ -306,7 +325,21 @@ func (s *Store) Save(ctx context.Context, root, name string, prev *Snapshot) (*S
 		s.loaded[n] = true
 		s.mu.Unlock()
 	}
-	b, _ := json.Marshal(snapObj{Root: top, Files: st.Files, Bytes: st.Bytes})
+	o := snapObj{Root: top, Files: st.Files, Bytes: st.Bytes}
+	byPack := map[string][]string{}
+	for _, h := range lists {
+		byPack[s.where(h).Pack] = append(byPack[s.where(h).Pack], h)
+	}
+	for pack, hs := range byPack {
+		for _, rg := range s.ranges(hs) {
+			o.Trees = append(o.Trees, treeSpan{Pack: pack, Off: rg.off, End: rg.end})
+		}
+	}
+	sort.Slice(o.Trees, func(i, j int) bool {
+		a, b := o.Trees[i], o.Trees[j]
+		return a.Pack < b.Pack || a.Pack == b.Pack && a.Off < b.Off
+	})
+	b, _ := json.Marshal(o)
 	if err := s.put(ctx, s.prefix+"snaps/"+name, b, &st); err != nil {
 		return nil, st, err
 	}
@@ -337,8 +370,9 @@ func codecs() {
 }
 
 // trees packs the listing of every folder of snap whose listing no
-// earlier save uploaded, deepest first, and says the root's hash.
-func (s *Store) trees(snap *Snapshot, p *packer, pmu *sync.Mutex, pending map[string]bool) (string, error) {
+// earlier save uploaded, deepest first, and says the root's hash and the
+// hashes of all its listings.
+func (s *Store) trees(snap *Snapshot, p *packer, pmu *sync.Mutex, pending map[string]bool) (string, []string, error) {
 	kids := map[string][]*Entry{} // by the folder's path; "" is the root
 	for i := range snap.Entries {
 		e := &snap.Entries[i]
@@ -377,14 +411,24 @@ func (s *Store) trees(snap *Snapshot, p *packer, pmu *sync.Mutex, pending map[st
 		}
 		return h, nil
 	}
+	var all []string
+	seen := map[string]bool{}
 	for _, d := range dirs {
 		h, err := hashOf(d)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		byPath[d].Tree = h
+		if !seen[h] {
+			seen[h] = true
+			all = append(all, h)
+		}
 	}
-	return hashOf("")
+	h, err := hashOf("")
+	if err == nil && !seen[h] {
+		all = append(all, h)
+	}
+	return h, all, err
 }
 
 func parent(p string) string {
@@ -398,17 +442,29 @@ func parent(p string) string {
 func depth(p string) int { return strings.Count(p, "/") }
 
 // Snap reads the snapshot name: its object, then its folders' listings,
-// a level at a time.
+// all at once from the spans the object names, while the index loads for
+// the restore that follows. A listing the spans lack is fetched a folder
+// level at a time.
 func (s *Store) Snap(ctx context.Context, name string, st *Stats) (*Snapshot, error) {
 	codecs()
 	b, err := s.r.Get(ctx, s.prefix+"snaps/"+name, 0, -1)
 	if err != nil {
 		return nil, err
 	}
-	st.Get++
-	st.GetBytes += int64(len(b))
+	atomic.AddInt64(&st.Get, 1)
+	atomic.AddInt64(&st.GetBytes, int64(len(b)))
 	var o snapObj
 	if err := json.Unmarshal(b, &o); err != nil {
+		return nil, err
+	}
+	loaded := make(chan error, 1)
+	go func() { loaded <- s.Load(ctx, st) }()
+	got, err := s.listings(ctx, o.Trees, st)
+	if err != nil {
+		<-loaded
+		return nil, err
+	}
+	if err := <-loaded; err != nil {
 		return nil, err
 	}
 	snap := &Snapshot{}
@@ -420,7 +476,7 @@ func (s *Store) Snap(ctx context.Context, name string, st *Stats) (*Snapshot, er
 		}
 		var mu sync.Mutex
 		next := map[string][]string{}
-		err := s.fetch(ctx, hs, st, func(h string, raw []byte) error {
+		each := func(h string, raw []byte) error {
 			var l listing
 			if err := json.Unmarshal(raw, &l); err != nil {
 				return fmt.Errorf("listing %s: %w", h, err)
@@ -440,8 +496,18 @@ func (s *Store) Snap(ctx context.Context, name string, st *Stats) (*Snapshot, er
 				}
 			}
 			return nil
-		})
-		if err != nil {
+		}
+		var missing []string
+		for _, h := range hs {
+			if raw, ok := got[h]; ok {
+				if err := each(h, raw); err != nil {
+					return nil, err
+				}
+			} else {
+				missing = append(missing, h)
+			}
+		}
+		if err := s.fetch(ctx, missing, st, each); err != nil {
 			return nil, err
 		}
 		level = next
@@ -449,6 +515,43 @@ func (s *Store) Snap(ctx context.Context, name string, st *Stats) (*Snapshot, er
 	// Parents before children, as a walk lists them.
 	sort.Slice(snap.Entries, func(i, j int) bool { return snap.Entries[i].Path < snap.Entries[j].Path })
 	return snap, nil
+}
+
+// listings reads spans of listings' frames in parallel and says each
+// listing by its hash, as computed from its bytes: a frame that does not
+// match what a folder names is never used.
+func (s *Store) listings(ctx context.Context, spans []treeSpan, st *Stats) (map[string][]byte, error) {
+	got := map[string][]byte{}
+	var mu sync.Mutex
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(Workers * 2)
+	for _, sp := range spans {
+		g.Go(func() error {
+			b, err := s.r.Get(gctx, sp.Pack, sp.Off, sp.End-sp.Off)
+			if err != nil {
+				return err
+			}
+			atomic.AddInt64(&st.Get, 1)
+			atomic.AddInt64(&st.GetBytes, int64(len(b)))
+			raw, err := dec.DecodeAll(b, nil) // its frames, one after another
+			if err != nil {
+				return fmt.Errorf("listings in %s: %w", sp.Pack, err)
+			}
+			d := json.NewDecoder(bytes.NewReader(raw))
+			for d.More() {
+				var m json.RawMessage
+				if err := d.Decode(&m); err != nil {
+					return fmt.Errorf("listings in %s: %w", sp.Pack, err)
+				}
+				sum := sha256.Sum256(m)
+				mu.Lock()
+				got[hex.EncodeToString(sum[:])] = m
+				mu.Unlock()
+			}
+			return nil
+		})
+	}
+	return got, g.Wait()
 }
 
 // fetch reads the blobs hs from their packs, a range per run of nearby
