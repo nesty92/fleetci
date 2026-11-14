@@ -55,7 +55,7 @@ STAMP = re.compile(r"^20\d\d-\d\d-\d\dT[\d:.]+Z (\d\d[OE]\+? )?")
 SECTION = re.compile(r"section_(start|end):(\d+):([\w.-]+)")
 KEEP = ("TRAIN ", "Cache disk", "Cache restored", "Cache not found", "Cache saved", "Cache Size",
         "Downloading cache", "Successfully extracted", "No URL provided", "Uploading cache", "Created cache",
-        "Checking cache", "No cache disk")
+        "Checking cache", "No cache disk", "fleetci cache", "internal error has occurred in cache")
 
 
 def sh(*args, check=True, tries=1):
@@ -109,7 +109,9 @@ class Load:
             g.write(f.read())
         cache = self.mode != "nocache"
         if self.forge == "github":
-            src, dst = "load.yml", ".github/workflows/load.yml"
+            # LOAD_CONTAINER=1: the jobs in containers, not the common case.
+            src = "load-container.yml" if os.environ.get("LOAD_CONTAINER") == "1" else "load.yml"
+            dst = ".github/workflows/load.yml"
             fill = {"@LABEL_GO@": "fleetci-" + self.cls("go"), "@LABEL_WEB@": "fleetci-" + self.cls("web"),
                     "@CACHE@": "true" if cache else "false"}
         else:
@@ -157,6 +159,7 @@ class Load:
             js = (api("github", f"repos/{GH}/actions/runs/{p['id']}/jobs") or {}).get("jobs", [])
         else:
             js = api("gitlab", f"projects/{GL}/pipelines/{p['id']}/jobs") or []
+        seen = []
         for j in js:
             phases = {}
             if self.forge == "github":
@@ -186,19 +189,29 @@ class Load:
                    "job": j["name"], "ok": ok, "runner": runner, "created": created, "started": started, "ended": ended,
                    "queued": started - created if created and started else None,
                    "wall": ended - started if started and ended else None, "phases": phases, "lines": lines}
+            seen.append(rec)
             self.out.write(json.dumps(rec) + "\n")
             self.out.flush()
             train = [l for l in lines if l.startswith("TRAIN ")]
             q = f"{rec['queued']:.0f}s" if rec["queued"] is not None else "?"
             log(f"  {kind} {n} {j['name']}: queued {q}, {train[-1][:150] if train else 'no TRAIN line'}")
         if js and not self.checked:
-            self.check_store()
+            self.check_store(seen)
 
-    def check_store(self):
-        """After the first jobs: their caches went where the run says."""
+    def check_store(self, recs):
+        """After the first jobs: their caches went where the run says.
+        Each job's cache server must have had its cache steps' calls, and
+        GitHub's cache must have this run's caches only when it's the store."""
         self.checked = True
         if self.forge != "github" or not EXPECT:
             return
+        for rec in recs:
+            said = [l for l in rec["lines"] if l.startswith("fleetci cache:") or "internal error has occurred in cache" in l]
+            if self.mode != "nocache" and EXPECT == "bucket" and (
+                    not any(l.startswith("fleetci cache:") and "no actions/cache calls" not in l for l in said)
+                    or any("internal error" in l for l in said)):
+                raise SystemExit(f"wrong setup: {rec['job']}'s cache steps didn't reach the VM's cache server: "
+                                 + " | ".join(said or ["no fleetci cache line"]))
         on_github = (api("github", f"repos/{GH}/actions/caches?key=load-{self.run}-") or {}).get("total_count", 0)
         want = {"github": self.mode != "nocache", "bucket": False}[EXPECT]
         if bool(on_github) != want:

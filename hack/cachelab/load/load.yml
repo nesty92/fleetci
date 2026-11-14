@@ -1,0 +1,44 @@
+# A pull request's pipeline, or main's once it merges (load.py commits it
+# with @LABEL_GO@, @LABEL_WEB@, @RUN@ and @CACHE@ filled in). The steps run
+# on the VM, as most workflows' do, with the toolchains from setup-go and
+# setup-node. Each job keeps its tools' caches with actions/cache, as a
+# project would, unless @CACHE@ is false. The setup actions' own caches stay
+# off: they key on lockfiles the job only fetches later, and the job's
+# actions/cache keeps the same files.
+# load-container.yml is the same pipeline in job containers.
+name: load
+on:
+  push:
+    branches: [main, "load/**"]
+jobs:
+  go:
+    runs-on: @LABEL_GO@
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: false
+      - uses: actions/cache@v4
+        if: @CACHE@
+        with:
+          path: .tcache
+          key: load-@RUN@-go-${{ github.sha }}
+          restore-keys: load-@RUN@-go-
+      - run: sh ci/job.sh go
+  web:
+    runs-on: @LABEL_WEB@
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: actions/cache@v4
+        if: @CACHE@
+        with:
+          path: .tcache
+          key: load-@RUN@-web-${{ github.sha }}
+          restore-keys: load-@RUN@-web-
+      - run: sh ci/job.sh web
