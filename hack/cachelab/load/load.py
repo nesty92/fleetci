@@ -7,7 +7,8 @@ time of each of its phases, at percentiles, not one end-to-end number.
 
 Main first gets a base commit and its pipeline, which fills main's caches.
 Then a pull request arrives every <every> seconds on average (default 150,
-at random, as arrivals are: a Poisson process with a fixed seed), <prs> of
+at random, as arrivals are: a Poisson process seeded with the run's name,
+or LOAD_SEED to replay another run's arrivals), <prs> of
 them (default 20). Each is a commit of the next of 40 real consecutive
 commits of fleetci (the Go job: go vet, go test -race) and of
 vercel/chatbot (the web job: pnpm install, checks, next build), pushed to
@@ -224,7 +225,8 @@ class Load:
             else:
                 time.sleep(15)
         self.metrics("metrics-start")
-        rng = random.Random(self.run)
+        # LOAD_SEED replays another run's arrivals, so their queues compare.
+        rng = random.Random(os.environ.get("LOAD_SEED") or self.run)
         t, at = time.time(), []
         for _ in range(self.prs):
             t += rng.expovariate(1 / self.every)
