@@ -15,6 +15,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -23,6 +24,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
 	"github.com/nesty92/fleetci/internal/cachebucket"
 	"github.com/nesty92/fleetci/internal/filestore"
 	"gitlab.com/gitlab-org/gitlab-runner/cache/cacheconfig"
@@ -34,7 +36,12 @@ func main() {
 	n := flag.Int("n", 3, "times each path runs")
 	prof := flag.String("prof", "", "a folder for CPU profiles, one per path")
 	only := flag.String("only", "", "run only these paths, comma-separated (save,resave,cold,warm,stock)")
+	keep := flag.String("keep", "", "the null path also writes its stream to this file")
+	level := flag.Int("level", 0, "zstd level for the files, 1 (fastest) to 4 (best); 0 keeps the store's")
 	flag.Parse()
+	if *level != 0 {
+		filestore.Level = zstd.EncoderLevel(*level)
+	}
 	if flag.NArg() != 1 || *work == "" {
 		flag.Usage()
 		os.Exit(2)
@@ -138,8 +145,29 @@ func main() {
 		must(serr)
 		return fmt.Sprintf("%.0fM in %d gets", mb(st.GetBytes), st.Get)
 	})
+	// The stream alone, into nothing: what the stock path costs before tar.
+	run("null", nil, func(int) string {
+		s := filestore.New(remote, base)
+		var st filestore.Stats
+		sn, err := s.Snap(ctx, "s", &st)
+		must(err)
+		var c countW
+		var w io.Writer = &c
+		if *keep != "" {
+			f, err := os.Create(*keep)
+			must(err)
+			defer f.Close()
+			w = io.MultiWriter(&c, f)
+		}
+		must(s.Stream(ctx, sn, w, &st))
+		return fmt.Sprintf("%.0fM out in %d writes", mb(c.n), c.w)
+	})
 	must(rmrf(dst))
 }
+
+type countW struct{ n, w int64 }
+
+func (c *countW) Write(b []byte) (int, error) { c.n += int64(len(b)); c.w++; return len(b), nil }
 
 func startProf(dir, name string, i int) func() {
 	if dir == "" {

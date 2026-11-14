@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"io/fs"
 	"sort"
@@ -75,15 +76,27 @@ func (s *Store) Stream(ctx context.Context, snap *Snapshot, w io.Writer, st *Sta
 		byPack[p] = append(byPack[p], h)
 	}
 	sort.Strings(packs)
+	// Each range is turned into its part of the stream, headers framed
+	// and files' frames after them, by the goroutine that read it, so the
+	// framing runs on every CPU and the writer only writes, once a range.
+	// The padding a range starts with is its previous file's, known from
+	// the sizes before anything is read.
 	type job struct {
 		pack string
 		sp   span
+		pad  int64
 		done chan []byte
 	}
 	var jobs []*job
+	var pad int64
 	for _, p := range packs {
 		for _, sp := range s.ranges(byPack[p]) {
-			jobs = append(jobs, &job{pack: p, sp: sp, done: make(chan []byte, 1)})
+			jobs = append(jobs, &job{pack: p, sp: sp, pad: pad, done: make(chan []byte, 1)})
+			for _, h := range sp.hs {
+				if es := paths[h]; len(es) > 0 {
+					pad = (512 - es[len(es)-1].Size%512) % 512
+				}
+			}
 		}
 	}
 	g, gctx := errgroup.WithContext(ctx)
@@ -101,7 +114,36 @@ func (s *Store) Stream(ctx context.Context, snap *Snapshot, w io.Writer, st *Sta
 					return err
 				}
 				st.addGet(len(b))
-				j.done <- b
+				var out bytes.Buffer
+				out.Grow(len(b) + len(j.sp.hs)*128)
+				jt := &tarFramer{w: &out, pad: j.pad}
+				for _, h := range j.sp.hs {
+					wh := s.where(h)
+					frame := b[wh.Off-j.sp.off : wh.Off-j.sp.off+wh.Len]
+					var raw []byte // a small file's content, once for its paths
+					for _, e := range paths[h] {
+						jt.add(e, e.Mode.Perm())
+						if e.Size <= smallFile {
+							// Into the frame being gathered: a frame each
+							// would cost the reader more than the file.
+							if raw == nil {
+								if raw, err = dec.DecodeAll(frame, make([]byte, 0, e.Size)); err != nil {
+									return fmt.Errorf("blob %s: %w", h, err)
+								}
+							}
+							jt.buf.Write(raw)
+						} else {
+							_ = jt.flush() // into out, which never fails
+							out.Write(frame)
+						}
+						jt.pad = (512 - e.Size%512) % 512
+						if jt.buf.Len() >= groupFrame {
+							_ = jt.flush()
+						}
+					}
+				}
+				_ = jt.flush()
+				j.done <- out.Bytes()
 				return nil
 			})
 		}
@@ -115,18 +157,11 @@ func (s *Store) Stream(ctx context.Context, snap *Snapshot, w io.Writer, st *Sta
 			case <-gctx.Done():
 				return gctx.Err()
 			}
+			if _, err := w.Write(b); err != nil {
+				return err
+			}
 			for _, h := range j.sp.hs {
-				wh := s.where(h)
-				frame := b[wh.Off-j.sp.off : wh.Off-j.sp.off+wh.Len]
 				for _, e := range paths[h] {
-					tw.add(e, e.Mode.Perm())
-					if err := tw.flush(); err != nil {
-						return err
-					}
-					if _, err := w.Write(frame); err != nil {
-						return err
-					}
-					tw.pad = (512 - e.Size%512) % 512
 					st.Files++
 					st.Bytes += e.Size
 				}
@@ -138,6 +173,7 @@ func (s *Store) Stream(ctx context.Context, snap *Snapshot, w io.Writer, st *Sta
 	if err := g.Wait(); err != nil {
 		return err
 	}
+	tw.pad = pad
 	for i := len(dirs) - 1; i >= 0; i-- {
 		tw.add(dirs[i], dirs[i].Mode.Perm())
 	}
@@ -165,8 +201,8 @@ func (s *Store) fetchIndex(ctx context.Context, hs []string, st *Stats) error {
 	return s.Load(ctx, st)
 }
 
-// tarFramer writes tar headers, each in a zstd frame of its own with the
-// padding of the file before it.
+// tarFramer frames tar headers, with the padding of the file before them
+// and any small files' contents between them.
 type tarFramer struct {
 	w   io.Writer
 	pad int64
@@ -175,6 +211,15 @@ type tarFramer struct {
 }
 
 var zeros [1024]byte
+
+// A file of smallFile bytes or fewer is not copied as its own frame but
+// framed again with the headers and files around it, up to groupFrame of
+// them: unzstd sets up for every frame, and a cache of small files would
+// be more frames than content. Larger files' frames are copied as stored.
+const (
+	smallFile  = 64 << 10
+	groupFrame = 1 << 20
+)
 
 // add puts e's header, with mode, after what is held; flush frames it.
 // Headers in a row share a frame.

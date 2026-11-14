@@ -24,8 +24,18 @@ func (l Linked) client() *http.Client {
 	if l.C != nil {
 		return l.C
 	}
-	return http.DefaultClient
+	return defaultClient
 }
+
+// defaultClient keeps a connection for each read a store makes at once:
+// http.DefaultClient keeps 2 to a host, and every other read would open a
+// new one, a TLS handshake each against a real bucket.
+var defaultClient = &http.Client{Transport: &http.Transport{
+	Proxy:               http.ProxyFromEnvironment,
+	MaxIdleConnsPerHost: 256,
+	IdleConnTimeout:     90 * time.Second,
+	ForceAttemptHTTP2:   true,
+}}
 
 func (l Linked) List(ctx context.Context, prefix string) ([]string, error) {
 	objs, err := l.B.List(ctx, prefix)
@@ -91,6 +101,12 @@ func (l Linked) do(req *http.Request, body *[]byte) error {
 	if body == nil {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		return nil
+	}
+	if n := resp.ContentLength; n >= 0 {
+		// One buffer of the right size, not ReadAll's doublings.
+		*body = make([]byte, n)
+		_, err = io.ReadFull(resp.Body, *body)
+		return err
 	}
 	*body, err = io.ReadAll(resp.Body)
 	return err
