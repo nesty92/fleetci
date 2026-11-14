@@ -154,7 +154,7 @@ class Load:
         for j in js:
             phases = {}
             if self.forge == "github":
-                text = sh("gh", "api", f"repos/{GH}/actions/jobs/{j['id']}/logs", check=False)
+                text = sh("gh", "api", "--allow-escape-sequences", f"repos/{GH}/actions/jobs/{j['id']}/logs", check=False).lstrip("\ufeff")
                 created, started, ended = ts(j.get("created_at")), ts(j.get("started_at")), ts(j.get("completed_at"))
                 for st in j.get("steps") or []:
                     a, b = ts(st.get("started_at")), ts(st.get("completed_at"))
