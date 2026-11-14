@@ -584,6 +584,15 @@ each commit (Next.js's build cache, as the store of packages changes
 less); Go's is 3.4 GB, of which about a fifth is new. That is bucket
 traffic and storage; the jobs' own time is in the packing.
 
+Kept by whole files instead, each file known by its content's hash and
+uploaded once (`cdcstat -files`, over the 72 entries of the run below that
+kept folders on the disk), a store would upload 4% of saving whole for web
+(395 MB of 11.1 GB) and 6% for Go (1.0 GB of 18.7 GB). Chunking the files
+themselves comes to the same, 401 MB and 1.04 GB: what changes between two
+saves is whole files. Chunking the tar does worse because each file's
+header carries its time, which every save changes, and spoils the chunks
+around it.
+
 ### Folders on the disk, not archives
 
 The same load (20 PRs every 150 s, same arrivals), bucket and disk, with
@@ -608,3 +617,16 @@ the folder in once. `pnpm install` is slower: pnpm hard-links its store
 into `node_modules`, and Linux doesn't link across mount points, so from
 a mounted store it copies each file. `next build` was 55 s against 67 s,
 with no packing on the CPUs the VMs share.
+
+### Seeing a job: poll or webhook
+
+How long a GitHub job waits before fleetci sees it, from GitHub creating it
+to fleetci's controller placing it, on the lab and the steady load above.
+Polling asks every 10 s; the webhook is GitHub's `workflow_job`, delivered
+to the controller by `gh webhook forward`, with polling at 5 minutes behind
+it. One run of each, November 2026.
+
+| | jobs | mean |
+|---|---|---|
+| poll, every 10 s | 69 | 8.8 s |
+| webhook | 24 | 1.8 s |

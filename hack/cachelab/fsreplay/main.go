@@ -101,7 +101,7 @@ func main() {
 		r.ArchiveBytes, r.ArchiveRestore = n, time.Since(t).Seconds()
 
 		t = time.Now()
-		r.ArchiveSaveBytes, err = archiveSave(ctx, b, client, cur, fmt.Sprintf("%s-archives/%03d", *prefix, i), *work)
+		r.ArchiveSaveBytes, err = archiveSave(ctx, b, client, cur, *prefix+"-archives/last", *work)
 		if err != nil {
 			fail(err)
 		}
