@@ -207,16 +207,16 @@ func TestRunScriptLendsZstd(t *testing.T) {
 	}
 }
 
-// The L1 runs for a job with a cache disk ("cache"), keeping its archives
+// The actions cache runs for a job with a cache disk ("cache"), keeping its archives
 // there, and for one with the user's bucket and no disk ("bucket"),
 // keeping them on the VM's own disk; with neither it doesn't run.
-func TestRunScriptStartsTheL1(t *testing.T) {
+func TestRunScriptStartsTheActionsCache(t *testing.T) {
 	bucket := CacheStore{Store: StoreBucket}
 	for _, c := range []struct {
 		hook, want string
 	}{
 		{"cache", " /cache/actions remote=bucket node="},
-		{"bucket", "/fleetci-l1-store any remote=bucket node="},
+		{"bucket", "/fleetci-actions-cache-store any remote=bucket node="},
 		{"", ""},
 	} {
 		home, bin := t.TempDir(), t.TempDir()
@@ -224,9 +224,9 @@ func TestRunScriptStartsTheL1(t *testing.T) {
 		_ = os.MkdirAll(dir, 0o755)
 		_ = os.WriteFile(filepath.Join(dir, "run.sh"), []byte("#!/bin/sh\n"), 0o755)
 		_ = os.WriteFile(filepath.Join(bin, "dnf"), []byte("#!/bin/sh\n"), 0o755)
-		args := filepath.Join(home, "l1-args")
+		args := filepath.Join(home, "cache-args")
 		_ = os.MkdirAll(filepath.Join(home, ".fleetci"), 0o755)
-		_ = os.WriteFile(filepath.Join(home, l1Path), []byte("#!/bin/sh\necho \"$*\" > "+args+"\n"), 0o755)
+		_ = os.WriteFile(filepath.Join(home, actionsCachePath), []byte("#!/bin/sh\necho \"$*\" > "+args+"\n"), 0o755)
 		cmd := exec.Command("sh", "-c", vmScript("", bucket))
 		cmd.Env = []string{"HOME=" + home, "PATH=" + bin + ":/usr/bin:/bin"}
 		cmd.Stdin = strings.NewReader("the-jit\n" + c.hook + "\n")
@@ -237,13 +237,13 @@ func TestRunScriptStartsTheL1(t *testing.T) {
 		switch {
 		case c.want == "":
 			if err == nil {
-				t.Errorf("hook %q: the L1 ran: %s", c.hook, got)
+				t.Errorf("hook %q: the actions cache ran: %s", c.hook, got)
 			}
 		case err != nil:
-			l, _ := os.ReadFile(filepath.Join(dir, "_diag", "fleetci-l1.log"))
-			t.Errorf("hook %q: the L1 didn't run: %v; its log: %s", c.hook, err, l)
+			l, _ := os.ReadFile(filepath.Join(dir, "_diag", "fleetci-actions-cache.log"))
+			t.Errorf("hook %q: the actions cache didn't run: %v; its log: %s", c.hook, err, l)
 		case !strings.Contains(string(got), c.want):
-			t.Errorf("hook %q: L1 args %q, want %q in them", c.hook, got, c.want)
+			t.Errorf("hook %q: actions cache args %q, want %q in them", c.hook, got, c.want)
 		}
 	}
 }

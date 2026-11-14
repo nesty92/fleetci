@@ -1,5 +1,5 @@
-// Package l1cache is fleetci's L1 for actions/cache, run in the job's VM
-// (cmd/fleetci-l1): the job's ACTIONS_RESULTS_URL points here, and every
+// Package actionscache is fleetci's cache server for actions/cache, run in the job's VM
+// (cmd/fleetci-actions-cache): the job's ACTIONS_RESULTS_URL points here, and every
 // request goes on to the cache server it would have used (the L2: GitHub's,
 // or the cache_url server), which still decides what each key restores and
 // what a job may save.
@@ -28,7 +28,7 @@
 // On the disk each entry is two files: <id>.blob, the archive, and
 // <id>.json, what it is (meta). The node trims the blobs, oldest first,
 // when the disk is over its size (internal/fleet's unmount script).
-package l1cache
+package actionscache
 
 import (
 	"bytes"
@@ -68,7 +68,7 @@ const (
 	ModeBucket
 )
 
-// Config is how the L1 runs.
+// Config is how the actions cache runs.
 type Config struct {
 	// Upstream is the cache server the job would have used.
 	Upstream string
@@ -80,14 +80,14 @@ type Config struct {
 	Mode     Mode
 	// Node is the node's cache service, in ModeBucket.
 	Node string
-	// Port is where the L1 listens, for the URLs it hands out when a
+	// Port is where the actions cache listens, for the URLs it hands out when a
 	// request names no host.
 	Port int
-	// Log gets what the L1 does; nil logs to stderr.
+	// Log gets what the actions cache does; nil logs to stderr.
 	Log *log.Logger
 }
 
-// Server is the L1, an http.Handler.
+// Server is the actions cache, an http.Handler.
 type Server struct {
 	cfg    Config
 	log    *log.Logger
@@ -157,7 +157,7 @@ type meta struct {
 	Scope string `json:"scope,omitempty"`
 }
 
-// New makes the L1 for cfg.
+// New makes the actions cache for cfg.
 func New(cfg Config) *Server {
 	cfg.Upstream = strings.TrimRight(cfg.Upstream, "/")
 	cfg.Node = strings.TrimRight(cfg.Node, "/")
@@ -706,7 +706,7 @@ func (s *Server) route(w *writer, r *http.Request) error {
 	case r.Method == http.MethodGet && p == "/fleetci/stats":
 		reply(w, http.StatusOK, nil, []byte(s.Summary()))
 		return nil
-	case r.Method == http.MethodGet && strings.HasPrefix(p, "/fleetci/l1/"):
+	case r.Method == http.MethodGet && strings.HasPrefix(p, "/fleetci/blob/"):
 		s.serveLocal(w, r, last, true)
 		return nil
 	case r.Method == http.MethodGet && strings.HasPrefix(p, "/fleetci/fill/"):
@@ -859,7 +859,7 @@ func (s *Server) restore(w *writer, r *http.Request) error {
 	disk := s.storeOK()
 	auth := r.Header.Get("Authorization")
 	_, scopes := tokenScopes(auth)
-	l1URL := func(m string) string { return s.localURL(r, "/fleetci/l1/"+EntryID(m, req.Version)) }
+	blobURL := func(m string) string { return s.localURL(r, "/fleetci/blob/"+EntryID(m, req.Version)) }
 
 	if s.cfg.Mode == ModeBucket {
 		st, out, err := s.nodeCall("/lookup", map[string]any{"key": req.Key, "restore_keys": rks, "version": req.Version}, auth)
@@ -873,7 +873,7 @@ func (s *Server) restore(w *writer, r *http.Request) error {
 			switch {
 			case disk && s.have(eid) && s.sameEntry(eid, name):
 				s.logf("hit %s", m)
-				local = l1URL(m)
+				local = blobURL(m)
 			case disk:
 				s.logf("miss %s", m)
 				local = s.localURL(r, "/fleetci/fill/"+s.link(fillLink{url: u, key: m, version: req.Version, src: name, scope: str(out, "scope")}))
@@ -901,7 +901,7 @@ func (s *Server) restore(w *writer, r *http.Request) error {
 			return nil
 		}
 		s.logf("hit %s", m)
-		replyJSON(w, http.StatusOK, nil, map[string]any{"ok": true, "matched_key": m, "signed_download_url": l1URL(m)})
+		replyJSON(w, http.StatusOK, nil, map[string]any{"ok": true, "matched_key": m, "signed_download_url": blobURL(m)})
 		return nil
 	}
 
@@ -918,7 +918,7 @@ func (s *Server) restore(w *writer, r *http.Request) error {
 			return nil
 		}
 		s.logf("L2 unreachable (%v): restoring %s from the disk", err, m)
-		replyJSON(w, http.StatusOK, nil, map[string]any{"ok": true, "matched_key": m, "signed_download_url": l1URL(m)})
+		replyJSON(w, http.StatusOK, nil, map[string]any{"ok": true, "matched_key": m, "signed_download_url": blobURL(m)})
 		return nil
 	}
 	if status != http.StatusOK {
@@ -945,7 +945,7 @@ func (s *Server) restore(w *writer, r *http.Request) error {
 	var local string
 	if s.have(eid) && s.sameEntry(eid, srcOf(u)) {
 		s.logf("hit %s", m)
-		local = l1URL(m)
+		local = blobURL(m)
 	} else {
 		s.logf("miss %s", m)
 		local = s.localURL(r, "/fleetci/fill/"+s.link(fillLink{url: u, key: m, version: req.Version}))
@@ -1623,12 +1623,12 @@ func (s *Server) finalize(w *writer, r *http.Request) error {
 	return nil
 }
 
-// ParseArgs reads the L1's arguments after its port, as the VM's script
+// ParseArgs reads the actions cache's arguments after its port, as the VM's script
 // passes them: UPSTREAM_URL STORE_DIR [any] [remote=off | remote=bucket
 // node=URL].
 func ParseArgs(args []string) (Config, error) {
 	if len(args) < 2 {
-		return Config{}, errors.New("usage: fleetci-l1 PORT UPSTREAM_URL STORE_DIR [any] [remote=off | remote=bucket node=URL]")
+		return Config{}, errors.New("usage: fleetci-actions-cache PORT UPSTREAM_URL STORE_DIR [any] [remote=off | remote=bucket node=URL]")
 	}
 	c := Config{Upstream: args[0], Store: args[1]}
 	for _, a := range args[2:] {

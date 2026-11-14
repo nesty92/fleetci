@@ -18,7 +18,7 @@ import (
 // Where actions/cache keeps its caches, besides the job's cache disk.
 const (
 	// StoreGitHub is GitHub's cache, or the cache server at cache_url:
-	// the disk is its L1.
+	// the disk is its actions cache.
 	StoreGitHub = "github"
 	// StoreBucket is the user's own bucket, [github.cache_bucket]: the
 	// node lists and signs for the VM, and saves upload after the job.
@@ -80,32 +80,32 @@ func NewCacheStore(store, cacheURL string, bucket *cachebucket.Config, issuer st
 	return cs, nil
 }
 
-// l1Args is the L1's arguments after its store.
-func (cs CacheStore) l1Args() string {
+// actionsCacheArgs is the actions cache's arguments after its store.
+func (cs CacheStore) actionsCacheArgs() string {
 	switch cs.Store {
 	case StoreOff:
 		return "remote=off "
 	case StoreBucket:
-		return fmt.Sprintf("remote=bucket node=http://127.0.0.1:%d ", l1NodePort)
+		return fmt.Sprintf("remote=bucket node=http://127.0.0.1:%d ", nodeCachePort)
 	}
 	return ""
 }
 
-// l1NodePort is where the VM reaches its node's cache service: a port on
+// nodeCachePort is where the VM reaches its node's cache service: a port on
 // the VM's loopback that the node's SSH connection forwards to it.
-var l1NodePort = 31850
+var nodeCachePort = 31850
 
-// flushURL is the VM's L1's, which uploads the job's saves.
-var flushURL = fmt.Sprintf("http://127.0.0.1:%d/fleetci/flush", l1CachePort)
+// flushURL is the VM's actions cache's, which uploads the job's saves.
+var flushURL = fmt.Sprintf("http://127.0.0.1:%d/fleetci/flush", actionsCachePort)
 
 // flushTimeout bounds the uploads of a job's saves after the job.
 const flushTimeout = 15 * time.Minute
 
 // serveNode makes the node's cache service reachable on the VM, through
-// the SSH connection; stop ends it. Without the forward, the VM's L1
+// the SSH connection; stop ends it. Without the forward, the VM's actions cache
 // answers from its disk and keeps its saves there.
 func serveNode(client *ssh.Client, h http.Handler, log hclog.Logger) (stop func()) {
-	ln, err := client.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", l1NodePort))
+	ln, err := client.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", nodeCachePort))
 	if err != nil {
 		log.Warn("cache bucket: the VM can't reach the node's cache; jobs use their disk alone", "err", err)
 		return func() {}

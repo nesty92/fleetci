@@ -54,8 +54,8 @@ GitHub's order, pinned by their tests
 4. Keys compare byte for byte: case, accents and trailing spaces all count,
    and `%`, `_` and `\` in a restore key are literal, not patterns.
 
-fleetci's `localMatch` (internal/l1cache) follows this order,
-with their cases as tests (`TestL1CacheDiskOnly`). It reads the scopes from
+fleetci's `localMatch` (internal/actionscache) follows this order,
+with their cases as tests (`TestActionsCacheDiskOnly`). It reads the scopes from
 the job's own token without checking its signature: it runs inside the job
 and only decides what the job's own disk answers. Entries filled from
 GitHub carry no scope and come after the token's scopes.
@@ -145,7 +145,7 @@ job needs a store fleetci writes itself. It is the user's bucket, set as
 gitlab-runner's `[runners.cache]` and signed with gitlab-runner's own
 adapters (`internal/cachebucket`; listing, which they don't do, is ours).
 
-- **No server.** The VM's L1 (`fleetci-l1`, `remote=bucket`) asks the node
+- **No server.** The VM's actions cache (`fleetci-actions-cache`, `remote=bucket`) asks the node
   through the VM's SSH connection: a remote forward to the VM's loopback,
   set again when fleetci reconnects. Nothing new is reachable on any
   network, and the VM never holds the bucket's credentials.
@@ -159,18 +159,18 @@ adapters (`internal/cachebucket`; listing, which they don't do, is ours).
   prefix, a scope's `/` can't reach a sibling scope, and keys compare byte
   for byte (`TestBucketMatching`, falcondev's cases).
 - **Saves upload after the job.** A save is finalized on the disk during
-  the job; once the runner exits, fleetci asks the L1 for `/fleetci/flush`,
+  the job; once the runner exits, fleetci asks the actions cache for `/fleetci/flush`,
   which gets an upload link from the node for each save (409 when the
   entry exists) and PUTs it. The job's token, valid for hours, is kept in
-  the L1's memory only. The disk isn't detached until the flush is done or
+  the actions cache's memory only. The disk isn't detached until the flush is done or
   15 minutes pass; a save it misses stays on the disk.
 - **Restores fill the disk** from the signed link in ranges, as from
   GitHub's cache. An entry whose object name the disk already has is
   served from the disk; if the node can't be reached, the disk answers
   alone.
 
-Tested with a fake bucket (`TestL1CacheBucket`) and against RustFS with
-real signed links (`TestL1CacheBucketS3`, `FLEETCI_TEST_S3`). GCS and
+Tested with a fake bucket (`TestActionsCacheBucket`) and against RustFS with
+real signed links (`TestActionsCacheBucketS3`, `FLEETCI_TEST_S3`). GCS and
 Azure share the code path except listing; their emulators can't check
 signed links, which point at Google's and Azure's hosts. Cases
 falcondev's suite has no counterpart for are in

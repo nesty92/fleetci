@@ -121,9 +121,9 @@ func bucketNode(t *testing.T, b cachebucket.Bucket, issuer string) string {
 	return srv.URL
 }
 
-func flush(t *testing.T, l1 string) map[string]float64 {
+func flush(t *testing.T, ac string) map[string]float64 {
 	t.Helper()
-	code, out := do(t, http.MethodPost, l1+"/fleetci/flush", nil, nil)
+	code, out := do(t, http.MethodPost, ac+"/fleetci/flush", nil, nil)
 	if code != http.StatusOK {
 		t.Fatalf("flush: %d %s", code, out)
 	}
@@ -146,10 +146,10 @@ func restoreData(t *testing.T, base, token string, keys ...string) (string, []by
 	return m["matched_key"].(string), data, url
 }
 
-// TestL1CacheBucket: saves go to the disk and, after the job, to the
+// TestActionsCacheBucket: saves go to the disk and, after the job, to the
 // bucket; another VM's disk restores them from the bucket and then from
 // itself; the node gives a job only its own token's scopes.
-func TestL1CacheBucket(t *testing.T) {
+func TestActionsCacheBucket(t *testing.T) {
 	is := newTestIssuer(t, true)
 	b := newFakeBucket(t)
 	node := bucketNode(t, b, is.srv.URL)
@@ -160,7 +160,7 @@ func TestL1CacheBucket(t *testing.T) {
 	big := bytes.Repeat([]byte("fleetci-"), 2_000_000) // 16 MB, fetched in ranges
 
 	// The first VM, on main: the save waits for no upload.
-	vm1 := startL1(t, l2.srv.URL+"/", filepath.Join(t.TempDir(), "actions"), true, "remote=bucket", "node="+node)
+	vm1 := startActionsCache(t, l2.srv.URL+"/", filepath.Join(t.TempDir(), "actions"), true, "remote=bucket", "node="+node)
 	if code := saveAs(t, vm1, onMain, "go-linux-aaa", big); code != http.StatusOK {
 		t.Fatalf("save: %d", code)
 	}
@@ -182,14 +182,14 @@ func TestL1CacheBucket(t *testing.T) {
 	}
 
 	// Another VM's disk, on a feature branch, which reads main's caches.
-	vm2 := startL1(t, l2.srv.URL+"/", filepath.Join(t.TempDir(), "actions"), true, "remote=bucket", "node="+node)
+	vm2 := startActionsCache(t, l2.srv.URL+"/", filepath.Join(t.TempDir(), "actions"), true, "remote=bucket", "node="+node)
 	key, data, url := restoreData(t, vm2, onFeature, "go-linux-bbb", "go-linux-")
 	if key != "go-linux-aaa" || !bytes.Equal(data, big) || !strings.Contains(url, "/fleetci/fill/") {
 		t.Fatalf("restore from the bucket: %q, %d bytes, %s", key, len(data), url)
 	}
 	gets := b.gets
 	key, data, url = restoreData(t, vm2, onFeature, "go-linux-aaa")
-	if key != "go-linux-aaa" || !bytes.Equal(data, big) || !strings.Contains(url, "/fleetci/l1/") || b.gets != gets {
+	if key != "go-linux-aaa" || !bytes.Equal(data, big) || !strings.Contains(url, "/fleetci/blob/") || b.gets != gets {
 		t.Fatalf("restore again: %q, %d bytes, %s, %d more bucket reads", key, len(data), url, b.gets-gets)
 	}
 
@@ -205,7 +205,7 @@ func TestL1CacheBucket(t *testing.T) {
 	}
 
 	// A save already in the bucket isn't uploaded again.
-	vm3 := startL1(t, l2.srv.URL+"/", filepath.Join(t.TempDir(), "actions"), true, "remote=bucket", "node="+node)
+	vm3 := startActionsCache(t, l2.srv.URL+"/", filepath.Join(t.TempDir(), "actions"), true, "remote=bucket", "node="+node)
 	if code := saveAs(t, vm3, onMain, "go-linux-aaa", []byte("again")); code != http.StatusOK {
 		t.Fatalf("save on another disk: %d", code)
 	}
@@ -216,7 +216,7 @@ func TestL1CacheBucket(t *testing.T) {
 	// A token the issuer didn't sign gets nothing from the bucket.
 	forged := newTestIssuer(t, true)
 	tok := bare(forged.token(t, map[string]any{"iss": is.srv.URL}))
-	vm4 := startL1(t, l2.srv.URL+"/", filepath.Join(t.TempDir(), "actions"), true, "remote=bucket", "node="+node)
+	vm4 := startActionsCache(t, l2.srv.URL+"/", filepath.Join(t.TempDir(), "actions"), true, "remote=bucket", "node="+node)
 	if key, _, _ := restoreData(t, vm4, tok, "go-linux-aaa"); key != "" {
 		t.Errorf("a forged token restored %q", key)
 	}

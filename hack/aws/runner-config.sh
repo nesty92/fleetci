@@ -17,7 +17,7 @@ GITHUB_TOKEN_FILE=${FLEETCI_GITHUB_TOKEN_FILE:-$HOME/.config/fleetci/github.toke
 umask 077
 mkdir -p "$DATA/work" "$DATA/bin"
 
-sh "$REPO/hack/build-l1.sh"
+sh "$REPO/hack/build-actions-cache.sh"
 (cd "$REPO" && go build -o "$DATA/bin/" ./cmd/fleeting-plugin-fleetci ./cmd/fleetci)
 [ -x "$DATA/bin/fleeting-plugin-aws" ] ||
   GOBIN="$DATA/bin" go install "gitlab.com/gitlab-org/fleeting/plugins/aws/cmd/fleeting-plugin-aws@$AWS_PLUGIN_VERSION"

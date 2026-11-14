@@ -57,7 +57,7 @@ esac
 umask 077
 mkdir -p "$DATA/work" "$DATA/bin" "$DATA/images"
 
-sh "$REPO/hack/build-l1.sh"
+sh "$REPO/hack/build-actions-cache.sh"
 (cd "$REPO" && CGO_ENABLED=0 go build -o "$DATA/bin/" ./cmd/fleeting-plugin-fleetci ./cmd/fleetci ./cmd/fleeting-plugin-dockervm)
 fleetingd=/usr/local/bin/fleeting-plugin-fleetingd
 if [ "$big" = microvm ] && [ -d "$FD_SRC/cmd/fleeting-plugin-fleetingd" ]; then

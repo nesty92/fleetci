@@ -24,12 +24,12 @@ import (
 	"gitlab.com/gitlab-org/gitlab-runner/cache/cacheconfig"
 )
 
-// TestL1CacheBucketS3 is TestL1CacheBucket against a real S3 server, with
+// TestActionsCacheBucketS3 is TestActionsCacheBucket against a real S3 server, with
 // its signed links: FLEETCI_TEST_S3=host:port, and the keys in
 // AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY. FLEETCI_TEST_S3_BUCKET
 // names the bucket, made if missing; each run writes under a prefix of
 // its own and removes it.
-func TestL1CacheBucketS3(t *testing.T) {
+func TestActionsCacheBucketS3(t *testing.T) {
 	addr := os.Getenv("FLEETCI_TEST_S3")
 	if addr == "" {
 		t.Skip("FLEETCI_TEST_S3 is unset")
@@ -66,7 +66,7 @@ func TestL1CacheBucketS3(t *testing.T) {
 	onFeature := bare(is.token(t, map[string]any{"ac": `[{"Scope":"refs/heads/feature","Permission":3},{"Scope":"refs/heads/main","Permission":1}]`}))
 	big := bytes.Repeat([]byte("fleetci-"), 2_000_000)
 
-	vm1 := startL1(t, l2.srv.URL+"/", filepath.Join(t.TempDir(), "actions"), true, "remote=bucket", "node="+node)
+	vm1 := startActionsCache(t, l2.srv.URL+"/", filepath.Join(t.TempDir(), "actions"), true, "remote=bucket", "node="+node)
 	if code := saveAs(t, vm1, onMain, "go-linux-aaa", big); code != http.StatusOK {
 		t.Fatalf("save: %d", code)
 	}
@@ -78,15 +78,15 @@ func TestL1CacheBucketS3(t *testing.T) {
 		t.Fatalf("the bucket has %+v %v", objs, err)
 	}
 
-	vm2 := startL1(t, l2.srv.URL+"/", filepath.Join(t.TempDir(), "actions"), true, "remote=bucket", "node="+node)
+	vm2 := startActionsCache(t, l2.srv.URL+"/", filepath.Join(t.TempDir(), "actions"), true, "remote=bucket", "node="+node)
 	key, data, url := restoreData(t, vm2, onFeature, "go-linux-bbb", "go-linux-")
 	if key != "go-linux-aaa" || !bytes.Equal(data, big) || !strings.Contains(url, "/fleetci/fill/") {
 		t.Fatalf("restore from the bucket: %q, %d bytes, %s", key, len(data), url)
 	}
-	if key, _, url = restoreData(t, vm2, onFeature, "go-linux-aaa"); key != "go-linux-aaa" || !strings.Contains(url, "/fleetci/l1/") {
+	if key, _, url = restoreData(t, vm2, onFeature, "go-linux-aaa"); key != "go-linux-aaa" || !strings.Contains(url, "/fleetci/blob/") {
 		t.Fatalf("restore again: %q %s", key, url)
 	}
-	vm3 := startL1(t, l2.srv.URL+"/", filepath.Join(t.TempDir(), "actions"), true, "remote=bucket", "node="+node)
+	vm3 := startActionsCache(t, l2.srv.URL+"/", filepath.Join(t.TempDir(), "actions"), true, "remote=bucket", "node="+node)
 	if code := saveAs(t, vm3, onMain, "go-linux-aaa", []byte("again")); code != http.StatusOK {
 		t.Fatalf("save again: %d", code)
 	}

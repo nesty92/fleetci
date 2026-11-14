@@ -14,7 +14,7 @@ import (
 
 // jobToken is a job's ACTIONS_RUNTIME_TOKEN as GitHub's cache server reads
 // it: the "ac" claim's scopes, each with its permission bits (1 read,
-// 2 write). The L1 doesn't check the signature.
+// 2 write). The actions cache doesn't check the signature.
 func jobToken(scopes ...any) string {
 	var ac []map[string]any
 	for i := 0; i < len(scopes); i += 2 {
@@ -69,24 +69,24 @@ func restoreAs(t *testing.T, base, token string, keys ...string) string {
 	return m["matched_key"].(string)
 }
 
-// TestL1CacheDiskOnly: with remote=off, restores and saves are the disk's
+// TestActionsCacheDiskOnly: with remote=off, restores and saves are the disk's
 // alone, matched in GitHub's order, and the cache server sees no cache
 // call. The cases are falcondev-oss/github-actions-cache-server's
 // matches_scopes_then_keys_then_exact_before_prefix.
-func TestL1CacheDiskOnly(t *testing.T) {
+func TestActionsCacheDiskOnly(t *testing.T) {
 	l2 := newFakeL2(t)
-	l1 := startL1(t, l2.srv.URL+"/", filepath.Join(t.TempDir(), "actions"), true, "remote=off")
+	ac := startActionsCache(t, l2.srv.URL+"/", filepath.Join(t.TempDir(), "actions"), true, "remote=off")
 	const main, feature = "refs/heads/main", "refs/heads/feature"
 	onMain := jobToken(main, 3)
 	onFeature := jobToken(feature, 3, main, 1)
 	featureLast := jobToken(main, 3, feature, 1) // reads main first
 
 	for _, key := range []string{"primary-old", "primary-new", "restore", "restore-newer"} {
-		if code := saveAs(t, l1, onMain, key, []byte(key)); code != http.StatusOK {
+		if code := saveAs(t, ac, onMain, key, []byte(key)); code != http.StatusOK {
 			t.Fatalf("save %s: %d", key, code)
 		}
 	}
-	if code := saveAs(t, l1, onFeature, "primary", []byte("primary")); code != http.StatusOK {
+	if code := saveAs(t, ac, onFeature, "primary", []byte("primary")); code != http.StatusOK {
 		t.Fatalf("save primary: %d", code)
 	}
 
@@ -103,20 +103,20 @@ func TestL1CacheDiskOnly(t *testing.T) {
 		{"case counts", onMain, []string{"Primary-new"}, ""},
 		{"another scope's entry is not read", jobToken("refs/heads/other", 3), []string{"restore"}, ""},
 	} {
-		if got := restoreAs(t, l1, c.token, c.keys...); got != c.want {
+		if got := restoreAs(t, ac, c.token, c.keys...); got != c.want {
 			t.Errorf("%s: restored %q, want %q", c.name, got, c.want)
 		}
 	}
 
 	// A saved entry never changes: GitHub's 409. Another scope may save the
 	// same key; its own job then restores its own.
-	if code := saveAs(t, l1, onMain, "restore", []byte("again")); code != http.StatusConflict {
+	if code := saveAs(t, ac, onMain, "restore", []byte("again")); code != http.StatusConflict {
 		t.Errorf("saving a key again: %d, want 409", code)
 	}
-	if code := saveAs(t, l1, onFeature, "restore", []byte("feature's")); code != http.StatusOK {
+	if code := saveAs(t, ac, onFeature, "restore", []byte("feature's")); code != http.StatusOK {
 		t.Errorf("saving another scope's key: %d", code)
 	}
-	if got := restoreAs(t, l1, onFeature, "restore"); got != "restore" {
+	if got := restoreAs(t, ac, onFeature, "restore"); got != "restore" {
 		t.Errorf("feature's own restore: %q", got)
 	}
 
@@ -124,24 +124,24 @@ func TestL1CacheDiskOnly(t *testing.T) {
 		t.Errorf("the cache server got cache calls: %d entries, %d uploads, %d downloads", len(l2.entries), len(l2.pending), l2.gets.Load())
 	}
 	// Other calls, artifacts', still go to it.
-	if code, out := do(t, http.MethodPost, l1+"/twirp/github.actions.results.api.v1.ArtifactService/Other", []byte("a"), nil); code != http.StatusOK || !bytes.Contains(out, []byte(`"a"`)) {
+	if code, out := do(t, http.MethodPost, ac+"/twirp/github.actions.results.api.v1.ArtifactService/Other", []byte("a"), nil); code != http.StatusOK || !bytes.Contains(out, []byte(`"a"`)) {
 		t.Errorf("passthrough: %d %s", code, out)
 	}
 }
 
-// TestL1CacheUploadsAndRanges: uploads answer with a request id, which
+// TestActionsCacheUploadsAndRanges: uploads answer with a request id, which
 // BuildKit's client needs, and the disk's copy is served in ranges, which
 // BuildKit reads it by.
-func TestL1CacheUploadsAndRanges(t *testing.T) {
+func TestActionsCacheUploadsAndRanges(t *testing.T) {
 	for _, mode := range [][]string{nil, {"remote=off"}} {
 		t.Run(fmt.Sprint(mode), func(t *testing.T) {
 			l2 := newFakeL2(t)
-			l1 := startL1(t, l2.srv.URL+"/", filepath.Join(t.TempDir(), "actions"), true, mode...)
+			ac := startActionsCache(t, l2.srv.URL+"/", filepath.Join(t.TempDir(), "actions"), true, mode...)
 			data := []byte("0123456789abcdefghij")
-			_, m := call(t, l1, "tok", "CreateCacheEntry", map[string]any{"key": "k", "version": "v1"})
+			_, m := call(t, ac, "tok", "CreateCacheEntry", map[string]any{"key": "k", "version": "v1"})
 			if m == nil || m["ok"] != true {
 				// The fake cache server takes only its own token.
-				_, m = call(t, l1, jobToken("refs/heads/main", 3), "CreateCacheEntry", map[string]any{"key": "k", "version": "v1"})
+				_, m = call(t, ac, jobToken("refs/heads/main", 3), "CreateCacheEntry", map[string]any{"key": "k", "version": "v1"})
 			}
 			req, _ := http.NewRequest(http.MethodPut, m["signed_upload_url"].(string), bytes.NewReader(data))
 			req.Header.Set("x-ms-blob-type", "BlockBlob")
@@ -157,10 +157,10 @@ func TestL1CacheUploadsAndRanges(t *testing.T) {
 			if mode != nil {
 				tok = jobToken("refs/heads/main", 3)
 			}
-			if code, f := call(t, l1, tok, "FinalizeCacheEntryUpload", map[string]any{"key": "k", "version": "v1", "size_bytes": fmt.Sprint(len(data))}); code != http.StatusOK || f["ok"] != true {
+			if code, f := call(t, ac, tok, "FinalizeCacheEntryUpload", map[string]any{"key": "k", "version": "v1", "size_bytes": fmt.Sprint(len(data))}); code != http.StatusOK || f["ok"] != true {
 				t.Fatalf("finalize: %d %v", code, f)
 			}
-			_, r := call(t, l1, tok, "GetCacheEntryDownloadURL", map[string]any{"key": "k", "version": "v1"})
+			_, r := call(t, ac, tok, "GetCacheEntryDownloadURL", map[string]any{"key": "k", "version": "v1"})
 			url, _ := r["signed_download_url"].(string)
 			for _, c := range []struct {
 				header, value string

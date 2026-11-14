@@ -1,8 +1,8 @@
-// fleetci-l1 is the actions/cache L1 a job's VM runs (internal/l1cache).
+// fleetci-actions-cache is the cache server for actions/cache a job's VM runs (internal/actionscache).
 // fleetci embeds it, for amd64 and arm64, and copies it into each VM that
 // has a cache disk.
 //
-//	fleetci-l1 PORT UPSTREAM_URL STORE_DIR [any] [remote=off | remote=bucket node=URL]
+//	fleetci-actions-cache PORT UPSTREAM_URL STORE_DIR [any] [remote=off | remote=bucket node=URL]
 package main
 
 import (
@@ -13,22 +13,22 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/nesty92/fleetci/internal/l1cache"
+	"github.com/nesty92/fleetci/internal/actionscache"
 )
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: fleetci-l1 PORT UPSTREAM_URL STORE_DIR [any] [remote=off | remote=bucket node=URL]")
+		fmt.Fprintln(os.Stderr, "usage: fleetci-actions-cache PORT UPSTREAM_URL STORE_DIR [any] [remote=off | remote=bucket node=URL]")
 		os.Exit(2)
 	}
 	port, err := strconv.Atoi(os.Args[1])
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "fleetci-l1: port:", err)
+		fmt.Fprintln(os.Stderr, "fleetci-actions-cache: port:", err)
 		os.Exit(2)
 	}
-	cfg, err := l1cache.ParseArgs(os.Args[2:])
+	cfg, err := actionscache.ParseArgs(os.Args[2:])
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "fleetci-l1:", err)
+		fmt.Fprintln(os.Stderr, "fleetci-actions-cache:", err)
 		os.Exit(2)
 	}
 	cfg.Port = port
@@ -36,7 +36,7 @@ func main() {
 	cfg.Log = lg
 	srv := &http.Server{
 		Addr:              fmt.Sprintf("0.0.0.0:%d", port),
-		Handler:           l1cache.New(cfg),
+		Handler:           actionscache.New(cfg),
 		ReadHeaderTimeout: 30 * time.Second,
 	}
 	lg.Printf("serving on %d for %s store %s", port, cfg.Upstream, cfg.Store)

@@ -13,7 +13,7 @@ import (
 )
 
 // bucketCache is actions/cache's store in the user's own bucket, served
-// by the node to its VM's L1 (internal/l1cache, remote=bucket). The VM asks
+// by the node to its VM's actions cache (internal/actionscache, remote=bucket). The VM asks
 // which entry a restore gets and where to upload a save; the node checks
 // the job's token, lists and signs, and the VM only ever gets links.
 // Saves are uploaded after the job, from the job's cache disk.

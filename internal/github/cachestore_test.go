@@ -29,27 +29,27 @@ func freePort(t *testing.T) int {
 }
 
 // The VM reaches its node's cache service through the VM's connection,
-// and after the runner the node asks the VM's L1 to upload the job's
+// and after the runner the node asks the VM's actions cache to upload the job's
 // saves, before the job's disk is taken back.
 func TestTheNodesCacheOverTheVMsConnection(t *testing.T) {
 	port := freePort(t)
-	old, oldFlush := l1NodePort, flushURL
-	t.Cleanup(func() { l1NodePort, flushURL = old, oldFlush })
-	l1NodePort = port
+	old, oldFlush := nodeCachePort, flushURL
+	t.Cleanup(func() { nodeCachePort, flushURL = old, oldFlush })
+	nodeCachePort = port
 
 	var lookups, flushes atomic.Int32
 	node := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		lookups.Add(1)
 		_, _ = w.Write([]byte("node"))
 	})
-	l1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ac := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == "/fleetci/flush" {
 			flushes.Add(1)
 			_, _ = w.Write([]byte(`{"uploaded":1}`))
 		}
 	}))
-	t.Cleanup(l1.Close)
-	flushURL = l1.URL + "/fleetci/flush"
+	t.Cleanup(ac.Close)
+	flushURL = ac.URL + "/fleetci/flush"
 
 	vm := vmjobtest.New(t)
 	runner := `read -r jit; read -r hook; curl -fsS -X POST http://127.0.0.1:` + itoa(port) + `/lookup > "$HOME/answer" 2> "$HOME/err"; cat "$HOME/err"; echo "Running job: build"`
@@ -67,7 +67,7 @@ func TestTheNodesCacheOverTheVMsConnection(t *testing.T) {
 		t.Fatalf("flushed %d times, want once", flushes.Load())
 	}
 	// A VM without a cache disk, with the user's bucket, goes to it
-	// through its L1 too: it flushes the job's saves.
+	// through its actions cache too: it flushes the job's saves.
 	v.Cache = false
 	if err := startWith(`read -r jit; echo "Running job: build"`, node, hclog.NewNullLogger())(context.Background(), v, "jit", nil); err != nil {
 		t.Fatal(err)
@@ -110,8 +110,8 @@ Insecure = true
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cs.bucket == nil || cs.l1Args() != "remote=bucket node=http://127.0.0.1:"+itoa(l1NodePort)+" " {
-		t.Fatalf("store %+v, args %q", cs, cs.l1Args())
+	if cs.bucket == nil || cs.actionsCacheArgs() != "remote=bucket node=http://127.0.0.1:"+itoa(nodeCachePort)+" " {
+		t.Fatalf("store %+v, args %q", cs, cs.actionsCacheArgs())
 	}
 	l, err := cs.bucket.bucket.Upload(context.Background(), "github/1/x/v1/k", linkTTL)
 	if err != nil {
@@ -136,10 +136,10 @@ Insecure = true
 		t.Error("a bucket with the github store: accepted")
 	}
 	cs, err = NewCacheStore("", "https://cache.example", nil, "", nil)
-	if err != nil || cs.Store != StoreGitHub || cs.URL != "https://cache.example/" || cs.l1Args() != "" {
+	if err != nil || cs.Store != StoreGitHub || cs.URL != "https://cache.example/" || cs.actionsCacheArgs() != "" {
 		t.Errorf("the default: %+v %v", cs, err)
 	}
-	if cs, _ := NewCacheStore("off", "", nil, "", nil); cs.l1Args() != "remote=off " {
-		t.Errorf("off: %q", cs.l1Args())
+	if cs, _ := NewCacheStore("off", "", nil, "", nil); cs.actionsCacheArgs() != "remote=off " {
+		t.Errorf("off: %q", cs.actionsCacheArgs())
 	}
 }

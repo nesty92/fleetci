@@ -15,10 +15,10 @@ import (
 // own design, a node between the VM and the bucket and saves uploaded
 // after the job, and from what a real bucket does.
 
-func bucketL1(t *testing.T, node string) string {
+func bucketActionsCache(t *testing.T, node string) string {
 	t.Helper()
 	l2 := newFakeL2(t)
-	return startL1(t, l2.srv.URL+"/", filepath.Join(t.TempDir(), "actions"), true, "remote=bucket", "node="+node)
+	return startActionsCache(t, l2.srv.URL+"/", filepath.Join(t.TempDir(), "actions"), true, "remote=bucket", "node="+node)
 }
 
 func bareToken(tok string) string { return strings.TrimPrefix(tok, "Bearer ") }
@@ -26,15 +26,15 @@ func bareToken(tok string) string { return strings.TrimPrefix(tok, "Bearer ") }
 // The node is best effort: when the VM can't reach it, a restore is
 // answered from the disk, a save stays there, and the flush says what it
 // couldn't upload without failing the job.
-func TestL1CacheBucketNodeUnreachable(t *testing.T) {
+func TestActionsCacheBucketNodeUnreachable(t *testing.T) {
 	is := newTestIssuer(t, true)
 	tok := bareToken(is.token(t, nil))
-	vm := bucketL1(t, "http://127.0.0.1:"+itoa(freePort(t)))
+	vm := bucketActionsCache(t, "http://127.0.0.1:"+itoa(freePort(t)))
 	if code := saveAs(t, vm, tok, "go-linux-aaa", []byte("saved")); code != http.StatusOK {
 		t.Fatalf("save: %d", code)
 	}
 	key, data, url := restoreData(t, vm, tok, "go-linux-bbb", "go-linux-")
-	if key != "go-linux-aaa" || string(data) != "saved" || !strings.Contains(url, "/fleetci/l1/") {
+	if key != "go-linux-aaa" || string(data) != "saved" || !strings.Contains(url, "/fleetci/blob/") {
 		t.Fatalf("restore without the node: %q %q %s", key, data, url)
 	}
 	if got := flush(t, vm); got["failed"] != 1 || got["uploaded"] != 0 {
@@ -43,10 +43,10 @@ func TestL1CacheBucketNodeUnreachable(t *testing.T) {
 }
 
 // An upload the bucket refuses stays pending, and the next flush uploads it.
-func TestL1CacheBucketFlushRetries(t *testing.T) {
+func TestActionsCacheBucketFlushRetries(t *testing.T) {
 	is := newTestIssuer(t, true)
 	b := newFakeBucket(t)
-	vm := bucketL1(t, bucketNode(t, b, is.srv.URL))
+	vm := bucketActionsCache(t, bucketNode(t, b, is.srv.URL))
 	tok := bareToken(is.token(t, nil))
 	saveAs(t, vm, tok, "a", []byte("one"))
 	saveAs(t, vm, tok, "b", []byte("two"))
@@ -65,10 +65,10 @@ func TestL1CacheBucketFlushRetries(t *testing.T) {
 }
 
 // A token the node refuses uploads nothing, and the save stays on the disk.
-func TestL1CacheBucketFlushRefusedToken(t *testing.T) {
+func TestActionsCacheBucketFlushRefusedToken(t *testing.T) {
 	is := newTestIssuer(t, true)
 	b := newFakeBucket(t)
-	vm := bucketL1(t, bucketNode(t, b, is.srv.URL))
+	vm := bucketActionsCache(t, bucketNode(t, b, is.srv.URL))
 	forged := bareToken(newTestIssuer(t, true).token(t, map[string]any{"iss": is.srv.URL}))
 	saveAs(t, vm, forged, "a", []byte("one"))
 	if got := flush(t, vm); got["failed"] != 1 || len(b.names()) != 0 {
@@ -80,10 +80,10 @@ func TestL1CacheBucketFlushRefusedToken(t *testing.T) {
 }
 
 // A key too long for an object name is kept on the disk and not uploaded.
-func TestL1CacheBucketKeyTooLong(t *testing.T) {
+func TestActionsCacheBucketKeyTooLong(t *testing.T) {
 	is := newTestIssuer(t, true)
 	b := newFakeBucket(t)
-	vm := bucketL1(t, bucketNode(t, b, is.srv.URL))
+	vm := bucketActionsCache(t, bucketNode(t, b, is.srv.URL))
 	tok := bareToken(is.token(t, nil))
 	long := strings.Repeat("é", 400) // 800 bytes, 2400 escaped
 	saveAs(t, vm, tok, long, []byte("x"))
@@ -94,10 +94,10 @@ func TestL1CacheBucketKeyTooLong(t *testing.T) {
 
 // An object the bucket lost after the node listed it is a miss, as a
 // dangling entry is on GitHub; nothing is kept of it.
-func TestL1CacheBucketVanishedObject(t *testing.T) {
+func TestActionsCacheBucketVanishedObject(t *testing.T) {
 	is := newTestIssuer(t, true)
 	b := newFakeBucket(t)
-	vm := bucketL1(t, bucketNode(t, b, is.srv.URL))
+	vm := bucketActionsCache(t, bucketNode(t, b, is.srv.URL))
 	tok := bareToken(is.token(t, nil))
 	name := entryDir("1", "refs/heads/main", "v1") + "gone"
 	b.put(name, []byte("soon gone"), time.Now())
@@ -118,10 +118,10 @@ func TestL1CacheBucketVanishedObject(t *testing.T) {
 
 // The first read of an entry may be a range (BuildKit reads at offsets);
 // the disk still gets the whole entry.
-func TestL1CacheBucketRangedFirstRead(t *testing.T) {
+func TestActionsCacheBucketRangedFirstRead(t *testing.T) {
 	is := newTestIssuer(t, true)
 	b := newFakeBucket(t)
-	vm := bucketL1(t, bucketNode(t, b, is.srv.URL))
+	vm := bucketActionsCache(t, bucketNode(t, b, is.srv.URL))
 	tok := bareToken(is.token(t, nil))
 	data := bytes.Repeat([]byte("0123456789"), 300_000)
 	b.put(entryDir("1", "refs/heads/main", "v1")+"layers", data, time.Now())
@@ -132,16 +132,16 @@ func TestL1CacheBucketRangedFirstRead(t *testing.T) {
 	}
 	gets := b.gets
 	key, all, url := restoreData(t, vm, tok, "layers")
-	if key != "layers" || !bytes.Equal(all, data) || !strings.Contains(url, "/fleetci/l1/") || b.gets != gets {
+	if key != "layers" || !bytes.Equal(all, data) || !strings.Contains(url, "/fleetci/blob/") || b.gets != gets {
 		t.Fatalf("after a ranged read: %q, %d bytes, %s, %d more bucket reads", key, len(all), url, b.gets-gets)
 	}
 }
 
 // Jobs' parallel restores of one entry on one disk each get all of it.
-func TestL1CacheBucketParallelRestores(t *testing.T) {
+func TestActionsCacheBucketParallelRestores(t *testing.T) {
 	is := newTestIssuer(t, true)
 	b := newFakeBucket(t)
-	vm := bucketL1(t, bucketNode(t, b, is.srv.URL))
+	vm := bucketActionsCache(t, bucketNode(t, b, is.srv.URL))
 	tok := bareToken(is.token(t, nil))
 	data := bytes.Repeat([]byte("abcdefgh"), 1_000_000)
 	b.put(entryDir("1", "refs/heads/main", "v1")+"deps", data, time.Now())

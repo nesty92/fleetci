@@ -74,18 +74,18 @@ fi
 if [ -r /etc/os-release ]; then . /etc/os-release; fi
 if [ "${ID:-}" = ubuntu ]; then export ImageOS="ubuntu${VERSION_ID%%%%.*}"; fi
 cache='%[2]s'
-# With a cache disk, actions/cache goes through the L1 (fleetci-l1, which
+# With a cache disk, actions/cache goes through fleetci-actions-cache (which
 # fleetci copied to ~/%[5]s), which keeps the archives on the disk, in
 # front of the cache server it would have used. With the user's bucket and
 # no disk ("bucket"), it keeps the job's archives on the VM's own disk,
 # which goes with the VM, and the bucket is the store. Without it, or if
 # it doesn't start, jobs go straight on.
-l1=
+ac=
 store=/cache/actions any=
-if [ "$hook" = bucket ]; then store=$HOME/fleetci-l1-store any='any '; fi
+if [ "$hook" = bucket ]; then store=$HOME/fleetci-actions-cache-store any='any '; fi
 if { [ "$hook" = cache ] || [ "$hook" = bucket ]; } && [ -x "$HOME/%[5]s" ]; then
   mkdir -p _diag
-  nohup setsid "$HOME/%[5]s" %[6]d "${cache:-%[7]s}" "$store" ${any}%[8]s>> _diag/fleetci-l1.log 2>&1 < /dev/null &
+  nohup setsid "$HOME/%[5]s" %[6]d "${cache:-%[7]s}" "$store" ${any}%[8]s>> _diag/fleetci-actions-cache.log 2>&1 < /dev/null &
   # The address the VM's containers reach it at too: Docker's bridge. A
   # firewall that drops what comes in lets them through to it, and only it.
   at=$(ip -4 -o addr show docker0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1)
@@ -97,14 +97,14 @@ if { [ "$hook" = cache ] || [ "$hook" = bucket ]; } && [ -x "$HOME/%[5]s" ]; the
   i=0
   while [ $i -lt 50 ]; do
     if curl -fsS -o /dev/null -m 1 "http://127.0.0.1:%[6]d/fleetci/ping" 2>/dev/null; then
-      l1="http://${at:-127.0.0.1}:%[6]d/"
+      ac="http://${at:-127.0.0.1}:%[6]d/"
       break
     fi
     i=$((i+1))
     sleep 0.1
   done
 fi
-if [ -n "$l1$cache" ]; then
+if [ -n "$ac$cache" ]; then
   # The runner sets ACTIONS_RESULTS_URL for each job from GitHub's answer.
   # Renaming the variable it writes (same length, UTF-16) keeps ours. A
   # runner that updates itself before its job brings an unpatched one: it
@@ -116,9 +116,9 @@ if [ -n "$l1$cache" ]; then
   }
   patch
   (while sleep 1; do patch; done) < /dev/null > /dev/null 2>&1 &
-  export ACTIONS_RESULTS_URL="${l1:-$cache}" FLEETCI_RESULTS_URL="${l1:-$cache}"
+  export ACTIONS_RESULTS_URL="${ac:-$cache}" FLEETCI_RESULTS_URL="${ac:-$cache}"
 fi
-if [ -n "$l1" ]; then
+if [ -n "$ac" ]; then
   # The job's log ends with what its cache steps got.
   echo 'curl -fsS -m 3 http://127.0.0.1:%[6]d/fleetci/stats || true' > fleetci-job-completed.sh
   export ACTIONS_RUNNER_HOOK_JOB_COMPLETED="$dir/fleetci-job-completed.sh"
@@ -176,7 +176,7 @@ if [ -n "${FLEETCI_RESULTS_URL:-}" ] &&
   LC_ALL=C grep -qaP 'A\x00C\x00T\x00I\x00O\x00N\x00S\x00_\x00R\x00E\x00S\x00U\x00L\x00T\x00S\x00_\x00U\x00R\x00L\x00' "$(dirname "$0")/bin/Runner.Worker.dll" 2>/dev/null; then
   echo "::warning::fleetci: this runner isn't patched, so actions/cache goes to GitHub's cache, not $FLEETCI_RESULTS_URL"
 fi
-# The L1 (fleetci-l1) runs as this user and keeps its archives on the disk.
+# The actions cache (fleetci-actions-cache) runs as this user and keeps its archives on the disk.
 if mountpoint -q /cache 2>/dev/null; then
   sudo -n mkdir -p /cache/actions && sudo -n chown "$(id -u):$(id -g)" /cache/actions
 fi
@@ -202,7 +202,7 @@ func SSHStart(version string, cs CacheStore, log hclog.Logger) StartFunc {
 
 // vmScript is runScript for the runner version and cache store given.
 func vmScript(version string, cs CacheStore) string {
-	return fmt.Sprintf(runScript, version, cs.URL, DefaultRunnerVersion, jobStartedHook, l1Path, l1CachePort, githubResultsURL, cs.l1Args())
+	return fmt.Sprintf(runScript, version, cs.URL, DefaultRunnerVersion, jobStartedHook, actionsCachePath, actionsCachePort, githubResultsURL, cs.actionsCacheArgs())
 }
 
 // followTries is how many times in a row following the runner may fail
@@ -231,14 +231,14 @@ func startWith(script string, nodeSvc http.Handler, log hclog.Logger) StartFunc 
 		case vm.Cache:
 			stdin += "cache\n"
 		case nodeSvc != nil:
-			// No disk, but the user's bucket: the L1 is the way to it.
+			// No disk, but the user's bucket: the actions cache is the way to it.
 			stdin += "bucket\n"
 		}
 		// This job's: the closure serves every job of the node at once.
 		var node http.Handler
 		if vm.Cache || nodeSvc != nil {
 			node = nodeSvc
-			installL1(ctx, client, log)
+			installActionsCache(ctx, client, log)
 		}
 		stop := func() {}
 		if node != nil {

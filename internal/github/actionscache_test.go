@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nesty92/fleetci/internal/l1cache"
+	"github.com/nesty92/fleetci/internal/actionscache"
 )
 
 // fakeL2 is a cache server as actions/cache sees GitHub's: the twirp calls
@@ -152,31 +152,31 @@ func (f *fakeL2) serve(w http.ResponseWriter, r *http.Request) {
 
 const svcPath = "/twirp/github.actions.results.api.v1.CacheService/"
 
-// startL1 runs the L1 (internal/l1cache) in front of l2, keeping archives
+// startActionsCache runs the actions cache (internal/actionscache) in front of l2, keeping archives
 // in store, with opts as the VM's script passes them, e.g. "remote=off".
-func startL1(t *testing.T, l2, store string, anyStore bool, opts ...string) string {
+func startActionsCache(t *testing.T, l2, store string, anyStore bool, opts ...string) string {
 	t.Helper()
 	args := []string{l2, store}
 	if anyStore {
 		args = append(args, "any")
 	}
-	cfg, err := l1cache.ParseArgs(append(args, opts...))
+	cfg, err := actionscache.ParseArgs(append(args, opts...))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var logs syncBuffer
 	cfg.Log = log.New(&logs, "", log.Ltime)
-	srv := httptest.NewServer(l1cache.New(cfg))
+	srv := httptest.NewServer(actionscache.New(cfg))
 	t.Cleanup(func() {
 		srv.Close()
 		if t.Failed() {
-			t.Logf("l1:\n%s", logs.String())
+			t.Logf("ac:\n%s", logs.String())
 		}
 	})
 	return srv.URL
 }
 
-// syncBuffer is a bytes.Buffer the L1's requests may log to at once.
+// syncBuffer is a bytes.Buffer the actions cache's requests may log to at once.
 type syncBuffer struct {
 	mu sync.Mutex
 	b  bytes.Buffer
@@ -278,74 +278,74 @@ func save(t *testing.T, base, key string, data []byte, blocks int) {
 	}
 }
 
-func TestL1Cache(t *testing.T) {
+func TestActionsCache(t *testing.T) {
 	l2 := newFakeL2(t)
 	store := filepath.Join(t.TempDir(), "actions")
-	l1 := startL1(t, l2.srv.URL+"/", store, true)
+	ac := startActionsCache(t, l2.srv.URL+"/", store, true)
 	big := bytes.Repeat([]byte("0123456789abcdef"), 300_000) // 4.8 MB
 
-	// Saved through the L1: in the L2 and on the disk.
-	save(t, l1, "go-linux-aaa", big, 0)
+	// Saved through the actions cache: in the L2 and on the disk.
+	save(t, ac, "go-linux-aaa", big, 0)
 	if !bytes.Equal(l2.entries["go-linux-aaa\nv1"], big) {
 		t.Fatal("the L2 lacks the saved archive")
 	}
-	key, data, url := restore(t, l1, "go-linux-aaa", nil)
-	if key != "go-linux-aaa" || !bytes.Equal(data, big) || !strings.Contains(url, "/fleetci/l1/") || l2.gets.Load() != 0 {
+	key, data, url := restore(t, ac, "go-linux-aaa", nil)
+	if key != "go-linux-aaa" || !bytes.Equal(data, big) || !strings.Contains(url, "/fleetci/blob/") || l2.gets.Load() != 0 {
 		t.Fatalf("restore after save: key %q, %d bytes, url %s, %d L2 downloads", key, len(data), url, l2.gets.Load())
 	}
 
 	// Saved in blocks, as Azure's SDK does past 128 MiB.
-	save(t, l1, "go-linux-bbb", big[:1_000_001], 3)
-	if _, data, url := restore(t, l1, "go-linux-bbb", nil); !bytes.Equal(data, big[:1_000_001]) || !strings.Contains(url, "/fleetci/l1/") {
+	save(t, ac, "go-linux-bbb", big[:1_000_001], 3)
+	if _, data, url := restore(t, ac, "go-linux-bbb", nil); !bytes.Equal(data, big[:1_000_001]) || !strings.Contains(url, "/fleetci/blob/") {
 		t.Fatalf("blocks: %d bytes from %s", len(data), url)
 	}
 
 	// Saved by another node: downloaded once, from the disk after.
 	other := []byte("from another node")
 	l2.put("node-ccc", "v1", other)
-	if key, data, url := restore(t, l1, "node-x", []string{"node-"}); key != "node-ccc" || !bytes.Equal(data, other) || !strings.Contains(url, "/fleetci/fill/") {
+	if key, data, url := restore(t, ac, "node-x", []string{"node-"}); key != "node-ccc" || !bytes.Equal(data, other) || !strings.Contains(url, "/fleetci/fill/") {
 		t.Fatalf("first restore: %q %q %s", key, data, url)
 	}
-	if _, data, url := restore(t, l1, "node-ccc", nil); !bytes.Equal(data, other) || !strings.Contains(url, "/fleetci/l1/") || l2.gets.Load() != 1 {
+	if _, data, url := restore(t, ac, "node-ccc", nil); !bytes.Equal(data, other) || !strings.Contains(url, "/fleetci/blob/") || l2.gets.Load() != 1 {
 		t.Fatalf("second restore: %q %s, %d L2 downloads", data, url, l2.gets.Load())
 	}
 
 	// A miss stays a miss; a second save of a key is refused by the L2.
-	if key, _, _ := restore(t, l1, "nothing", nil); key != "" {
+	if key, _, _ := restore(t, ac, "nothing", nil); key != "" {
 		t.Fatalf("miss restored %q", key)
 	}
-	if m := twirp(t, l1, "CreateCacheEntry", map[string]any{"key": "go-linux-aaa", "version": "v1"}); m["ok"] != false {
+	if m := twirp(t, ac, "CreateCacheEntry", map[string]any{"key": "go-linux-aaa", "version": "v1"}); m["ok"] != false {
 		t.Fatalf("a second save was allowed: %v", m)
 	}
 
 	// Other calls go to the L2 as they were.
-	if code, out := do(t, http.MethodPost, l1+"/twirp/github.actions.results.api.v1.ArtifactService/Other", []byte("x"), nil); code != 200 || !strings.Contains(string(out), `"artifact":"x"`) {
+	if code, out := do(t, http.MethodPost, ac+"/twirp/github.actions.results.api.v1.ArtifactService/Other", []byte("x"), nil); code != 200 || !strings.Contains(string(out), `"artifact":"x"`) {
 		t.Fatalf("passthrough: %d %s", code, out)
 	}
-	// Without the job's token the L2 says no, through the L1 too.
-	if code, _ := do(t, http.MethodPost, l1+svcPath+"GetCacheEntryDownloadURL", []byte(`{"key":"go-linux-aaa","version":"v1"}`), map[string]string{"Authorization": "Bearer other"}); code != http.StatusUnauthorized {
+	// Without the job's token the L2 says no, through the actions cache too.
+	if code, _ := do(t, http.MethodPost, ac+svcPath+"GetCacheEntryDownloadURL", []byte(`{"key":"go-linux-aaa","version":"v1"}`), map[string]string{"Authorization": "Bearer other"}); code != http.StatusUnauthorized {
 		t.Fatalf("no token: %d", code)
 	}
 
 	// The L2 out of reach: the disk restores what it has.
 	l2.down.Store(true)
-	if key, data, _ := restore(t, l1, "go-linux-zzz", []string{"go-linux-"}); key != "go-linux-bbb" || !bytes.Equal(data, big[:1_000_001]) {
+	if key, data, _ := restore(t, ac, "go-linux-zzz", []string{"go-linux-"}); key != "go-linux-bbb" || !bytes.Equal(data, big[:1_000_001]) {
 		t.Fatalf("L2 down: restored %q (%d bytes)", key, len(data))
 	}
-	code, _ := do(t, http.MethodPost, l1+svcPath+"GetCacheEntryDownloadURL", []byte(`{"key":"none","version":"v1"}`), nil)
+	code, _ := do(t, http.MethodPost, ac+svcPath+"GetCacheEntryDownloadURL", []byte(`{"key":"none","version":"v1"}`), nil)
 	if code != http.StatusBadGateway {
 		t.Fatalf("L2 down, nothing on the disk: %d", code)
 	}
 }
 
-func TestL1CacheWithoutDisk(t *testing.T) {
+func TestActionsCacheWithoutDisk(t *testing.T) {
 	l2 := newFakeL2(t)
 	// The store's parent is the root itself: no disk, so no copies, and
 	// nothing is written there.
-	store := "/fleetci-l1cache-test"
-	l1 := startL1(t, l2.srv.URL+"/", store, false)
-	save(t, l1, "k", []byte("data"), 0)
-	key, data, url := restore(t, l1, "k", nil)
+	store := "/fleetci-actionscache-test"
+	ac := startActionsCache(t, l2.srv.URL+"/", store, false)
+	save(t, ac, "k", []byte("data"), 0)
+	key, data, url := restore(t, ac, "k", nil)
 	if key != "k" || string(data) != "data" || !strings.HasPrefix(url, l2.srv.URL) {
 		t.Fatalf("without a disk: %q %q %s", key, data, url)
 	}
@@ -357,10 +357,10 @@ func TestL1CacheWithoutDisk(t *testing.T) {
 	}
 }
 
-func TestL1CacheDiskFails(t *testing.T) {
+func TestActionsCacheDiskFails(t *testing.T) {
 	l2 := newFakeL2(t)
 	store := filepath.Join(t.TempDir(), "actions")
-	l1 := startL1(t, l2.srv.URL+"/", store, true)
+	ac := startActionsCache(t, l2.srv.URL+"/", store, true)
 	// The disk refuses writes: jobs restore and save all the same.
 	if err := os.MkdirAll(filepath.Join(store, "tmp"), 0o755); err != nil {
 		t.Fatal(err)
@@ -375,14 +375,14 @@ func TestL1CacheDiskFails(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root writes anyway")
 	}
-	save(t, l1, "k", []byte("data"), 0)
+	save(t, ac, "k", []byte("data"), 0)
 	l2.put("other", "v1", []byte("theirs"))
 	for range 2 {
-		if key, data, _ := restore(t, l1, "other", nil); key != "other" || string(data) != "theirs" {
+		if key, data, _ := restore(t, ac, "other", nil); key != "other" || string(data) != "theirs" {
 			t.Fatalf("restore: %q %q", key, data)
 		}
 	}
-	if key, data, _ := restore(t, l1, "k", nil); key != "k" || string(data) != "data" {
+	if key, data, _ := restore(t, ac, "k", nil); key != "k" || string(data) != "data" {
 		t.Fatalf("restore of the save: %q %q", key, data)
 	}
 }
@@ -397,12 +397,12 @@ func withQuery(url, q string) string {
 
 // A miss is fetched to the disk in parallel ranges, as actions/cache would
 // fetch it from Azure, then served from the disk.
-// The job's log ends with what its cache steps got: the L1's summary.
-func TestL1CacheSummary(t *testing.T) {
+// The job's log ends with what its cache steps got: the actions cache's summary.
+func TestActionsCacheSummary(t *testing.T) {
 	l2 := newFakeL2(t)
-	l1 := startL1(t, l2.srv.URL+"/", filepath.Join(t.TempDir(), "actions"), true)
+	ac := startActionsCache(t, l2.srv.URL+"/", filepath.Join(t.TempDir(), "actions"), true)
 	stats := func() string {
-		code, out := do(t, http.MethodGet, l1+"/fleetci/stats", nil, nil)
+		code, out := do(t, http.MethodGet, ac+"/fleetci/stats", nil, nil)
 		if code != http.StatusOK {
 			t.Fatalf("stats: %d %s", code, out)
 		}
@@ -412,10 +412,10 @@ func TestL1CacheSummary(t *testing.T) {
 		t.Fatalf("before: %q", s)
 	}
 	l2.put("deps", "v1", bytes.Repeat([]byte("d"), 3_000_000))
-	restore(t, l1, "deps", nil)
-	restore(t, l1, "deps", nil)
-	restore(t, l1, "nope", nil)
-	save(t, l1, "build", bytes.Repeat([]byte("b"), 2_000_000), 0)
+	restore(t, ac, "deps", nil)
+	restore(t, ac, "deps", nil)
+	restore(t, ac, "nope", nil)
+	save(t, ac, "build", bytes.Repeat([]byte("b"), 2_000_000), 0)
 	s := stats()
 	for _, want := range []string{"1 restored from the cache disk (3 MB)", "1 downloaded to it (3 MB in ", "1 not in the cache", "1 saved, kept on the disk (2 MB)"} {
 		if !strings.Contains(s, want) {
@@ -427,12 +427,12 @@ func TestL1CacheSummary(t *testing.T) {
 // The disk's copy of a key is served only for the entry the cache server
 // names: a disk that started from the default branch's may hold the same
 // key and version of another ref's scope.
-func TestL1CacheServesOnlyTheSameEntry(t *testing.T) {
+func TestActionsCacheServesOnlyTheSameEntry(t *testing.T) {
 	l2 := newFakeL2(t)
 	store := filepath.Join(t.TempDir(), "actions")
-	l1 := startL1(t, l2.srv.URL+"/", store, true)
+	ac := startActionsCache(t, l2.srv.URL+"/", store, true)
 	l2.put("deps", "v1", []byte("this ref's"))
-	restore(t, l1, "deps", nil)
+	restore(t, ac, "deps", nil)
 	metas, _ := filepath.Glob(filepath.Join(store, "*.json"))
 	if len(metas) != 1 {
 		t.Fatalf("%d entries on the disk", len(metas))
@@ -441,31 +441,31 @@ func TestL1CacheServesOnlyTheSameEntry(t *testing.T) {
 	if err := os.WriteFile(metas[0], []byte(`{"key":"deps","version":"v1","size":10,"src":"elsewhere/blob/x"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, data, _ := restore(t, l1, "deps", nil); string(data) != "this ref's" || l2.gets.Load() != 2 {
+	if _, data, _ := restore(t, ac, "deps", nil); string(data) != "this ref's" || l2.gets.Load() != 2 {
 		t.Fatalf("got %q after %d downloads; want the cache server's, downloaded again", data, l2.gets.Load())
 	}
-	if _, _, _ = restore(t, l1, "deps", nil); l2.gets.Load() != 2 {
+	if _, _, _ = restore(t, ac, "deps", nil); l2.gets.Load() != 2 {
 		t.Fatalf("%d downloads; the copy is this entry's now", l2.gets.Load())
 	}
 }
 
-func TestL1CacheFetchesInRanges(t *testing.T) {
+func TestActionsCacheFetchesInRanges(t *testing.T) {
 	l2 := newFakeL2(t)
 	store := filepath.Join(t.TempDir(), "actions")
-	l1 := startL1(t, l2.srv.URL+"/", store, true)
+	ac := startActionsCache(t, l2.srv.URL+"/", store, true)
 	big := make([]byte, 20<<20+123) // three 8 MiB ranges
 	for i := range big {
 		big[i] = byte(i * 7)
 	}
 	l2.put("big", "v1", big)
-	key, data, url := restore(t, l1, "big", nil)
-	if key != "big" || !bytes.Equal(data, big) || !strings.HasPrefix(url, l1) {
+	key, data, url := restore(t, ac, "big", nil)
+	if key != "big" || !bytes.Equal(data, big) || !strings.HasPrefix(url, ac) {
 		t.Fatalf("first restore: %q, %d bytes, equal %v, %s", key, len(data), bytes.Equal(data, big), url)
 	}
 	if g, r := l2.gets.Load(), l2.ranges.Load(); g != 1 || r != 3 {
 		t.Fatalf("%d downloads in %d more ranges; want 1 in 3", g, r)
 	}
-	if _, data, _ = restore(t, l1, "big", nil); !bytes.Equal(data, big) || l2.gets.Load() != 1 {
+	if _, data, _ = restore(t, ac, "big", nil); !bytes.Equal(data, big) || l2.gets.Load() != 1 {
 		t.Fatalf("second restore: equal %v, %d downloads", bytes.Equal(data, big), l2.gets.Load())
 	}
 }
