@@ -364,6 +364,7 @@ func (s *Server) trim() {
 		_ = os.Remove(s.metaPath(e.eid))
 		total -= e.size
 	}
+	s.sweepTrees()
 }
 
 // localMatch is what GitHub would restore, among the disk's entries: scope
@@ -871,9 +872,13 @@ func (s *Server) restore(w *writer, r *http.Request) error {
 			eid := EntryID(m, req.Version)
 			var local string
 			switch {
-			case disk && s.have(eid) && s.sameEntry(eid, name):
+			case disk && s.have(eid) && s.sameEntry(eid, name) && s.localOK(r, eid):
 				s.logf("hit %s", m)
 				local = blobURL(m)
+			case disk && s.have(eid) && s.sameEntry(eid, name) && s.containerMarker(r, eid):
+				// A tree's marker, and a container's tar: the bucket's archive.
+				s.count(func(st *stats) { st.remote++ })
+				local = u
 			case disk:
 				s.logf("miss %s", m)
 				local = s.localURL(r, "/fleetci/fill/"+s.link(fillLink{url: u, key: m, version: req.Version, src: name, scope: str(out, "scope")}))
@@ -894,6 +899,9 @@ func (s *Server) restore(w *writer, r *http.Request) error {
 		m, ok := "", false
 		if disk {
 			m, ok = s.localMatch(req.Key, rks, req.Version, scopes)
+		}
+		if ok && !s.localOK(r, EntryID(m, req.Version)) {
+			ok = false
 		}
 		if !ok {
 			s.count(func(st *stats) { st.none++ })
@@ -1508,7 +1516,16 @@ func (s *Server) upload(r *http.Request, eid string, p pendingSave) (int64, bool
 	if st != http.StatusOK || !truthy(out["ok"]) {
 		return 0, false, fmt.Errorf("the node answered %d", st)
 	}
-	f, err := os.Open(s.blobPath(eid))
+	path := s.blobPath(eid)
+	if IsMarker(path) {
+		// The bucket gets the archive the tree stands for.
+		path = filepath.Join(s.cfg.Store, "tmp", eid+".pack")
+		if err := Pack(s.blobPath(eid), path); err != nil {
+			return 0, false, err
+		}
+		defer os.Remove(path)
+	}
+	f, err := os.Open(path)
 	if err != nil {
 		return 0, false, err
 	}

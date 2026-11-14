@@ -3,6 +3,10 @@
 // has a cache disk.
 //
 //	fleetci-actions-cache PORT UPSTREAM_URL STORE_DIR [any] [remote=off | remote=bucket node=URL]
+//
+// Run as tar (through a link named tar), it is the job's tar for
+// actions/cache, which keeps its folders on the cache disk as folders
+// (actionscache.TarMain).
 package main
 
 import (
@@ -10,6 +14,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -17,6 +22,9 @@ import (
 )
 
 func main() {
+	if filepath.Base(os.Args[0]) == "tar" {
+		os.Exit(actionscache.TarMain(os.Args[1:]))
+	}
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "usage: fleetci-actions-cache PORT UPSTREAM_URL STORE_DIR [any] [remote=off | remote=bucket node=URL]")
 		os.Exit(2)

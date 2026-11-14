@@ -341,11 +341,21 @@ func unmountScript(keep int64) string {
 
 const unmountTmpl = `
 keep=@KEEP@
+# actions/cache's folders mounted from the disk's trees.
+awk '$4 ~ "^/trees/" {print $5}' /proc/self/mountinfo | sort -r | while read -r m; do
+  umount "$m" 2>/dev/null || umount -l "$m" || true
+done
 over() { [ "$(df -B1 --output=used /cache | tail -1)" -gt $keep ]; }
 if over && [ -d /cache/actions ]; then
   for f in $(ls -tr /cache/actions/*.blob 2>/dev/null); do
     over || break
     rm -f "$f" "${f%.blob}.json"
+  done
+fi
+if over && [ -d /cache/trees ]; then
+  for t in $(ls -dtr /cache/trees/*/ 2>/dev/null); do
+    over || break
+    rm -rf "$t"
   done
 fi
 if over; then docker builder prune -f --keep-storage $((keep / 4)) >/dev/null 2>&1 || true; fi

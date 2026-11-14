@@ -150,6 +150,15 @@ if [ "$hook" = cache ] && sudo -n true 2>/dev/null; then
 %[4]s
 HOOK
 fi
+# With saves that stay on the disk (the bucket's, or none), actions/cache
+# keeps its folders there as folders: fleetci-actions-cache is the job's
+# tar (internal/actionscache/tree.go).
+if [ "$hook" = cache ] && [ -n "$ac" ] && [ -n '%[8]s' ] && sudo -n true 2>/dev/null; then
+  mkdir -p "$HOME/fleetci-bin" && ln -sf "$HOME/%[5]s" "$HOME/fleetci-bin/tar"
+  cat >> fleetci-job-started.sh <<'HOOK'
+%[10]s
+HOOK
+fi
 if [ -s fleetci-job-started.sh ]; then
   export ACTIONS_RUNNER_HOOK_JOB_STARTED="$dir/fleetci-job-started.sh"
 fi
@@ -168,6 +177,14 @@ fi
 if [ -n "${FLEETCI_RESULTS_URL:-}" ] &&
   LC_ALL=C grep -qaP 'A\x00C\x00T\x00I\x00O\x00N\x00S\x00_\x00R\x00E\x00S\x00U\x00L\x00T\x00S\x00_\x00U\x00R\x00L\x00' "$(dirname "$0")/bin/Runner.Worker.dll" 2>/dev/null; then
   echo "::warning::fleetci: this runner isn't patched, so actions/cache goes to GitHub's cache, not $FLEETCI_RESULTS_URL"
+fi
+`
+
+// treesHook runs after jobStartedHook, once the job has its cache disk:
+// the disk gets the trees' folder, and the job fleetci's tar.
+const treesHook = `if mountpoint -q /cache 2>/dev/null && [ -n "${GITHUB_PATH:-}" ] &&
+  sudo -n mkdir -p /cache/trees && sudo -n chown "$(id -u):$(id -g)" /cache/trees; then
+  echo "$HOME/fleetci-bin" >> "$GITHUB_PATH"
 fi
 `
 
@@ -217,7 +234,7 @@ func SSHStart(version string, cs CacheStore, log hclog.Logger) StartFunc {
 
 // vmScript is runScript for the runner version and cache store given.
 func vmScript(version string, cs CacheStore) string {
-	return fmt.Sprintf(runScript, version, cs.URL, DefaultRunnerVersion, jobStartedHook, actionsCachePath, actionsCachePort, githubResultsURL, cs.actionsCacheArgs(), resultsHook)
+	return fmt.Sprintf(runScript, version, cs.URL, DefaultRunnerVersion, jobStartedHook, actionsCachePath, actionsCachePort, githubResultsURL, cs.actionsCacheArgs(), resultsHook, treesHook)
 }
 
 // followTries is how many times in a row following the runner may fail
