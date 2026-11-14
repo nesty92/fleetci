@@ -100,7 +100,7 @@ func (s *Store) Stream(ctx context.Context, snap *Snapshot, w io.Writer, st *Sta
 		}
 	}
 	g, gctx := errgroup.WithContext(ctx)
-	ahead := make(chan struct{}, Workers*2) // ranges read and not yet written
+	ahead := make(chan struct{}, Conns) // ranges read and not yet written
 	g.Go(func() error {
 		for _, j := range jobs {
 			select {

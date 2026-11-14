@@ -75,8 +75,15 @@ var MaxRange int64 = 16 << 20
 // little either way.
 var Level = zstd.SpeedFastest
 
-// Workers is how many files are hashed, and objects moved, at once.
+// Workers is how many files are hashed, and written, at once: work for
+// the CPUs and the disk.
 var Workers = max(4, runtime.NumCPU())
+
+// Conns is how many objects are read or written in the bucket at once,
+// whatever the CPUs: a bucket far away gives each connection a few tens
+// of MB/s after a round trip of 100 to 200 ms, so a VM of 2 CPUs needs as
+// many as one of 16. Each holds up to a pack in memory.
+var Conns = 16
 
 // Entry is one path of a snapshot. Hash is set for files, Link for
 // symbolic links.
@@ -194,7 +201,7 @@ func (s *Store) Load(ctx context.Context, st *Stats) error {
 		return err
 	}
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(Workers)
+	g.SetLimit(Conns)
 	for _, n := range names {
 		s.mu.Lock()
 		done := s.loaded[n]
@@ -574,7 +581,7 @@ func (s *Store) listings(ctx context.Context, spans []treeSpan, st *Stats) (map[
 	got := map[string][]byte{}
 	var mu sync.Mutex
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(Workers * 2)
+	g.SetLimit(Conns)
 	for _, sp := range spans {
 		g.Go(func() error {
 			b, err := s.r.Get(gctx, sp.Pack, sp.Off, sp.End-sp.Off)
@@ -636,7 +643,7 @@ func (s *Store) fetch(ctx context.Context, hs []string, st *Stats, fn func(h str
 	}
 	s.mu.Unlock()
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(Workers * 2)
+	g.SetLimit(Conns)
 	for pack, hs := range byPack {
 		for _, rg := range s.ranges(hs) {
 			g.Go(func() error {
@@ -688,7 +695,7 @@ type packer struct {
 func newPacker(ctx context.Context, s *Store, st *Stats) *packer {
 	codecs()
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(Workers)
+	g.SetLimit(Conns)
 	return &packer{s: s, st: st, ctx: gctx, g: g, files: map[string]where{}, written: map[string]where{}}
 }
 
