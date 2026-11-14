@@ -583,3 +583,28 @@ A web entry's tree is 944 MB to 1.9 GB, of which about a third is new
 each commit (Next.js's build cache, as the store of packages changes
 less); Go's is 3.4 GB, of which about a fifth is new. That is bucket
 traffic and storage; the jobs' own time is in the packing.
+
+### Folders on the disk, not archives
+
+The same load (20 PRs every 150 s, same arrivals), bucket and disk, with
+actions/cache's folders kept on the cache disk as folders
+(`internal/actionscache/tree.go`): a restore of a folder the node's disk
+has mounts it, and a save of a mounted folder copies nothing; the bucket
+still gets an archive, packed after the job.
+
+| | bucket and disk | folders on the disk |
+|---|---|---|
+| jobs (failed) | 74 (0) | 70 (0) |
+| go p50 (p95) | 72 s (263 s) | 46 s (282 s) |
+| web p50 (p95) | 124 s (156 s) | 102 s (142 s) |
+| go restore, save p50 | 4.0 s, 10.0 s | 1.0 s, 1.0 s |
+| web restore, save p50 | 8.0 s, 10.5 s | 6.0 s, 3.5 s |
+| restores mounted | | go 21 of 36, web 16 of 36 |
+| web `pnpm install` p50 | 5.1 s | 12.8 s |
+
+A restore mounts only on the node whose disk has the folder; on the
+other three it is the bucket's archive, unpacked, and the save copies
+the folder in once. `pnpm install` is slower: pnpm hard-links its store
+into `node_modules`, and Linux doesn't link across mount points, so from
+a mounted store it copies each file. `next build` was 55 s against 67 s,
+with no packing on the CPUs the VMs share.
