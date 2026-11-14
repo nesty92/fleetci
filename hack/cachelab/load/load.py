@@ -45,6 +45,10 @@ REMOTE = {"github": "git@github.com:WireZone/fleetci-playground.git",
 CLASSES = {"go": "4vcpu-4gb", "web": "2vcpu-4gb"}
 # GitLab over HTTPS with glab's login: the SSH key may be another account's.
 CRED = ["-c", "credential.https://gitlab.com.helper=", "-c", "credential.https://gitlab.com.helper=!glab auth git-credential"]
+# Where the GitHub jobs' caches must go, as the lab controller is set:
+# "github" (GitHub's cache) or "bucket". The first finished jobs are
+# checked, and a run measuring something else stops there.
+EXPECT = os.environ.get("LOAD_EXPECT", "")
 METRICS = os.environ.get("LOAD_METRICS", "docker exec fleetci-cachelab wget -qO- http://127.0.0.1:9482/metrics").split()
 STAMP = re.compile(r"^20\d\d-\d\d-\d\dT[\d:.]+Z (\d\d[OE]\+? )?")
 SECTION = re.compile(r"section_(start|end):(\d+):([\w.-]+)")
@@ -81,6 +85,7 @@ def ts(s):
 
 class Load:
     def __init__(self, forge, mode, run, prs, every):
+        self.checked = False
         self.forge, self.mode, self.run, self.prs, self.every = forge, mode, run, prs, every
         self.dir = os.path.join(OUT, "work", f"{forge}-{run}")
         self.git = ["git", "-C", self.dir, "-c", "user.name=nesty92", "-c", "user.email=nesty92@users.noreply.github.com"] + CRED
@@ -185,6 +190,20 @@ class Load:
             train = [l for l in lines if l.startswith("TRAIN ")]
             q = f"{rec['queued']:.0f}s" if rec["queued"] is not None else "?"
             log(f"  {kind} {n} {j['name']}: queued {q}, {train[-1][:150] if train else 'no TRAIN line'}")
+        if js and not self.checked:
+            self.check_store()
+
+    def check_store(self):
+        """After the first jobs: their caches went where the run says."""
+        self.checked = True
+        if self.forge != "github" or not EXPECT:
+            return
+        on_github = (api("github", f"repos/{GH}/actions/caches?key=load-{self.run}-") or {}).get("total_count", 0)
+        want = {"github": self.mode != "nocache", "bucket": False}[EXPECT]
+        if bool(on_github) != want:
+            raise SystemExit(f"wrong setup: {on_github} of this run's caches are in GitHub's cache, "
+                             f"want {'some' if want else 'none'} (LOAD_EXPECT={EXPECT}, mode {self.mode})")
+        log(f"setup checked: {on_github} of this run's caches in GitHub's cache, as LOAD_EXPECT={EXPECT} wants")
 
     def metrics(self, name):
         r = subprocess.run(METRICS, capture_output=True, text=True)
