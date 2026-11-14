@@ -150,16 +150,23 @@ func (s *Store) Stream(ctx context.Context, snap *Snapshot, w io.Writer, st *Sta
 		return nil
 	})
 	g.Go(func() error {
-		for _, j := range jobs {
+		for i, j := range jobs {
 			var b []byte
+			t := time.Now()
 			select {
 			case b = <-j.done:
 			case <-gctx.Done():
 				return gctx.Err()
 			}
+			t2 := time.Now()
+			st.Starved += t2.Sub(t)
+			if i == 0 {
+				st.FirstFile = t2.Sub(start)
+			}
 			if _, err := w.Write(b); err != nil {
 				return err
 			}
+			st.Blocked += time.Since(t2)
 			for _, h := range j.sp.hs {
 				for _, e := range paths[h] {
 					st.Files++

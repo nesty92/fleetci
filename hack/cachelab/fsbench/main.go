@@ -143,7 +143,8 @@ func main() {
 		in.Close()
 		must(cmd.Wait())
 		must(serr)
-		return fmt.Sprintf("%.0fM in %d gets", mb(st.GetBytes), st.Get)
+		return fmt.Sprintf("%.0fM in %d gets, first file %.2fs, starved %.2fs, blocked %.2fs", mb(st.GetBytes), st.Get,
+			st.FirstFile.Seconds(), st.Starved.Seconds(), st.Blocked.Seconds())
 	})
 	// The stream alone, into nothing: what the stock path costs before tar.
 	run("null", nil, func(int) string {

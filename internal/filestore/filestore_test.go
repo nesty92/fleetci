@@ -95,6 +95,7 @@ func TestSaveUploadsOnlyNewFilesAndRestoresBoth(t *testing.T) {
 	if err := os.Symlink("1", filepath.Join(d1, "a", "link")); err != nil {
 		t.Fatal(err)
 	}
+	ago(t, d1) // well before the save, so the next one trusts their times
 	snap1, st1, err := s.Save(ctx, d1, "s1", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -163,5 +164,55 @@ func TestRestoreRefusesPathsOutside(t *testing.T) {
 	snap := &Snapshot{Entries: []Entry{{Path: "../x", Hash: "00"}}}
 	if err := s.Restore(context.Background(), snap, t.TempDir(), "", nil, &Stats{}); err == nil {
 		t.Fatal("restored a path outside the folder")
+	}
+}
+
+// ago dates root's files an hour back.
+func ago(t *testing.T, root string) {
+	t.Helper()
+	old := time.Now().Add(-time.Hour)
+	_ = filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err == nil && d.Type().IsRegular() {
+			_ = os.Chtimes(p, old, old)
+		}
+		return nil
+	})
+}
+
+// A file changed in the second its save looked at it, its size and time
+// kept, is read again by the next save, not taken for what it was.
+func TestSaveRereadsAFileChangedWithinItsTimesGrain(t *testing.T) {
+	ctx := context.Background()
+	m := &memRemote{objs: map[string][]byte{}}
+	s := New(m, "c")
+	d := t.TempDir()
+	writeTree(t, d, map[string]string{"old": "old one", "new": "aaaa"})
+	ago(t, d)
+	now := time.Now().Truncate(time.Second)
+	f := filepath.Join(d, "new")
+	_ = os.Chtimes(f, now, now)
+	snap1, _, err := s.Save(ctx, d, "s1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The same size, the same time, other content: as a tool that
+	// restores times, or a filesystem with seconds, would leave it.
+	if err := os.WriteFile(f, []byte("bbbb"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Chtimes(f, now, now)
+	snap2, st, err := s.Save(ctx, d, "s2", snap1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Hashed != 4 {
+		t.Fatalf("hashed %d bytes, want the 4 of the racy file only", st.Hashed)
+	}
+	out := t.TempDir()
+	if err := New(m, "c").Restore(ctx, snap2, out, "", nil, &Stats{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readTree(t, out); got["new"] != "bbbb" || got["old"] != "old one" {
+		t.Fatalf("restored %v", got)
 	}
 }

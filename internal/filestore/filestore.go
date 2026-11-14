@@ -53,8 +53,21 @@ type Remote interface {
 	Get(ctx context.Context, name string, off, n int64) ([]byte, error)
 }
 
+// Opener is a Remote that can also hand a read over as it arrives, so
+// files are written while the rest of their range is still on its way: a
+// range from a bucket far away takes most of a second.
+type Opener interface {
+	Open(ctx context.Context, name string, off, n int64) (io.ReadCloser, error)
+}
+
 // PackSize is what a pack is filled to before it is uploaded.
 var PackSize = 16 << 20
+
+// MaxRange is about the most one read joins (a read may run a quarter
+// over, so that a whole pack is one read). A bucket far away answers a
+// read in a round trip of 100 to 200 ms; a read must be long enough that
+// its transfer, not the wait, takes most of its time.
+var MaxRange int64 = 16 << 20
 
 // Level is the files' compression.
 // The fastest uploads 4 to 6% more than the default on a first save of
@@ -101,6 +114,7 @@ type snapObj struct {
 	Files int        `json:"files"`
 	Bytes int64      `json:"bytes"`
 	Trees []treeSpan `json:"trees,omitempty"`
+	Taken int64      `json:"taken,omitempty"`
 }
 
 // treeSpan is a run of listings' frames in a pack of listings.
@@ -112,7 +126,17 @@ type treeSpan struct {
 // Snapshot is one save.
 type Snapshot struct {
 	Entries []Entry `json:"entries"`
+	// Taken is when the save that made it began to look at the folder, in
+	// Unix nanoseconds. A file whose time is not well before it may have
+	// changed again within its time's grain, and is read again by the
+	// next save, as git treats a racily clean file.
+	Taken int64 `json:"taken,omitempty"`
 }
+
+// racy is how close to a snapshot's Taken a file's time must not be for
+// the next save to trust it: more than the coarsest time grain of the
+// filesystems a cache lands on.
+const racy = int64(2 * time.Second)
 
 // where is a file's frame in a pack.
 type where struct {
@@ -156,6 +180,9 @@ type Stats struct {
 	Get, GetBytes      int64 // requests and bytes downloaded
 	Local, LocalBytes  int64 // files copied from a folder on the node
 	IndexLoad, Elapsed time.Duration
+	// Of a stream: when its first file went out, and how long it waited
+	// for the bucket and for its reader.
+	FirstFile, Starved, Blocked time.Duration
 }
 
 // Load reads the index objects this store has not read yet.
@@ -204,15 +231,18 @@ func (s *Store) Load(ctx context.Context, st *Stats) error {
 func (s *Store) Save(ctx context.Context, root, name string, prev *Snapshot) (*Snapshot, Stats, error) {
 	start := time.Now()
 	var st Stats
+	// A file is known by its size and time as prev has them, unless that
+	// time was too close to prev's save to say the file has not changed
+	// since.
 	known := map[string]Entry{}
 	if prev != nil {
 		for _, e := range prev.Entries {
-			if e.Hash != "" {
+			if e.Hash != "" && e.MTime < prev.Taken-racy {
 				known[e.Path] = e
 			}
 		}
 	}
-	snap := &Snapshot{}
+	snap := &Snapshot{Taken: time.Now().UnixNano()}
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -269,16 +299,26 @@ func (s *Store) Save(ctx context.Context, root, name string, prev *Snapshot) (*S
 			if gctx.Err() != nil {
 				return gctx.Err()
 			}
-			var b []byte
-			if e.Hash == "" {
-				var err error
-				if b, err = os.ReadFile(filepath.Join(root, filepath.FromSlash(e.Path))); err != nil {
-					return err
+			if e.Hash != "" {
+				s.mu.Lock()
+				_, have := s.idx[e.Hash]
+				s.mu.Unlock()
+				if have {
+					return nil // known by its time, and in the bucket
 				}
-				sum := sha256.Sum256(b)
-				e.Hash = hex.EncodeToString(sum[:])
-				atomic.AddInt64(&st.Hashed, int64(len(b)))
 			}
+			// Read, and hashed for what was read, whatever the walk saw or
+			// prev said: the file is what these bytes are, with the size
+			// and time they were read at.
+			b, fi, err := readStill(filepath.Join(root, filepath.FromSlash(e.Path)))
+			if err != nil {
+				return err
+			}
+			sum := sha256.Sum256(b)
+			e.Hash = hex.EncodeToString(sum[:])
+			atomic.AddInt64(&st.Hashed, int64(len(b)))
+			atomic.AddInt64(&st.Bytes, int64(len(b))-e.Size)
+			e.Size, e.MTime = int64(len(b)), fi.ModTime().UnixNano()
 			s.mu.Lock()
 			_, have := s.idx[e.Hash]
 			s.mu.Unlock()
@@ -289,13 +329,6 @@ func (s *Store) Save(ctx context.Context, root, name string, prev *Snapshot) (*S
 			}
 			pending[e.Hash] = true
 			pmu.Unlock()
-			if b == nil {
-				// Known by its time, but not in the bucket's index.
-				var err error
-				if b, err = os.ReadFile(filepath.Join(root, filepath.FromSlash(e.Path))); err != nil {
-					return err
-				}
-			}
 			return p.add(e.Hash, b, false)
 		})
 	}
@@ -309,12 +342,16 @@ func (s *Store) Save(ctx context.Context, root, name string, prev *Snapshot) (*S
 		tp.abort()
 		return nil, st, err
 	}
+	// Both packers' last uploads at once.
+	var wt map[string]where
+	var terr error
+	tdone := make(chan struct{})
+	go func() { wt, terr = tp.close(); close(tdone) }()
 	written, err := p.close()
-	if err != nil {
-		tp.abort()
-		return nil, st, err
+	<-tdone
+	if err == nil {
+		err = terr
 	}
-	wt, err := tp.close()
 	if err != nil {
 		return nil, st, err
 	}
@@ -334,7 +371,7 @@ func (s *Store) Save(ctx context.Context, root, name string, prev *Snapshot) (*S
 		s.loaded[n] = true
 		s.mu.Unlock()
 	}
-	o := snapObj{Root: top, Files: st.Files, Bytes: st.Bytes}
+	o := snapObj{Root: top, Files: st.Files, Bytes: st.Bytes, Taken: snap.Taken}
 	byPack := map[string][]string{}
 	for _, h := range lists {
 		byPack[s.where(h).Pack] = append(byPack[s.where(h).Pack], h)
@@ -458,18 +495,20 @@ func depth(p string) int { return strings.Count(p, "/") }
 // level at a time.
 func (s *Store) Snap(ctx context.Context, name string, st *Stats) (*Snapshot, error) {
 	codecs()
-	b, err := s.r.Get(ctx, s.prefix+"snaps/"+name, 0, -1)
-	if err != nil {
-		return nil, err
-	}
-	atomic.AddInt64(&st.Get, 1)
-	atomic.AddInt64(&st.GetBytes, int64(len(b)))
-	var o snapObj
-	if err := json.Unmarshal(b, &o); err != nil {
-		return nil, err
-	}
+	// The index is read while the snapshot is: a round trip less.
 	loaded := make(chan error, 1)
 	go func() { loaded <- s.Load(ctx, st) }()
+	b, err := s.r.Get(ctx, s.prefix+"snaps/"+name, 0, -1)
+	var o snapObj
+	if err == nil {
+		atomic.AddInt64(&st.Get, 1)
+		atomic.AddInt64(&st.GetBytes, int64(len(b)))
+		err = json.Unmarshal(b, &o)
+	}
+	if err != nil {
+		<-loaded
+		return nil, err
+	}
 	got, err := s.listings(ctx, o.Trees, st)
 	if err != nil {
 		<-loaded
@@ -478,7 +517,7 @@ func (s *Store) Snap(ctx context.Context, name string, st *Stats) (*Snapshot, er
 	if err := <-loaded; err != nil {
 		return nil, err
 	}
-	snap := &Snapshot{}
+	snap := &Snapshot{Taken: o.Taken}
 	level := map[string][]string{o.Root: {""}} // a listing's hash: the folders it lists
 	for len(level) > 0 {
 		var hs []string
@@ -601,15 +640,18 @@ func (s *Store) fetch(ctx context.Context, hs []string, st *Stats, fn func(h str
 	for pack, hs := range byPack {
 		for _, rg := range s.ranges(hs) {
 			g.Go(func() error {
-				b, err := s.r.Get(gctx, pack, rg.off, rg.end-rg.off)
+				next, done, err := s.read(gctx, pack, rg, st)
 				if err != nil {
 					return err
 				}
-				atomic.AddInt64(&st.Get, 1)
-				atomic.AddInt64(&st.GetBytes, int64(len(b)))
+				defer done()
 				for _, h := range rg.hs {
 					w := s.where(h)
-					raw, err := dec.DecodeAll(b[w.Off-rg.off:w.Off-rg.off+w.Len], make([]byte, 0, w.Raw))
+					frame, err := next(w)
+					if err != nil {
+						return err
+					}
+					raw, err := dec.DecodeAll(frame, make([]byte, 0, w.Raw))
 					if err != nil {
 						return fmt.Errorf("blob %s: %w", h, err)
 					}
@@ -858,6 +900,52 @@ func (s *Store) Restore(ctx context.Context, snap *Snapshot, dst string, local s
 	return nil
 }
 
+// readStill reads the file at path whole, and its size and time as it was
+// read: again if it changed while it was read, and as last read if it
+// keeps changing (a save of a folder in use is of whatever it held).
+func readStill(path string) ([]byte, fs.FileInfo, error) {
+	var b []byte
+	var after fs.FileInfo
+	for try := 0; ; try++ {
+		f, err := os.Open(path)
+		if err != nil {
+			return nil, nil, err
+		}
+		before, err := f.Stat()
+		if err == nil {
+			b = make([]byte, 0, before.Size()+1)
+			b, err = readAll(f, b)
+		}
+		if err == nil {
+			after, err = f.Stat()
+		}
+		f.Close()
+		if err != nil {
+			return nil, nil, err
+		}
+		if try == 2 || before.Size() == after.Size() && before.ModTime().Equal(after.ModTime()) && int64(len(b)) == after.Size() {
+			return b, after, nil
+		}
+	}
+}
+
+// readAll is io.ReadAll into b, which has room for the whole file.
+func readAll(f *os.File, b []byte) ([]byte, error) {
+	for {
+		if len(b) == cap(b) {
+			b = append(b, 0)[:len(b)]
+		}
+		n, err := f.Read(b[len(b):cap(b)])
+		b = b[:len(b)+n]
+		if err == io.EOF {
+			return b, nil
+		}
+		if err != nil {
+			return b, err
+		}
+	}
+}
+
 // writeFile writes b as e at path, with e's mode and time.
 func writeFile(path string, b []byte, e *Entry) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, e.Mode.Perm())
@@ -921,14 +1009,16 @@ type span struct {
 	hs       []string
 }
 
-// ranges joins a pack's frames into reads, bridging gaps under 1 MiB:
-// fewer requests for a few wasted bytes.
+// ranges joins a pack's frames into reads of up to MaxRange, bridging gaps
+// under 1 MiB: fewer requests for a few wasted bytes, but enough of them to
+// fill the connections a store reads over, each of which a bucket far away
+// serves at a few tens of MB/s, and a first file soon for the stream.
 func (s *Store) ranges(hs []string) []span {
 	sort.Slice(hs, func(i, j int) bool { return s.where(hs[i]).Off < s.where(hs[j]).Off })
 	var out []span
 	for _, h := range hs {
 		w := s.where(h)
-		if n := len(out); n > 0 && w.Off-out[n-1].end < 1<<20 && w.Off+w.Len-out[n-1].off <= 4*int64(PackSize) {
+		if n := len(out); n > 0 && w.Off-out[n-1].end < 1<<20 && w.Off+w.Len-out[n-1].off <= MaxRange+MaxRange/4 {
 			out[n-1].end = max(out[n-1].end, w.Off+w.Len)
 			out[n-1].hs = append(out[n-1].hs, h)
 			continue
@@ -936,6 +1026,50 @@ func (s *Store) ranges(hs []string) []span {
 		out = append(out, span{off: w.Off, end: w.Off + w.Len, hs: []string{h}})
 	}
 	return out
+}
+
+// read opens rg of pack and gives its frames in order, each by next(w) for
+// the frames rg.hs name, as they arrive when the Remote is an Opener; a
+// frame next gives is valid until its next call. done closes the read.
+func (s *Store) read(ctx context.Context, pack string, rg span, st *Stats) (next func(where) ([]byte, error), done func(), err error) {
+	n := rg.end - rg.off
+	o, ok := s.r.(Opener)
+	if !ok {
+		b, err := s.r.Get(ctx, pack, rg.off, n)
+		if err != nil {
+			return nil, nil, err
+		}
+		st.addGet(len(b))
+		return func(w where) ([]byte, error) { return b[w.Off-rg.off : w.Off-rg.off+w.Len], nil }, func() {}, nil
+	}
+	body, err := o.Open(ctx, pack, rg.off, n)
+	if err != nil {
+		return nil, nil, err
+	}
+	atomic.AddInt64(&st.Get, 1)
+	at := rg.off
+	var buf []byte
+	next = func(w where) ([]byte, error) {
+		if w.Off < at {
+			return nil, fmt.Errorf("pack %s: frames out of order at %d", pack, w.Off)
+		}
+		if gap := w.Off - at; gap > 0 {
+			if _, err := io.CopyN(io.Discard, body, gap); err != nil {
+				return nil, fmt.Errorf("pack %s: %w", pack, err)
+			}
+		}
+		if int64(cap(buf)) < w.Len {
+			buf = make([]byte, w.Len)
+		}
+		b := buf[:w.Len]
+		if _, err := io.ReadFull(body, b); err != nil {
+			return nil, fmt.Errorf("pack %s: %w", pack, err)
+		}
+		atomic.AddInt64(&st.GetBytes, w.Off+w.Len-at)
+		at = w.Off + w.Len
+		return b, nil
+	}
+	return next, func() { body.Close() }, nil
 }
 
 func mustHash(h string) [32]byte {
