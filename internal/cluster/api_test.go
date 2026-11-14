@@ -346,6 +346,7 @@ func TestMetrics(t *testing.T) {
 		resp.Body.Close()
 	}
 	wait("small", 42*time.Second)
+	f.c.GitHubPickup()("small", "poll", 3*time.Second)
 	srv := httptest.NewServer(f.c.metricsHandler())
 	defer srv.Close()
 	resp, err := http.Get(srv.URL + "/metrics")
@@ -362,6 +363,7 @@ func TestMetrics(t *testing.T) {
 		`fleetci_github_api_requests_total{code="200"} 1`,
 		`fleetci_github_api_ratelimit_remaining{resource="core"} 4999`,
 		`fleetci_fleet_queue_wait_seconds_sum{class="small",forge="github"} 42`,
+		`fleetci_fleet_pickup_seconds_sum{class="small",forge="github",via="poll"} 3`,
 		`fleetci_fleet_leader_changes_total 0`,
 		`fleetci_fleet_job_cache_total{class="small",forge="gitlab",from="fallback"} 1`,
 		`fleetci_fleet_worker_cache_used_bytes{worker="w1"} 5.36870912e+09`,

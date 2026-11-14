@@ -342,6 +342,52 @@ func TestDispatcherRetriesFailedRunner(t *testing.T) {
 	}
 }
 
+// A job's pickup is told once, from GitHub queuing it to fleetci first
+// taking it, however many runners it then takes.
+func TestDispatcherTellsAJobsPickupOnce(t *testing.T) {
+	defer func(p time.Duration) { retryPause = p }(retryPause)
+	retryPause = 10 * time.Millisecond
+
+	created := time.Now().Add(-7 * time.Second).UTC().Format(time.RFC3339)
+	gh := &fakeGitHub{t: t, jit: map[string][]string{}, jobsJSON: `{"jobs":[
+	  {"id":1,"name":"build","status":"queued","labels":["fleetci"],"created_at":"` + created + `"}
+	]}`}
+	srv := httptest.NewServer(gh)
+	defer srv.Close()
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	_ = os.WriteFile(tokenFile, []byte("test-token"), 0o600)
+
+	var starts atomic.Int32
+	start := func(context.Context, VM, string, func(string)) error {
+		starts.Add(1)
+		return fmt.Errorf("download failed")
+	}
+	var mu sync.Mutex
+	var told []string
+	pickup := func(class, via string, wait time.Duration) {
+		mu.Lock()
+		defer mu.Unlock()
+		told = append(told, fmt.Sprintf("%s %s %v", class, via, wait >= 6*time.Second && wait < time.Minute))
+	}
+	backend := &fakeBackend{defaultClass: "2vcpu-1gb"}
+	d, err := New(t.Context(), Config{Repos: []string{"o/r"}, TokenFile: tokenFile, PollInterval: fleet.Duration(5 * time.Millisecond), APIURL: srv.URL, Pickup: pickup},
+		backend, start, hclog.NewNullLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { d.Run(ctx); close(done) }()
+	waitFor(t, func() bool { return starts.Load() == maxTries })
+	cancel()
+	<-done
+	mu.Lock()
+	defer mu.Unlock()
+	if len(told) != 1 || told[0] != "2vcpu-1gb poll true" {
+		t.Errorf("pickups told: %q, want one, by poll, of about 7s", told)
+	}
+}
+
 // A job's next runner is not started once another runner has taken it.
 func TestDispatcherSkipsAJobTakenElsewhere(t *testing.T) {
 	defer func(p time.Duration) { retryPause = p }(retryPause)

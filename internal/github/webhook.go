@@ -134,7 +134,7 @@ func (d *Dispatcher) event(ev delivery) {
 		d.watched[ev.Job.ID] = repo
 		d.mu.Unlock()
 		if ctx != nil && ctx.Err() == nil {
-			d.offer(ctx, repo, ev.Job)
+			d.offer(ctx, repo, ev.Job, "webhook")
 		}
 	case "in_progress", "completed":
 		d.mu.Lock()
@@ -183,6 +183,6 @@ func (d *Dispatcher) recheck(ctx context.Context) {
 			d.mu.Unlock()
 			continue
 		}
-		d.offer(ctx, w.repo, j)
+		d.offer(ctx, w.repo, j, "poll")
 	}
 }

@@ -32,6 +32,7 @@ type metrics struct {
 	cacheFrom     *prometheus.CounterVec
 	leaderChanges prometheus.Counter
 	queueWait     *prometheus.HistogramVec
+	pickup        *prometheus.HistogramVec
 	ghRequests    *prometheus.CounterVec
 	ghSeconds     prometheus.Histogram
 	ghRemaining   *prometheus.GaugeVec
@@ -66,6 +67,10 @@ func newMetrics(c *Controller) *metrics {
 			Name: "fleetci_fleet_queue_wait_seconds", Help: "From the forge queuing a job to its VM being up, as this controller led.",
 			Buckets: []float64{1, 2, 5, 10, 20, 30, 60, 120, 300, 600, 1800, 3600},
 		}, []string{"forge", "class"}),
+		pickup: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name: "fleetci_fleet_pickup_seconds", Help: "From the forge queuing a job to fleetci first taking it, by how it came (poll or webhook), as this controller led: fleetci's own part of the queue wait.",
+			Buckets: []float64{0.5, 1, 2, 5, 10, 20, 30, 60, 120, 300},
+		}, []string{"forge", "class", "via"}),
 		ghRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "fleetci_github_api_requests_total", Help: "Calls to GitHub's API, by HTTP status; code 0 for those that got no answer.",
 		}, []string{"code"}),
@@ -77,7 +82,7 @@ func newMetrics(c *Controller) *metrics {
 			Name: "fleetci_github_api_ratelimit_remaining", Help: "The calls GitHub's rate limit had left, as its last answer said, by resource.",
 		}, []string{"resource"}),
 	}
-	m.reg.MustRegister(m.jobs, m.vms, m.duration, m.boot, m.cacheFrom, m.leaderChanges, m.queueWait, m.ghRequests, m.ghSeconds, m.ghRemaining, fleetCollector{c},
+	m.reg.MustRegister(m.jobs, m.vms, m.duration, m.boot, m.cacheFrom, m.leaderChanges, m.queueWait, m.pickup, m.ghRequests, m.ghSeconds, m.ghRemaining, fleetCollector{c},
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	return m
 }
@@ -214,6 +219,14 @@ func (c *Controller) GitHubMetrics() (http.RoundTripper, func(class string, wait
 	m := c.metrics
 	return githubTransport{m: m, next: http.DefaultTransport}, func(class string, wait time.Duration) {
 		m.queueWait.WithLabelValues("github", class).Observe(wait.Seconds())
+	}
+}
+
+// GitHubPickup is what the GitHub dispatcher tells how long each job took
+// to reach it.
+func (c *Controller) GitHubPickup() func(class, via string, wait time.Duration) {
+	return func(class, via string, wait time.Duration) {
+		c.metrics.pickup.WithLabelValues("github", class, via).Observe(wait.Seconds())
 	}
 }
 

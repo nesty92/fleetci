@@ -115,6 +115,7 @@ func fleetSources(ctx context.Context, c *cluster.Controller, held *gitlab.Held,
 		gcfg.NameByJob = true    // one runner per job across leaders: GitHub refuses the second
 		gcfg.HandOverIdle = true // a leader stepping down leaves its runners to their workers
 		gcfg.Transport, gcfg.QueueWait = c.GitHubMetrics()
+		gcfg.Pickup = c.GitHubPickup()
 		d, err := github.New(ctx, gcfg, capacity, c.GitHubStart(gcfg), log.Named("github"))
 		if err != nil {
 			return err

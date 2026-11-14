@@ -131,6 +131,11 @@ type Config struct {
 	// QueueWait, set by fleetci's controller, is told how long each job
 	// waited, from GitHub queuing it to its VM being up.
 	QueueWait func(class string, wait time.Duration) `json:"-" toml:"-"`
+	// Pickup, set by fleetci's controller, is told how long each job took
+	// to reach fleetci, from GitHub queuing it to fleetci first taking it,
+	// and how it came: "poll" or "webhook". It is fleetci's own part of a
+	// job's wait; the rest is waiting for room.
+	Pickup func(class, via string, wait time.Duration) `json:"-" toml:"-"`
 }
 
 // claimTimeout is how long a job whose runner's name GitHub already has,
@@ -680,7 +685,7 @@ func (d *Dispatcher) pollAll(ctx context.Context) {
 		}
 		for _, j := range jobs {
 			queued[j.ID] = true
-			d.offer(ctx, repo, j)
+			d.offer(ctx, repo, j, "poll")
 		}
 	}
 	if whole {
@@ -710,9 +715,16 @@ func (d *Dispatcher) unwait(queued map[int64]bool) {
 
 // offer starts a runner for a queued job, unless it has one or isn't
 // fleetci's.
-func (d *Dispatcher) offer(ctx context.Context, repo string, j job) {
+func (d *Dispatcher) offer(ctx context.Context, repo string, j job, via string) {
 	class, ok := d.classFor(repo, j)
-	if !ok || !d.take(j.ID) {
+	if !ok {
+		return
+	}
+	took, first := d.take(j.ID)
+	if first && d.cfg.Pickup != nil && !j.CreatedAt.IsZero() {
+		d.cfg.Pickup(class, via, max(time.Since(j.CreatedAt), 0))
+	}
+	if !took {
 		return
 	}
 	d.mu.Lock()
@@ -776,7 +788,7 @@ func (d *Dispatcher) classFor(repo string, j job) (string, bool) {
 	return class, true
 }
 
-func (d *Dispatcher) take(id int64) bool {
+func (d *Dispatcher) take(id int64) (took, first bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	a, ok := d.taken[id]
@@ -784,14 +796,15 @@ func (d *Dispatcher) take(id int64) bool {
 	case !ok:
 		a = &attempt{}
 		d.taken[id] = a
+		first = true
 	case a.running || a.tries >= maxTries || time.Now().Before(a.retryAt):
-		return false
+		return false, false
 	}
 	a.tries++
 	a.serves++
 	a.running = true
 	a.at = time.Now()
-	return true
+	return true, first
 }
 
 // attempt tracks the runners started for one job.
