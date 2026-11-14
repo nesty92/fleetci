@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"io/fs"
 	"sort"
 	"time"
 
@@ -18,9 +19,14 @@ import (
 // the padding after each file and the end are framed here, as Podman's
 // zstd:chunked layers frame headers and contents apart.
 //
-// Folders come first, then links, then the files in the order their
-// frames sit in the packs, so the packs are read front to back, a few
-// ranges ahead of the writer.
+// Folders come first, writable by their owner whatever their mode, then
+// links, then the files in the order their frames sit in the packs, so the
+// packs are read front to back, a few ranges ahead of the writer. Last
+// come the folders again, deepest first, with their own modes and times:
+// tar sets a folder's mode as soon as an entry outside it follows, and a
+// read-only folder (Go's module cache keeps them so) would refuse the
+// files that come after; written again at the end, a folder's mode and
+// time are what it was saved with, files written into it or not.
 func (s *Store) Stream(ctx context.Context, snap *Snapshot, w io.Writer, st *Stats) error {
 	start := time.Now()
 	codecs()
@@ -47,11 +53,15 @@ func (s *Store) Stream(ctx context.Context, snap *Snapshot, w io.Writer, st *Sta
 	sort.Slice(dirs, func(i, j int) bool { return dirs[i].Path < dirs[j].Path })
 
 	tw := &tarFramer{w: w}
-	for _, e := range append(dirs, links...) {
-		if err := tw.header(e); err != nil {
-			return err
-		}
+	for _, e := range dirs {
+		tw.add(e, e.Mode.Perm()|0o700)
 		st.Dirs++
+	}
+	for _, e := range links {
+		tw.add(e, e.Mode.Perm())
+	}
+	if err := tw.flush(); err != nil {
+		return err
 	}
 
 	// The files' spans, pack by pack, each pack front to back.
@@ -109,7 +119,8 @@ func (s *Store) Stream(ctx context.Context, snap *Snapshot, w io.Writer, st *Sta
 				wh := s.where(h)
 				frame := b[wh.Off-j.sp.off : wh.Off-j.sp.off+wh.Len]
 				for _, e := range paths[h] {
-					if err := tw.header(e); err != nil {
+					tw.add(e, e.Mode.Perm())
+					if err := tw.flush(); err != nil {
 						return err
 					}
 					if _, err := w.Write(frame); err != nil {
@@ -126,6 +137,9 @@ func (s *Store) Stream(ctx context.Context, snap *Snapshot, w io.Writer, st *Sta
 	})
 	if err := g.Wait(); err != nil {
 		return err
+	}
+	for i := len(dirs) - 1; i >= 0; i-- {
+		tw.add(dirs[i], dirs[i].Mode.Perm())
 	}
 	if err := tw.end(); err != nil {
 		return err
@@ -157,14 +171,17 @@ type tarFramer struct {
 	w   io.Writer
 	pad int64
 	buf bytes.Buffer
+	out []byte
 }
 
 var zeros [1024]byte
 
-func (t *tarFramer) header(e *Entry) error {
+// add puts e's header, with mode, after what is held; flush frames it.
+// Headers in a row share a frame.
+func (t *tarFramer) add(e *Entry, mode fs.FileMode) {
 	h := &tar.Header{
 		Name:    e.Path,
-		Mode:    int64(e.Mode.Perm()),
+		Mode:    int64(mode),
 		ModTime: time.Unix(0, e.MTime),
 		Format:  tar.FormatPAX,
 	}
@@ -176,23 +193,27 @@ func (t *tarFramer) header(e *Entry) error {
 	default:
 		h.Typeflag, h.Size = tar.TypeReg, e.Size
 	}
-	t.buf.Reset()
 	t.buf.Write(zeros[:t.pad])
 	t.pad = 0
 	// A tar.Writer over the buffer writes the header (and its PAX records
-	// for long names or exact times); the content follows from its frame.
-	tw := tar.NewWriter(&t.buf)
-	if err := tw.WriteHeader(h); err != nil {
-		return err
+	// for long names or exact times); a file's content follows from its
+	// frame. Its error is the buffer's, which has none.
+	_ = tar.NewWriter(&t.buf).WriteHeader(h)
+}
+
+func (t *tarFramer) flush() error {
+	if t.buf.Len() == 0 {
+		return nil
 	}
-	_, err := t.w.Write(enc.EncodeAll(t.buf.Bytes(), nil))
+	t.out = enc.EncodeAll(t.buf.Bytes(), t.out[:0])
+	t.buf.Reset()
+	_, err := t.w.Write(t.out)
 	return err
 }
 
 func (t *tarFramer) end() error {
-	t.buf.Reset()
 	t.buf.Write(zeros[:t.pad])
+	t.pad = 0
 	t.buf.Write(zeros[:])
-	_, err := t.w.Write(enc.EncodeAll(t.buf.Bytes(), nil))
-	return err
+	return t.flush()
 }

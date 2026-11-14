@@ -30,7 +30,17 @@ func TestStreamIsATarZstThatTarUnpacks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeTree(t, d1, map[string]string{"b/2": "two, changed", "c/3": strings.Repeat("y", 513)})
+	writeTree(t, d1, map[string]string{"b/2": "two, changed", "c/3": strings.Repeat("y", 513), "ro/x/4": "four"})
+	// Read-only folders, as Go's module cache keeps them.
+	for _, d := range []string{"ro/x", "ro"} {
+		if err := os.Chmod(filepath.Join(d1, d), 0o555); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(filepath.Join(d1, "ro"), 0o755)
+		_ = os.Chmod(filepath.Join(d1, "ro", "x"), 0o755)
+	})
 	snap2, _, err := s.Save(ctx, d1, "s2", snap1)
 	if err != nil {
 		t.Fatal(err)
@@ -58,5 +68,12 @@ func TestStreamIsATarZstThatTarUnpacks(t *testing.T) {
 	}
 	if l, _ := os.Readlink(filepath.Join(dst, "a", "link")); l != "1" {
 		t.Fatalf("link is %q", l)
+	}
+	for _, d := range []string{"ro", "ro/x"} {
+		fi, err := os.Stat(filepath.Join(dst, d))
+		if err != nil || fi.Mode().Perm() != 0o555 {
+			t.Fatalf("%s: %v %v, want read-only", d, fi.Mode(), err)
+		}
+		_ = os.Chmod(filepath.Join(dst, d), 0o755)
 	}
 }
