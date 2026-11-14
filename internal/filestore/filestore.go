@@ -727,3 +727,8 @@ func mustHash(h string) [32]byte {
 	_, _ = hex.Decode(out[:], []byte(h))
 	return out
 }
+
+func (st *Stats) addGet(n int) {
+	atomic.AddInt64(&st.Get, 1)
+	atomic.AddInt64(&st.GetBytes, int64(n))
+}
