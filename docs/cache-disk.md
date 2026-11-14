@@ -378,8 +378,10 @@ A cache in the bucket that another machine's disk already has is not
 downloaded again. A save isn't uploaded when its key is already in the
 bucket, since an entry never changes.
 
-`"bucket"` and `"off"` need a class with `cache_disk`. A VM without a disk
-uses GitHub's cache.
+With `"bucket"`, a class without `cache_disk` uses the bucket too: the
+job's caches pass through the VM's own disk, which goes with the VM, so
+every job restores from the bucket and saves to it after the job. `"off"`
+needs a class with `cache_disk`; a VM without one uses GitHub's cache.
 
 The approach of pointing the runner at a cache service of one's own comes
 from [falcondev-oss/github-actions-cache-server](https://github.com/falcondev-oss/github-actions-cache-server)

@@ -76,12 +76,16 @@ if [ "${ID:-}" = ubuntu ]; then export ImageOS="ubuntu${VERSION_ID%%%%.*}"; fi
 cache='%[2]s'
 # With a cache disk, actions/cache goes through the L1 (fleetci-l1, which
 # fleetci copied to ~/%[5]s), which keeps the archives on the disk, in
-# front of the cache server it would have used. Without it, or if it
-# doesn't start, jobs go straight on.
+# front of the cache server it would have used. With the user's bucket and
+# no disk ("bucket"), it keeps the job's archives on the VM's own disk,
+# which goes with the VM, and the bucket is the store. Without it, or if
+# it doesn't start, jobs go straight on.
 l1=
-if [ "$hook" = cache ] && [ -x "$HOME/%[5]s" ]; then
+store=/cache/actions any=
+if [ "$hook" = bucket ]; then store=$HOME/fleetci-l1-store any='any '; fi
+if { [ "$hook" = cache ] || [ "$hook" = bucket ]; } && [ -x "$HOME/%[5]s" ]; then
   mkdir -p _diag
-  nohup setsid "$HOME/%[5]s" %[6]d "${cache:-%[7]s}" /cache/actions %[8]s>> _diag/fleetci-l1.log 2>&1 < /dev/null &
+  nohup setsid "$HOME/%[5]s" %[6]d "${cache:-%[7]s}" "$store" ${any}%[8]s>> _diag/fleetci-l1.log 2>&1 < /dev/null &
   # The address the VM's containers reach it at too: Docker's bridge. A
   # firewall that drops what comes in lets them through to it, and only it.
   at=$(ip -4 -o addr show docker0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1)
@@ -223,12 +227,16 @@ func startWith(script string, nodeSvc http.Handler, log hclog.Logger) StartFunc 
 			return err
 		}
 		stdin := jit + "\n"
-		if vm.Cache {
+		switch {
+		case vm.Cache:
 			stdin += "cache\n"
+		case nodeSvc != nil:
+			// No disk, but the user's bucket: the L1 is the way to it.
+			stdin += "bucket\n"
 		}
 		// This job's: the closure serves every job of the node at once.
 		var node http.Handler
-		if vm.Cache {
+		if vm.Cache || nodeSvc != nil {
 			node = nodeSvc
 			installL1(ctx, client, log)
 		}

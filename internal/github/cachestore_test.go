@@ -66,13 +66,21 @@ func TestTheNodesCacheOverTheVMsConnection(t *testing.T) {
 	if flushes.Load() != 1 {
 		t.Fatalf("flushed %d times, want once", flushes.Load())
 	}
-	// A VM without a cache disk has no node service, and nothing to flush.
+	// A VM without a cache disk, with the user's bucket, goes to it
+	// through its L1 too: it flushes the job's saves.
 	v.Cache = false
 	if err := startWith(`read -r jit; echo "Running job: build"`, node, hclog.NewNullLogger())(context.Background(), v, "jit", nil); err != nil {
 		t.Fatal(err)
 	}
-	if flushes.Load() != 1 {
-		t.Errorf("a VM without a cache disk flushed")
+	if flushes.Load() != 2 {
+		t.Errorf("a VM without a cache disk, with the bucket, flushed %d times in all, want 2", flushes.Load())
+	}
+	// Without the bucket there's no node service, and nothing to flush.
+	if err := startWith(`read -r jit; echo "Running job: build"`, nil, hclog.NewNullLogger())(context.Background(), v, "jit", nil); err != nil {
+		t.Fatal(err)
+	}
+	if flushes.Load() != 2 {
+		t.Errorf("a VM without a cache disk or a bucket flushed")
 	}
 }
 
