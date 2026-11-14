@@ -1,7 +1,6 @@
 package actionscache
 
 import (
-	"context"
 	"net"
 	"net/http"
 	"os"
@@ -171,19 +170,23 @@ func TestSweepTreesKeepsNamedOnes(t *testing.T) {
 }
 
 func TestFromContainer(t *testing.T) {
-	at := func(remote, local string) *http.Request {
+	from := func(remote string) *http.Request {
 		r, _ := http.NewRequest(http.MethodPost, "http://x/", nil)
 		r.RemoteAddr = remote
-		ctx := context.WithValue(r.Context(), http.LocalAddrContextKey, &net.TCPAddr{IP: net.ParseIP(local), Port: 1})
-		return r.WithContext(ctx)
+		return r
 	}
-	if fromContainer(at("172.17.0.1:5000", "172.17.0.1")) {
-		t.Error("the VM, at its bridge's address")
+	// The VM's eth0 and docker0.
+	own := []net.IP{net.ParseIP("10.0.0.5"), net.ParseIP("172.17.0.1")}
+	if fromContainerAmong(from("10.0.0.5:5000"), own) {
+		t.Error("the VM at its bridge's address, from its main interface's")
 	}
-	if fromContainer(at("127.0.0.1:5000", "127.0.0.1")) {
+	if fromContainerAmong(from("172.17.0.1:5000"), own) {
+		t.Error("the VM, from its bridge's address")
+	}
+	if fromContainerAmong(from("127.0.0.1:5000"), own) {
 		t.Error("the VM, by loopback")
 	}
-	if !fromContainer(at("172.17.0.2:5000", "172.17.0.1")) {
+	if !fromContainerAmong(from("172.17.0.2:5000"), own) {
 		t.Error("a container")
 	}
 }

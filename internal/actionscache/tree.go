@@ -366,20 +366,43 @@ func Pack(markerPath, out string) error {
 }
 
 // fromContainer is whether r came from one of the VM's containers, not
-// the VM itself: the VM reaches its own address, so the two ends are one
-// address; a container's end is its own.
+// the VM itself. The VM reaching its bridge's address comes from one of
+// its own addresses, not necessarily the bridge's (the kernel picks the
+// main interface's); a container comes from an address of its own.
 func fromContainer(r *http.Request) bool {
+	return fromContainerAmong(r, ownAddrs())
+}
+
+func fromContainerAmong(r *http.Request, own []net.IP) bool {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return false
 	}
 	ip := net.ParseIP(host)
-	la, _ := r.Context().Value(http.LocalAddrContextKey).(net.Addr)
-	tcp, ok := la.(*net.TCPAddr)
-	if ip == nil || !ok || ip.IsLoopback() {
+	if ip == nil || ip.IsLoopback() {
 		return false
 	}
-	return !ip.Equal(tcp.IP)
+	for _, o := range own {
+		if o.Equal(ip) {
+			return false
+		}
+	}
+	return true
+}
+
+// ownAddrs are the VM's addresses, on every interface.
+func ownAddrs() []net.IP {
+	as, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil
+	}
+	var out []net.IP
+	for _, a := range as {
+		if n, ok := a.(*net.IPNet); ok {
+			out = append(out, n.IP)
+		}
+	}
+	return out
 }
 
 // markerUse says whether an entry's blob is a tree's marker, and if so
