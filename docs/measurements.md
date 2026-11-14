@@ -618,6 +618,47 @@ into `node_modules`, and Linux doesn't link across mount points, so from
 a mounted store it copies each file. `next build` was 55 s against 67 s,
 with no packing on the CPUs the VMs share.
 
+### A store of files, not archives
+
+`internal/filestore` keeps each save in the bucket by its files, as
+restic's repository does: new files and the listings of changed folders,
+one zstd frame each, packed into objects of about 16 MB, an index object
+per save saying where each frame is, and a small snapshot object naming
+the root folder's listing. A restore fetches ranges of packs in parallel,
+through signed links only; one on a node that holds an older folder copies
+the files it already has from there. For a stock actions/cache client the
+store streams one tar.zst, its files' frames copied from the packs as
+stored and only the tar headers framed anew (as zstd:chunked frames
+headers and contents apart).
+
+`hack/cachelab/fsreplay` replays the 72 entries of the run below
+(`vm-trees-1`), in the order they were saved, against keeping whole
+archives: each entry unpacked, packed again with `tar` and `zstd -T0` and
+uploaded whole, saved into the store knowing the last save, restored from
+the store into an empty folder, next to the last entry's folder, and
+streamed into `tar -x --use-compress-program unzstd`. Every restore was
+checked file by file against the folder. The bucket is the lab's, on the
+same host, so a request costs little; on S3 each costs tens of ms, and a
+restore makes about 50 to 160 of them, in parallel.
+
+| | web: archives | web: store | go: archives | go: store |
+|---|---|---|---|---|
+| uploaded, 36 saves | 11.1 GB | 476 MB (4%), 119 objects | 18.7 GB | 1.13 GB (6%), 159 objects |
+| save p50 | 1.6 s | 0.4 s | 2.4 s | 0.5 s |
+| restore into an empty folder p50 | 3.4 s | 1.2 s | 4.0 s | 1.4 s |
+| restore next to the last folder p50 | | 0.6 s | | 1.2 s |
+| a stock client, from the stream, p50 | | 2.2 s | | 2.7 s |
+
+Go's largest entries (3.4 GB as a folder, 914 MB as saved) take 6.5 s
+to restore as an archive and 4.2 s to save; from the store 2.3 s, its
+save 0.5 s and 2 to 10 MB. A first save is slower than an archive (Go's
+3.3 GB one 5.9 s against 3.9 s), as it reads and hashes every file. The
+Go entries alternate between two folders, one of 1.7 GB and one of
+3.3 GB, from different branches of the train; replayed in the order saved,
+a save often starts from the other one's snapshot, so it hashes more and a
+restore next to the last folder fetches about 400 MB that a job,
+restoring its own branch's, would not.
+
 ### Seeing a job: poll or webhook
 
 How long a GitHub job waits before fleetci sees it, from GitHub creating it
