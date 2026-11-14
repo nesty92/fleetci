@@ -3,12 +3,15 @@
 
     summary.py <run>...
 
-For each run: jobs, failures, time in the queue at p50/p95/p99 and the
-share of jobs that waited 30 s or less (GitLab.com's target for its
-shared runners is 95 % of them), each job's time at p50/p95, the share of
-the time each phase took, and what the jobs' caches started from. From
-the controller's metrics, its own view of the queue wait, the workers'
-cache counters over the run, and the most each worker's caches took.
+For each run, first what the cache changes: each job's time once
+started, at p50/p95, the share of the time each phase took, and what the
+jobs' caches started from. Then the queue, which more runners shorten
+and the cache does not: its p50/p95/p99, the share of jobs that waited
+30 s or less (GitLab.com's target for its shared runners is 95 % of
+them), and, from the controller's metrics, fleetci's own part of it (the
+pickup: GitHub queuing a job to fleetci taking it, by poll or webhook)
+apart from the wait for room. Last, the workers' cache counters over the
+run, and the most each worker's caches took.
 """
 import json
 import os
@@ -67,9 +70,6 @@ def run(name):
         return
     r0 = load[0]
     print(f"== {name}: {r0['forge']} {r0['mode']}, {len(load)} jobs, {sum(not r['ok'] for r in load)} failed")
-    q = [r["queued"] for r in load]
-    within = sum(1 for x in q if x is not None and x <= 30) / max(1, sum(x is not None for x in q))
-    print(f"queue  p50 {fmt(pct(q, 50))}  p95 {fmt(pct(q, 95))}  p99 {fmt(pct(q, 99))}  within 30s {within:.0%}")
     for job in sorted({r["job"] for r in load}):
         js = [r for r in load if r["job"] == job and r["ok"]]
         wall = [r["wall"] for r in js]
@@ -85,6 +85,10 @@ def run(name):
         for r in js:
             froms[disk_from(r)] = froms.get(disk_from(r), 0) + 1
         print(f"     cache from: " + ", ".join(f"{k} {v}" for k, v in sorted(froms.items())))
+    q = [r["queued"] for r in load]
+    within = sum(1 for x in q if x is not None and x <= 30) / max(1, sum(x is not None for x in q))
+    print(f"queue  p50 {fmt(pct(q, 50))}  p95 {fmt(pct(q, 95))}  p99 {fmt(pct(q, 99))}  within 30s {within:.0%}"
+          " (capacity: more runners shorten it)")
     a, b = scrape(os.path.join(OUT, f"{name}.metrics-start")), scrape(os.path.join(OUT, f"{name}.metrics-end"))
     if not b:
         print("no metrics scraped")
@@ -103,6 +107,12 @@ def run(name):
         n = sum(c for _, c in cnts)
         if n:
             print(f"     controller's queue wait, {forge}: mean {sum(s for _, s in sums) / n:.0f}s over {n:.0f} jobs")
+    for via in ("poll", "webhook"):
+        sel = lambda k, part: k.startswith(f"fleetci_fleet_pickup_seconds_{part}") and f'via="{via}"' in k
+        n = sum(b[k] - a.get(k, 0) for k in b if sel(k, "count"))
+        if n:
+            mean = sum(b[k] - a.get(k, 0) for k in b if sel(k, "sum")) / n
+            print(f"     pickup by {via} (fleetci's own part of the queue): mean {mean:.1f}s over {n:.0f} jobs")
 
 
 if __name__ == "__main__":
