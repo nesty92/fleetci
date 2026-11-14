@@ -120,7 +120,12 @@ if [ -n "$ac$cache" ]; then
 fi
 if [ -n "$ac" ]; then
   # The job's log ends with what its cache steps got.
-  echo 'curl -fsS -m 3 http://127.0.0.1:%[6]d/fleetci/stats || true' > fleetci-job-completed.sh
+  # A job whose cache steps never reached it gets the server's last words.
+  cat > fleetci-job-completed.sh <<EOF
+s=\$(curl -fsS -m 3 http://127.0.0.1:%[6]d/fleetci/stats || true)
+echo "\$s"
+case "\$s" in *"no actions/cache calls"*) tail -n 20 "$dir/_diag/fleetci-actions-cache.log" 2>/dev/null || true;; esac
+EOF
   export ACTIONS_RUNNER_HOOK_JOB_COMPLETED="$dir/fleetci-job-completed.sh"
 fi
 if ! ls /usr/lib*/libicuuc.so.* /usr/lib/*/libicuuc.so.* 2>/dev/null | grep -q .; then
@@ -134,6 +139,11 @@ if [ -d "$zd" ]; then
   # has the VM's zstd.
   echo 'if [ -n "${GITHUB_PATH:-}" ]; then echo /__e/fleetci-zstd/bin >> "$GITHUB_PATH"; fi' >> fleetci-job-started.sh
 fi
+if [ -n "$ac$cache" ]; then
+  cat >> fleetci-job-started.sh <<'HOOK'
+%[9]s
+HOOK
+fi
 if [ "$hook" = cache ] && sudo -n true 2>/dev/null; then
   sudo mkdir -p /run/fleetci && sudo chown "$(id -u):$(id -g)" /run/fleetci
   cat >> fleetci-job-started.sh <<'HOOK'
@@ -144,6 +154,21 @@ if [ -s fleetci-job-started.sh ]; then
   export ACTIONS_RUNNER_HOOK_JOB_STARTED="$dir/fleetci-job-started.sh"
 fi
 exec ./run.sh --jitconfig "$jit"
+`
+
+// resultsHook runs before the job's first step wherever actions/cache has
+// a cache server other than GitHub's, disk or no disk: a job's container
+// doesn't get the runner's environment, only the job's, so the job's,
+// through GITHUB_ENV, has the server too.
+const resultsHook = `if [ -n "${FLEETCI_RESULTS_URL:-}" ] && [ -n "${GITHUB_ENV:-}" ]; then
+  echo "ACTIONS_RESULTS_URL=$FLEETCI_RESULTS_URL" >> "$GITHUB_ENV"
+  echo "fleetci cache: actions/cache goes to $FLEETCI_RESULTS_URL"
+fi
+# An unpatched runner sends actions/cache to GitHub's cache and says nothing.
+if [ -n "${FLEETCI_RESULTS_URL:-}" ] &&
+  LC_ALL=C grep -qaP 'A\x00C\x00T\x00I\x00O\x00N\x00S\x00_\x00R\x00E\x00S\x00U\x00L\x00T\x00S\x00_\x00U\x00R\x00L\x00' "$(dirname "$0")/bin/Runner.Worker.dll" 2>/dev/null; then
+  echo "::warning::fleetci: this runner isn't patched, so actions/cache goes to GitHub's cache, not $FLEETCI_RESULTS_URL"
+fi
 `
 
 // jobStartedHook runs before the job's first step: it says which run the
@@ -166,16 +191,6 @@ until [ -e "$d/done" ]; do
   fi
   sleep 0.1
 done
-# A job's container doesn't get the runner's environment, only the job's:
-# the job's, through GITHUB_ENV, has the cache server too.
-if [ -n "${FLEETCI_RESULTS_URL:-}" ] && [ -n "${GITHUB_ENV:-}" ]; then
-  echo "ACTIONS_RESULTS_URL=$FLEETCI_RESULTS_URL" >> "$GITHUB_ENV"
-fi
-# An unpatched runner sends actions/cache to GitHub's cache and says nothing.
-if [ -n "${FLEETCI_RESULTS_URL:-}" ] &&
-  LC_ALL=C grep -qaP 'A\x00C\x00T\x00I\x00O\x00N\x00S\x00_\x00R\x00E\x00S\x00U\x00L\x00T\x00S\x00_\x00U\x00R\x00L\x00' "$(dirname "$0")/bin/Runner.Worker.dll" 2>/dev/null; then
-  echo "::warning::fleetci: this runner isn't patched, so actions/cache goes to GitHub's cache, not $FLEETCI_RESULTS_URL"
-fi
 # The actions cache (fleetci-actions-cache) runs as this user and keeps its archives on the disk.
 if mountpoint -q /cache 2>/dev/null; then
   sudo -n mkdir -p /cache/actions && sudo -n chown "$(id -u):$(id -g)" /cache/actions
@@ -202,7 +217,7 @@ func SSHStart(version string, cs CacheStore, log hclog.Logger) StartFunc {
 
 // vmScript is runScript for the runner version and cache store given.
 func vmScript(version string, cs CacheStore) string {
-	return fmt.Sprintf(runScript, version, cs.URL, DefaultRunnerVersion, jobStartedHook, actionsCachePath, actionsCachePort, githubResultsURL, cs.actionsCacheArgs())
+	return fmt.Sprintf(runScript, version, cs.URL, DefaultRunnerVersion, jobStartedHook, actionsCachePath, actionsCachePort, githubResultsURL, cs.actionsCacheArgs(), resultsHook)
 }
 
 // followTries is how many times in a row following the runner may fail

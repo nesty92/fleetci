@@ -130,6 +130,28 @@ func TestJobStartedHook(t *testing.T) {
 	}
 }
 
+// A job's container gets the VM's cache server through GITHUB_ENV, disk or
+// no disk: the run script installs the hook wherever the server answers,
+// not only with a cache disk.
+func TestResultsHook(t *testing.T) {
+	env := filepath.Join(t.TempDir(), "env")
+	cmd := exec.Command("sh", "-c", resultsHook)
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "GITHUB_ENV=" + env, "FLEETCI_RESULTS_URL=http://172.17.0.1:31849/"}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	if b, _ := os.ReadFile(env); string(b) != "ACTIONS_RESULTS_URL=http://172.17.0.1:31849/\n" {
+		t.Errorf("GITHUB_ENV %q", b)
+	}
+	if !strings.Contains(string(out), "actions/cache goes to http://172.17.0.1:31849/") {
+		t.Errorf("output %q", out)
+	}
+	if !strings.Contains(runScript, "if [ -n \"$ac$cache\" ]; then\n  cat >> fleetci-job-started.sh <<'HOOK'\n%[9]s") {
+		t.Error("the run script doesn't install the results hook wherever the cache server is")
+	}
+}
+
 // The VM's zstd goes into the runner's externals, which job containers
 // get at /__e, and the job-started hook puts it on the job's PATH. Without
 // zstd on the VM there is neither, and no hook.
