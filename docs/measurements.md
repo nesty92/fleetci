@@ -537,3 +537,49 @@ newer push arrives (all 2, and 14 of 16), and Docker Hub's anonymous pull
 limit (2 of 16; the lab's VMs pull from Docker Hub directly). In "bucket
 only", 39% of the go job is preparing the VM, mostly pulling images, which
 the disk keeps.
+
+### GitHub under steady load, steps on the VM
+
+The same twenty pull requests on GitHub, with the jobs' steps on the VM
+(the common case; `container:` jobs are measured apart, above), the
+playground's `load.yml`: `setup-go` or `setup-node`, then `actions/cache`
+of the job's tool caches keyed on the commit, so every job restores the
+last one and saves its own. fleetci's published GitHub image, four nodes
+of 4 CPUs and 4.5 GB, `cache_store = "bucket"` on a local S3. Each run
+from an empty bucket and empty disks, on the same arrivals
+(`LOAD_SEED`). One run of each, November 2026. Time is each job's own,
+once started; the queue is the lab's capacity, which more runners
+shorten, so it is not compared.
+
+| | no cache | bucket | bucket and disk |
+|---|---|---|---|
+| jobs (failed) | 72 (0) | 72 (0) | 74 (0) |
+| go p50 (p95) | 212 s (318 s) | 74 s (279 s) | 72 s (263 s) |
+| web p50 (p95) | 109 s (144 s) | 126 s (154 s) | 125 s (156 s) |
+| go restore, save p50 | | 4.0 s, 9.5 s | 4.0 s, 11.0 s |
+| web restore, save p50 | | 8.5 s, 10.0 s | 8.0 s, 11.0 s |
+
+Go's build cache takes its build and tests from 191 s to 22 s. Web's
+saves `pnpm install` 14 s and `next build` 8 s, and its restore and save
+cost 18.5 s, so web is no faster. The disk makes restore and save no
+shorter, because the time is not in moving the entry: in one web job
+(250 MB as saved, 53,000 files and 1 GB as a tree), the restore took
+2.3 s to fetch it and 5.6 s to unpack it, and the save 12.1 s for `tar`
+and `zstd` and 1.0 s to upload. On the host, on 2 CPUs, the same
+unpacking takes 1.9 s and packing 3.6 s, of it `zstd` 3.2 s (2.3 s at
+level 1, for an entry 10% larger); the lab's VMs share the host's 16
+threads, which the runs keep busy.
+
+What a chunk store would upload instead (`hack/cachelab/cdcstat`, gear
+hash chunks of 64 KiB on average, each new chunk a zstd frame), over the
+run's entries in the order they were saved:
+
+| | entries | saved whole | new chunks | of saving whole |
+|---|---|---|---|---|
+| web | 34 | 10.1 GB | 3.4 GB | 34% |
+| go | 36 | 18.4 GB | 4.5 GB | 24% |
+
+A web entry's tree is 944 MB to 1.9 GB, of which about a third is new
+each commit (Next.js's build cache, as the store of packages changes
+less); Go's is 3.4 GB, of which about a fifth is new. That is bucket
+traffic and storage; the jobs' own time is in the packing.
