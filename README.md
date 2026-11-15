@@ -488,7 +488,7 @@ On a fleet of machines, a class takes `cache_disk = true` in
 
 fleetci makes the layers with `qemu-img`, which must be on the host, and
 needs a fleetingd with the `disk` command.
-`hack/cachelab` measures it on real projects in several languages.
+[docs/measurements.md](docs/measurements.md) has what it saved on real projects in several languages.
 
 ### Your machines first, the cloud for spikes
 

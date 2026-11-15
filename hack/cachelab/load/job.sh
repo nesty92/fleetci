@@ -1,6 +1,6 @@
 #!/bin/sh
-# One job of a merge-train car: fetches the repo at the car's commit, from
-# train.env, and runs its CI, timing each step. The tools' caches are in
+# One job of a load run's pull request (load.py): fetches the repo at the
+# pull request's commit, from train.env, and runs its CI, timing each step. The tools' caches are in
 # .tcache, which the job's actions/cache or cache: keeps, as a project's
 # own would.
 #

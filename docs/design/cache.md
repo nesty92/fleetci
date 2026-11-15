@@ -124,7 +124,7 @@ second. On RustFS on the same host: uploads at about 1.1 GiB/s.
 
 ### GitHub refuses a save after the job ends
 
-`hack/cachelab/deferred`: a job created two entries and handed its token
+[`hack/cachelab/deferred`](https://github.com/nesty92/fleetci/tree/ee0956a/hack/cachelab/deferred) (since removed): a job created two entries and handed its token
 and upload URLs to the lab's host, which uploaded and finalized them after
 the job ended.
 

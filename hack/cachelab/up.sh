@@ -1,12 +1,12 @@
 #!/bin/sh
 # Runs on the host: starts the cachelab, a container that runs microVMs
 # the way fleetingd does, with a Docker Hub pull-through mirror beside it,
-# and writes the matrix's sources for it.
+# for load/load.py's fleet.
 #
-#   up.sh <download dir> [name...]
+#   up.sh
 #
-# DATA (~/.local/share/fleetci-cachelab) keeps the layers, the mirror's
-# images and the sources. IMAGES is a directory with fleetingd's prebuilt
+# DATA (~/.local/share/fleetci-cachelab) keeps the layers and the mirror's
+# images. IMAGES is a directory with fleetingd's prebuilt
 # VM image and kernel, CH the cloud-hypervisor binary; both default to the
 # local fleet's. The lab image is fleetci-lab (hack/lab).
 #
@@ -17,12 +17,10 @@
 #   docker rm -f fleetci-cachelab fleetci-cachelab-mirror
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
-dl=$1; shift
 DATA=${DATA:-$HOME/.local/share/fleetci-cachelab}
 IMAGES=${IMAGES:-$HOME/.local/share/fleetci-fleet/w1/var/images}
 CH=${CH:-$HOME/.local/share/fleetci-fleet/artifacts/cloud-hypervisor}
-mkdir -p "$DATA/mirror" "$DATA/srcs"
-sh "$here/prep-matrix.sh" "$dl" "$DATA/srcs" "$@"
+mkdir -p "$DATA/mirror"
 
 docker network inspect cachelab >/dev/null 2>&1 ||
   docker network create --subnet 10.231.29.0/24 cachelab >/dev/null
@@ -36,8 +34,8 @@ docker inspect fleetci-cachelab >/dev/null 2>&1 ||
     --security-opt seccomp="$here/seccomp-io_uring.json" \
     --device /dev/kvm --device /dev/net/tun --cap-add NET_ADMIN --sysctl net.ipv4.ip_forward=1 \
     -e MIRROR=10.231.29.10:5000 \
-    -v "$DATA:/data" -v "$DATA/srcs:/srcs:ro" -v "$IMAGES:/base:ro" \
+    -v "$DATA:/data" -v "$IMAGES:/base:ro" \
     -v "$CH:/usr/local/bin/cloud-hypervisor:ro" -v "$here:/lab:ro" \
     fleetci-lab sleep infinity >/dev/null
 docker exec fleetci-cachelab sh /lab/tools.sh
-echo "cachelab up: docker exec fleetci-cachelab sh /lab/matrix.sh [name...]"
+echo "cachelab up"

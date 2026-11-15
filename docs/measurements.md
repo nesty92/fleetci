@@ -194,7 +194,7 @@ snapshot's page cache beforehand changed nothing.
 Each job's VM gets a second disk for caches: a qcow2 overlay on the cache
 the last job left, kept after the job as the next layer. Docker's and
 containerd's data and the Go caches go on it. Measured with
-[hack/cachelab](../hack/cachelab): real commits, oldest first, each in a
+the cachelab ([hack/cachelab](https://github.com/nesty92/fleetci/tree/ee0956a/hack/cachelab), since trimmed to the load test): real commits, oldest first, each in a
 fresh 4-vCPU, 6 GB VM, running its repo's own CI steps.
 
 fleetci, last 8 commits (`go vet`, `go test -race`, GoReleaser snapshot):
@@ -230,7 +230,7 @@ after a one-line change; the Go build 64 s cold, 4.5–5.2 s warm.
 ### A merge train
 
 fleetci's last 13 commits as a busy repo's merge train
-([hack/cachelab/train.sh](../hack/cachelab/train.sh)): the oldest is main
+([train.sh](https://github.com/nesty92/fleetci/tree/ee0956a/hack/cachelab/train.sh), since removed): the oldest is main
 as the train starts, each other one a merge request whose pipeline runs on
 main plus the ones ahead of it. Three pipelines at once, each in a 2-vCPU,
 4 GB VM on the same host. A merge request merges once it and all ahead of
@@ -250,8 +250,8 @@ each merge request then added 9–335 MB.
 ### Ten languages
 
 Six commits of a real project per language, oldest first, through one chain
-of cache layers ([hack/cachelab/matrix.sh](../hack/cachelab/matrix.sh),
-projects and commits in [matrix.txt](../hack/cachelab/matrix.txt)). Each job
+of cache layers ([matrix.sh](https://github.com/nesty92/fleetci/tree/ee0956a/hack/cachelab/matrix.sh),
+projects and commits in [matrix.txt](https://github.com/nesty92/fleetci/tree/ee0956a/hack/cachelab/matrix.txt), both since removed). Each job
 runs in a fresh 4-vCPU, 6 GB VM; images come from a pull-through mirror on
 the same host, so the pulls' gain is a lower bound. The times are the pull
 and the project's CI steps: cold is a job with no cache disk, cached the
@@ -284,15 +284,15 @@ its cold time is the newest commit's.
 ### Ten languages, as real CI jobs
 
 The same projects and commits as real jobs on both forges
-([hack/cachelab/realmatrix.sh](../hack/cachelab/realmatrix.sh)): a
+([realmatrix.sh](https://github.com/nesty92/fleetci/tree/ee0956a/hack/cachelab/realmatrix.sh), since removed): a
 `workflow_dispatch` on GitHub, a pipeline started by a push on GitLab, each
 picked up by fleetci, run by GitHub's runner or gitlab-runner in a fresh
 12-vCPU, 12 GB VM, one job at a time. Per language: the oldest commit with
 no cache disk, the six with it, the newest with none again. Cold is the
 mean of the two with none, warm the median of the last five with the
 disk; the first one with it fills it, and the second still fills some.
-Every job's line is in [results](../hack/cachelab/realmatrix/results), and
-[summary.py](../hack/cachelab/realmatrix/summary.py) makes these tables
+Every job's line is in [results](https://github.com/nesty92/fleetci/tree/ee0956a/hack/cachelab/realmatrix/results), and
+[summary.py](https://github.com/nesty92/fleetci/tree/ee0956a/hack/cachelab/realmatrix/summary.py) makes these tables
 from them.
 
 | Language | GitHub cold | GitHub warm | Saved | GitLab cold | GitLab warm | Saved |
@@ -328,7 +328,7 @@ for a job, a GitHub job could wait 40 s more behind it.
 How much a worker's cache disks would shrink on a filesystem that
 deduplicates or compresses, from the ten languages' layers (38 GB, all
 six layers of each), with
-[hack/cachelab/dedup.py](../hack/cachelab/dedup.py):
+[dedup.py](https://github.com/nesty92/fleetci/tree/ee0956a/hack/cachelab/dedup.py) (since removed):
 
 | Dedup block | Left | Saved | Of it, across projects |
 | --- | --- | --- | --- |
@@ -416,7 +416,7 @@ the host's internet link was the limit.
 ### A merge train on both forges
 
 A merge queue played on both playgrounds, whose plans have none
-([hack/cachelab/train/drive.py](../hack/cachelab/train/drive.py)): main
+([drive.py](https://github.com/nesty92/fleetci/tree/ee0956a/hack/cachelab/train/drive.py), since removed): main
 gets a base commit, then 5 cars, 2 at once, each a commit on the car
 ahead pushed to `train/<run>/car-<n>`. A car merges, pushed to main, when
 it passes and the car ahead has merged, and main's pipeline runs on it.

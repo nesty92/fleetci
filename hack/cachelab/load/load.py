@@ -41,7 +41,6 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-TRAIN = os.path.join(HERE, "..", "train")
 OUT = os.path.expanduser("~/.local/share/fleetci-cachelab/load")
 GH = "WireZone/fleetci-playground"
 GL = "Nesty92%2Ffleetci-playground"
@@ -109,7 +108,7 @@ class Load:
         # Only this run's pipeline: other workflows would run on main too.
         sh("rm", "-rf", os.path.join(self.dir, ".github", "workflows"))
         os.makedirs(os.path.join(self.dir, "ci"), exist_ok=True)
-        with open(os.path.join(TRAIN, "ci", "job.sh")) as f, open(os.path.join(self.dir, "ci", "job.sh"), "w") as g:
+        with open(os.path.join(HERE, "job.sh")) as f, open(os.path.join(self.dir, "ci", "job.sh"), "w") as g:
             g.write(f.read())
         cache = self.mode != "nocache"
         if self.forge == "github":
