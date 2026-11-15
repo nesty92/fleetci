@@ -28,6 +28,9 @@ func TestBucketCachesGoFileByFileUnlessTheRunnerSaysArchive(t *testing.T) {
 	if len(env) != 1 {
 		t.Fatalf("%v", env)
 	}
+	if got := withTarZstd(withCacheCompression(nil)); len(got) != len(cacheCompression) || got[len(got)-1] != "CACHE_COMPRESSION_FORMAT=tarzstd" {
+		t.Fatalf("tar.zst in place of the runner's: %v", got)
+	}
 	if err := (Config{ConfigFile: "x", CacheStore: "zip"}).Validate(nil); err == nil {
 		t.Fatal("cache_store zip: no error")
 	}

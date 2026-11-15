@@ -105,7 +105,7 @@ func (e *executor) fileCache(options common.ExecutorPrepareOptions, client *ssh.
 	// The build's config is its own copy, which its cache's links come
 	// from; the helper writes the archive the VM's service reads.
 	rc.Cache = cfg
-	rc.Environment = append(slices.Clone(rc.Environment), "CACHE_COMPRESSION_FORMAT=tarzstd")
+	rc.Environment = withTarZstd(rc.Environment)
 	build.RefreshAllVariables()
 	options.BuildLogger.Println("Cache in the bucket file by file, through the VM")
 	return func() {
@@ -113,6 +113,13 @@ func (e *executor) fileCache(options common.ExecutorPrepareOptions, client *ssh.
 		done()
 		closeBucket()
 	}
+}
+
+// withTarZstd is env with the helper's archives in tar.zst, the format the
+// VM's service reads, in place of the runner's own.
+func withTarZstd(env []string) []string {
+	out := slices.DeleteFunc(slices.Clone(env), func(e string) bool { return strings.HasPrefix(e, "CACHE_COMPRESSION_FORMAT=") })
+	return append(out, "CACHE_COMPRESSION_FORMAT=tarzstd")
 }
 
 // startJobCache is fileCache on the job's VM.
