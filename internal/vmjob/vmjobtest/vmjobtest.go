@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -48,7 +49,7 @@ func New(t *testing.T) *VM {
 		t.Fatal(err)
 	}
 	v := &VM{Home: t.TempDir(), Addr: ln.Addr().String(), ln: ln}
-	t.Cleanup(func() { ln.Close(); v.Drop() })
+	t.Cleanup(func() { ln.Close(); v.Drop(); v.endJobs() })
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -86,6 +87,22 @@ func (v *VM) Drop() {
 func (v *VM) Gone() {
 	v.ln.Close()
 	v.Drop()
+}
+
+// endJobs ends the jobs the VM still runs, at the test's end: each is a
+// session of its own, which the job's pid file names, and outlives the
+// connection, so nothing else would end one that waits for the test.
+func (v *VM) endJobs() {
+	pids, _ := filepath.Glob(filepath.Join(v.Home, ".fleetci", "jobs", "*", "pid"))
+	for _, f := range pids {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil && pid > 1 {
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
+		}
+	}
 }
 
 // Path is a file in the VM's home.
