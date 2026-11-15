@@ -130,6 +130,49 @@ func TestJobStartedHook(t *testing.T) {
 	}
 }
 
+// With fleetci's word, the hook puts the runner's folder for the repo on the
+// cache disk, and says whether the last job's checkout is there.
+func TestJobStartedHookCheckout(t *testing.T) {
+	d, bin, disk, work := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+	mounts := filepath.Join(t.TempDir(), "mounts")
+	for name, body := range map[string]string{
+		"sleep":      "",
+		"mountpoint": "exit 0",
+		"sudo":       `[ "$1" = -n ] && shift; exec "$@"`,
+		"mount":      `echo "$@" >> ` + mounts,
+	} {
+		_ = os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"+body+"\n"), 0o755)
+	}
+	_ = os.WriteFile(filepath.Join(d, "done"), []byte("Cache disk \"main\"\n"), 0o600)
+	_ = os.WriteFile(filepath.Join(d, "checkout"), nil, 0o600)
+	hook := strings.ReplaceAll(jobStartedHook, "/run/fleetci", d)
+	hook = strings.ReplaceAll(hook, "/cache/", disk+"/")
+	run := func() string {
+		cmd := exec.Command("sh", "-c", hook)
+		cmd.Env = []string{"PATH=" + bin + ":" + os.Getenv("PATH"), "GITHUB_REPOSITORY=o/r", "GITHUB_RUN_ID=77", "GITHUB_WORKSPACE=" + work + "/r/r"}
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%v: %s", err, out)
+		}
+		return string(out)
+	}
+	if out := run(); !strings.Contains(out, "this is its first") {
+		t.Errorf("first job: %q", out)
+	}
+	if m, _ := os.ReadFile(mounts); string(m) != "--bind "+disk+"/checkout/r "+work+"/r\n" {
+		t.Errorf("mounts %q", m)
+	}
+	// The fake mount mounted nothing: the last job's repository is in the
+	// runner's folder as it would be through the disk.
+	_ = os.MkdirAll(work+"/r/r/.git", 0o755)
+	if out := run(); !strings.Contains(out, "the last job's is there") {
+		t.Errorf("next job: %q", out)
+	}
+	if _, err := os.Stat(disk + "/checkout/r/r"); err != nil {
+		t.Errorf("the disk's folder: %v", err)
+	}
+}
+
 // A job's container gets the VM's cache server through GITHUB_ENV, disk or
 // no disk: the run script installs the hook wherever the server answers,
 // not only with a cache disk.

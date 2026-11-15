@@ -60,6 +60,9 @@ type Scope struct {
 	// From are the shared caches a cache with nothing yet starts from, the
 	// first that exists.
 	From []string `json:"from,omitempty"`
+	// Checkout keeps the job's working copy on the disk too. It doesn't
+	// name the cache: turning it on adds the checkout to the same disk.
+	Checkout bool `json:"checkout,omitempty"`
 }
 
 func (s Scope) name() string {

@@ -297,7 +297,7 @@ func (e *executor) attachCache(options common.ExecutorPrepareOptions, vm source.
 			options.BuildLogger.Warningln(a.note)
 		case a.scope != nil && a.note != "":
 			options.BuildLogger.Println(a.note)
-			return cacheDirVolume(options.Config)
+			return diskVolumes(options.Config, *a.scope)
 		}
 		return nil
 	}
@@ -318,7 +318,53 @@ func (e *executor) attachCache(options common.ExecutorPrepareOptions, vm source.
 		return nil
 	}
 	options.BuildLogger.Println(msg)
-	return cacheDirVolume(options.Config)
+	return diskVolumes(options.Config, job.scope)
+}
+
+// diskVolumes are the Docker volumes that keep the job's paths on its cache
+// disk: the runner's cache directory, and with Checkout its builds
+// directory.
+func diskVolumes(rc *common.RunnerConfig, scope cachedisk.Scope) []string {
+	v := cacheDirVolume(rc)
+	if scope.Checkout {
+		v = append(v, checkoutVolume(rc)...)
+	}
+	return v
+}
+
+// checkoutDir is where the job's working copies are on the cache disk, in
+// the VM.
+const checkoutDir = "/cache/checkout"
+
+// checkoutVolume keeps the runner's builds directory, where it clones the
+// project, on the cache disk: with GIT_STRATEGY fetch, GitLab's default,
+// the next job cleans the working copy (GIT_CLEAN_FLAGS) and fetches only
+// what is new; with clone it still starts again, as the project asked.
+// Nothing when the config mounts the builds directory already.
+func checkoutVolume(rc *common.RunnerConfig) []string {
+	if rc == nil || rc.Docker == nil {
+		return nil
+	}
+	dir := path.Clean(cmp.Or(rc.BuildsDir, "/builds"))
+	if mounted(rc.Docker.Volumes, dir) {
+		return nil
+	}
+	return []string{checkoutDir + ":" + dir}
+}
+
+// mounted says whether one of volumes is mounted at dir.
+func mounted(volumes []string, dir string) bool {
+	for _, v := range volumes {
+		parts := strings.Split(v, ":")
+		target := parts[0]
+		if len(parts) > 1 {
+			target = parts[1]
+		}
+		if path.Clean(target) == dir {
+			return true
+		}
+	}
+	return false
 }
 
 // cacheDirVolume keeps the runner's cache directory, where the job's
@@ -332,15 +378,8 @@ func cacheDirVolume(rc *common.RunnerConfig) []string {
 		return nil
 	}
 	dir := path.Clean(cmp.Or(rc.CacheDir, "/cache"))
-	for _, v := range rc.Docker.Volumes {
-		parts := strings.Split(v, ":")
-		target := parts[0]
-		if len(parts) > 1 {
-			target = parts[1]
-		}
-		if path.Clean(target) == dir {
-			return nil
-		}
+	if mounted(rc.Docker.Volumes, dir) {
+		return nil
 	}
 	return []string{dir}
 }

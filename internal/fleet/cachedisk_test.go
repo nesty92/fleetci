@@ -180,3 +180,36 @@ func TestGuestCommandKeepsScript(t *testing.T) {
 		}
 	}
 }
+
+// A kept checkout loses the job's credentials when its disk comes off.
+func TestUnmountStripsCheckoutCredentials(t *testing.T) {
+	dir := t.TempDir()
+	git := dir + "/cache/checkout/app/app/.git"
+	if err := os.MkdirAll(git, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	config := `[remote "origin"]
+	url = https://gitlab-ci-token:glcbt-secret@gitlab.example.com/g/app.git
+	fetch = +refs/heads/*:refs/remotes/origin/*
+[http "https://github.com/"]
+	extraheader = AUTHORIZATION: basic c2VjcmV0
+`
+	if err := os.WriteFile(git+"/config", []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := unmountScript(1)
+	start := strings.Index(s, "if [ -d /cache/checkout ]")
+	end := start + strings.Index(s[start:], "\nfi\n") + 4
+	part := strings.ReplaceAll(s[start:end], "/cache/checkout", dir+"/cache/checkout")
+	if out, err := exec.Command("sh", "-euc", part).CombinedOutput(); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	b, _ := os.ReadFile(git + "/config")
+	got := string(b)
+	if strings.Contains(got, "secret") || strings.Contains(got, "c2VjcmV0") {
+		t.Fatalf("credentials kept:\n%s", got)
+	}
+	if !strings.Contains(got, "url = https://gitlab.example.com/g/app.git") {
+		t.Fatalf("the remote changed:\n%s", got)
+	}
+}

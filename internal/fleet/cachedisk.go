@@ -355,8 +355,9 @@ func unmountScript(keep int64) string {
 
 const unmountTmpl = `
 keep=@KEEP@
-# actions/cache's folders mounted from the disk's trees.
-awk '$4 ~ "^/trees/" {print $5}' /proc/self/mountinfo | sort -r | while read -r m; do
+# actions/cache's folders mounted from the disk's trees, and a GitHub
+# job's checkout.
+awk '$4 ~ "^/(trees|checkout)/" {print $5}' /proc/self/mountinfo | sort -r | while read -r m; do
   umount "$m" 2>/dev/null || umount -l "$m" || true
 done
 over() { [ "$(df -B1 --output=used /cache | tail -1)" -gt $keep ]; }
@@ -374,6 +375,13 @@ if over && [ -d /cache/trees ]; then
 fi
 if over; then docker builder prune -f --keep-storage $((keep / 4)) >/dev/null 2>&1 || true; fi
 if over; then docker image prune -af --filter until=168h >/dev/null 2>&1 || true; fi
+# A kept checkout keeps no job's credentials, should the job have ended
+# before its own cleanup: actions/checkout's header, and a token in a URL,
+# as gitlab-runner writes them.
+if [ -d /cache/checkout ]; then
+  find /cache/checkout -maxdepth 8 -path "*/.git/config" -type f -exec \
+    sed -i -E -e "/^[[:space:]]*extraheader[[:space:]]*=/d" -e "s#(https?://)[^/@\"[:space:]]*@#\1#g" {} + 2>/dev/null || true
+fi
 if [ -f /run/fleetci-cache-mounted ] && [ -d /cache/docker/volumes ]; then
   find /cache/docker/volumes -name cache.zip -cnewer /run/fleetci-cache-mounted -exec touch -c {} + 2>/dev/null || true
 fi

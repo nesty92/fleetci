@@ -27,8 +27,7 @@ func TestPolicyScope(t *testing.T) {
 	}
 }
 
-// A project's writers = [] is no writers, which Validate takes; left out,
-// it is an error, not the same.
+// A project's writers = [] is no writers; left out, the top-level ones.
 func TestProjectWritersFromTOML(t *testing.T) {
 	var p Policy
 	if _, err := toml.Decode("[[projects]]\nmatch = \"g/*\"\nwriters = []\n", &p); err != nil {
@@ -38,10 +37,16 @@ func TestProjectWritersFromTOML(t *testing.T) {
 		t.Fatalf("writers = []: %v, %#v", err, p.Rules("g/a"))
 	}
 	p = Policy{}
-	if _, err := toml.Decode("[[projects]]\nmatch = \"g/*\"\n", &p); err != nil {
+	if _, err := toml.Decode("writers = [\"default\"]\n[[projects]]\nmatch = \"g/*\"\ncheckout = true\n", &p); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.Validate(); err == nil {
-		t.Fatal("a project without writers passed")
+	if err := p.Validate(); err != nil || !slices.Equal(p.Rules("g/a"), []string{"default"}) {
+		t.Fatalf("writers left out: %v, %q", err, p.Rules("g/a"))
+	}
+	if !p.Checkout("g/a") || p.Checkout("other/a") {
+		t.Fatal("checkout is the matching project's")
+	}
+	if s := p.Scope(Request{Forge: "gitlab", Path: "g/a", Project: "1", Job: Job{Ref: "main"}}); !s.Checkout {
+		t.Fatal("the scope doesn't carry checkout")
 	}
 }

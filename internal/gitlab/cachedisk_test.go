@@ -135,7 +135,6 @@ func TestCacheDiskValidate(t *testing.T) {
 		{Projects: []CacheDiskProject{{Writers: ok}}},
 		{Projects: []CacheDiskProject{{Match: "g/[", Writers: ok}}},
 		{Projects: []CacheDiskProject{{Match: "g/*", Writers: []string{"main"}}}},
-		{Projects: []CacheDiskProject{{Match: "g/*"}}}, // writers left out
 	} {
 		if c.Validate() == nil {
 			t.Errorf("%+v passed", c)
@@ -201,5 +200,23 @@ func TestCacheDirVolume(t *testing.T) {
 	}
 	if got := cacheDirVolume(nil); got != nil {
 		t.Errorf("no config: %q", got)
+	}
+}
+
+func TestDiskVolumesCheckout(t *testing.T) {
+	rc := &common.RunnerConfig{RunnerSettings: common.RunnerSettings{Docker: &common.DockerConfig{}}}
+	if got := diskVolumes(rc, cachedisk.Scope{}); !slices.Equal(got, []string{"/cache"}) {
+		t.Errorf("without checkout: %q", got)
+	}
+	if got := diskVolumes(rc, cachedisk.Scope{Checkout: true}); !slices.Equal(got, []string{"/cache", "/cache/checkout:/builds"}) {
+		t.Errorf("with checkout: %q", got)
+	}
+	rc.BuildsDir = "/ci/"
+	if got := diskVolumes(rc, cachedisk.Scope{Checkout: true}); !slices.Equal(got, []string{"/cache", "/cache/checkout:/ci"}) {
+		t.Errorf("builds_dir: %q", got)
+	}
+	rc.Docker.Volumes = []string{"/srv/b:/ci"}
+	if got := diskVolumes(rc, cachedisk.Scope{Checkout: true}); !slices.Equal(got, []string{"/cache"}) {
+		t.Errorf("builds dir mounted already: %q", got)
 	}
 }

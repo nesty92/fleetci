@@ -257,7 +257,8 @@ config, not the job, says otherwise:
 [gitlab.cache_disk]
 writers = ["protected"]          # the default; [] makes no job a writer
 
-# The first entry that matches the project applies; each sets writers.
+# The first entry that matches the project applies. One that leaves out
+# writers has the writers above.
 [[gitlab.cache_disk.projects]]
 match = "group/trunk-app"        # no protected branches; main deploys
 writers = ["default"]
@@ -279,6 +280,43 @@ tags, GitHub's tag rulesets.
 **Don't use `all`** unless everyone who can push a branch is trusted with
 what the default branch and the tags ship. It is there because some teams
 work that way. It is not a good default.
+
+## Keeping the checkout
+
+A big repository takes a while to clone on every job: about 12 s for
+kubernetes and 30 s for linux at actions/checkout's depth of 1, and two
+minutes for kubernetes' full history. A project can keep its checkout on
+the cache disk, so the next job cleans what the last one left and fetches
+only what is new: 2 to 6 s for kubernetes, 2 to 10 s for linux, 6 s for
+kubernetes' full history (see [the measurements](measurements.md#checkout)).
+
+It is off by default, and set per project:
+
+```toml
+[[gitlab.cache_disk.projects]]
+match = "group/monorepo"
+checkout = true                  # writers left out: the ones above
+
+[[github.cache_disk.projects]]
+match = "my-org/monorepo"
+checkout = true
+```
+
+Keep it for repositories that take more than a few seconds to clone. A small
+one clones as fast as it fetches, and its checkout only takes room on the
+disk.
+
+Nothing changes in the jobs. On GitLab, the runner's builds directory is on
+the disk, and `GIT_STRATEGY: fetch`, GitLab's default, cleans the working
+copy with `GIT_CLEAN_FLAGS` and fetches; a job that sets `clone` still starts
+again. On GitHub, the runner's folder for the repo is on the disk, and
+actions/checkout finds the last job's repository there, cleans it and
+fetches. A job's container sees it as well.
+
+The checkout is on the job's own disk, so the same writers' rules decide
+who shares it. A job's credentials don't stay on it: actions/checkout
+removes its own when the job ends, and fleetci removes what is left (a
+token in the remote's URL, an auth header) when it takes the disk off.
 
 ## GitHub Actions
 
@@ -465,6 +503,8 @@ usual; there are no other cache settings.
   `node_modules` only with `npm install`, never with `npm ci`.
 - Set `FLEETCI_CACHE: "off"` on deploy and release jobs that must start
   clean.
+- When fleetci keeps the project's checkout, leave `GIT_STRATEGY` at
+  `fetch`: `clone` starts again every job.
 - Don't try to make a merge request's jobs write the shared caches. fleetci
   decides that from GitLab's protected branches and its own config, not from
   job variables.

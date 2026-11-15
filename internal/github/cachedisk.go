@@ -41,6 +41,10 @@ cat "$d/job"`
 // answerScript gives the hook its answer, from stdin.
 const answerScript = `cat > /run/fleetci/done.new && mv /run/fleetci/done.new /run/fleetci/done`
 
+// checkoutAnswerScript is answerScript for a job whose checkout is kept on
+// its cache disk: the hook mounts it.
+const checkoutAnswerScript = `touch /run/fleetci/checkout && ` + answerScript
+
 // ErrHookGaveUp says the job's hook stopped waiting for its cache disk
 // before fleetci claimed the decision: the job runs without one.
 var ErrHookGaveUp = errors.New("the job's hook stopped waiting")
@@ -82,9 +86,13 @@ var hookRun = onVM
 var hookRetry = time.Second
 
 // AnswerJobHook gives the hook its answer, for the job's log; the job goes
-// on then.
-func AnswerJobHook(ctx context.Context, conn *proxy.Conn, msg string) error {
-	_, err := onVM(ctx, conn, answerScript, msg+"\n")
+// on then. With checkout, the hook keeps the job's checkout on the disk.
+func AnswerJobHook(ctx context.Context, conn *proxy.Conn, msg string, checkout bool) error {
+	script := answerScript
+	if checkout {
+		script = checkoutAnswerScript
+	}
+	_, err := onVM(ctx, conn, script, msg+"\n")
 	return err
 }
 
@@ -163,7 +171,7 @@ func (d *Dispatcher) attachCache(ctx context.Context, vm VM, repo string, queued
 	if scope != nil {
 		msg = d.attach(ctx, ca, vm, *scope, log)
 	}
-	if err := AnswerJobHook(context.WithoutCancel(ctx), vm.Conn, msg); err != nil {
+	if err := AnswerJobHook(context.WithoutCancel(ctx), vm.Conn, msg, scope != nil && scope.Checkout); err != nil {
 		log.Warn("the job's hook got no answer; it goes on after ten minutes", "err", err)
 	}
 }
