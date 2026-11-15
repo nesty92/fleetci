@@ -64,6 +64,11 @@ type Config struct {
 	// CacheDisk says which jobs write their project's shared caches, on
 	// classes with a cache disk; by default, protected branches' and tags'.
 	CacheDisk *CacheDisk `json:"cache_disk" toml:"cache_disk"`
+	// CacheStore is how jobs keep their cache: in the runners' bucket:
+	// "files" (the default), each file's contents once per project, so a
+	// save uploads what changed; "archive", one archive per key, as
+	// gitlab-runner does. A class with a cache disk keeps archives on it.
+	CacheStore string `json:"cache_store" toml:"cache_store"`
 
 	// HeldDir, set by fleetci's controller, keeps a note of each job taken
 	// and not yet on a worker, for the next start to place after a restart.
@@ -98,6 +103,9 @@ func (c Config) Validate(classes []string) error {
 	}
 	if err := c.CacheDisk.Validate(); err != nil {
 		return fmt.Errorf("gitlab: cache_disk %w", err)
+	}
+	if c.CacheStore != "" && c.CacheStore != StoreFiles && c.CacheStore != StoreArchive {
+		return fmt.Errorf("gitlab: cache_store %q: want %q or %q", c.CacheStore, StoreFiles, StoreArchive)
 	}
 	seen := map[string]bool{}
 	for i, r := range c.Runners {
@@ -242,7 +250,7 @@ func New(ctx context.Context, c Config, capacity source.Capacity, log hclog.Logg
 		config.Concurrent = concurrent
 	}
 	for _, rc := range config.Runners {
-		rc.Environment = withCacheCompression(rc.Environment)
+		rc.Environment = withCacheStore(withCacheCompression(rc.Environment), c.CacheStore)
 	}
 
 	p := newProvider(docker.NewProvider(), capacityVMs{capacity}, func(rc *common.RunnerConfig) string { return classOf[rc] }, names, defaultClass)

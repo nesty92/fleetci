@@ -35,6 +35,10 @@ type VM struct {
 }
 
 func (v *VM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/fleetci/ping" {
+		_, _ = io.WriteString(w, "ok")
+		return
+	}
 	name, ok := strings.CutPrefix(r.URL.Path, "/gitlab/")
 	prefix, key, err := Store(name)
 	if !ok || err != nil {

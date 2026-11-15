@@ -52,6 +52,15 @@ func actionsCacheFor(machine string) ([]byte, error) {
 // starts; the VM's script runs it when it is there. A VM without it runs
 // its jobs without the actions cache, as before a cache disk.
 func installActionsCache(ctx context.Context, client *ssh.Client, log hclog.Logger) {
+	if _, err := InstallCacheBinary(ctx, client); err != nil {
+		log.Warn("cache disk: the actions cache isn't used", "err", err)
+	}
+}
+
+// InstallCacheBinary copies fleetci-actions-cache into the VM, for its
+// architecture, and is where it went, from the VM's home. GitLab's jobs
+// run it too, for their caches (internal/gitlabcache).
+func InstallCacheBinary(ctx context.Context, client *ssh.Client) (string, error) {
 	run := func(cmd string, stdin []byte) ([]byte, error) {
 		s, err := client.NewSession()
 		if err != nil {
@@ -74,16 +83,15 @@ func installActionsCache(ctx context.Context, client *ssh.Client, log hclog.Logg
 	}
 	machine, err := run("uname -m", nil)
 	if err != nil {
-		log.Warn("cache disk: the actions cache isn't used", "err", err)
-		return
+		return "", err
 	}
 	bin, err := actionsCacheFor(string(machine))
 	if err != nil {
-		log.Warn("cache disk: the actions cache isn't used", "err", err)
-		return
+		return "", err
 	}
 	cmd := fmt.Sprintf(`set -e; f="$HOME/%[1]s"; mkdir -p "${f%%/*}"; gzip -dc > "$f.new"; chmod 755 "$f.new"; mv -f "$f.new" "$f"`, actionsCachePath)
 	if out, err := run(cmd, bin); err != nil {
-		log.Warn("cache disk: the actions cache isn't used", "err", err, "out", strings.TrimSpace(string(out)))
+		return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
 	}
+	return actionsCachePath, nil
 }

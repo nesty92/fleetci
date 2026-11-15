@@ -212,6 +212,10 @@ func (p *provider) Release(_ *common.RunnerConfig, data common.ExecutorData) {
 		return
 	}
 
+	if acqRef.stopCache != nil {
+		acqRef.stopCache()
+		acqRef.stopCache = nil
+	}
 	if acqRef.vm != nil {
 		_ = p.vms.Delete(context.Background(), acqRef.vm.ID)
 		logrus.WithField("vm", acqRef.vm.ID).Trace("Released capacity...")
@@ -277,41 +281,47 @@ func (e *executor) Prepare(options common.ExecutorPrepareOptions) (err error) {
 	options.Build.Log().WithField("vm", vm.ID).Trace("Acquired capacity...")
 
 	acqRef.vm = &vm
-	acqRef.volumes = e.attachCache(options, vm)
+	var disk bool
+	acqRef.volumes, disk = e.attachCache(options, vm)
+	// A cache disk keeps the job's cache: archives on it, as before.
+	if !disk && usesFileCache(options.Build.Runner) {
+		acqRef.stopCache = e.startJobCache(options, acqRef, vm)
+	}
 
 	return e.Executor.Prepare(withVolumes(options, acqRef.volumes))
 }
 
 // attachCache gives the job's VM its cache disk, when the VM's class has
-// one, and returns the Docker volumes that keep the job's paths on it.
-// Without it the job runs all the same, from cold.
-func (e *executor) attachCache(options common.ExecutorPrepareOptions, vm source.VM) []string {
+// one, and returns the Docker volumes that keep the job's paths on it,
+// and whether it has the disk. Without it the job runs all the same, from
+// cold.
+func (e *executor) attachCache(options common.ExecutorPrepareOptions, vm source.VM) ([]string, bool) {
 	if a := e.p.attached; a != nil && a.scope == nil {
 		if a.note != "" {
 			options.BuildLogger.Warningln(a.note)
 		}
-		return nil
+		return nil, false
 	}
 	job, err := cacheFor(e.p.cacheDisk, options.Build)
 	if err != nil {
 		options.BuildLogger.Warningln("No cache disk: " + err.Error())
-		return nil
+		return nil, false
 	}
 	if job == nil {
-		return nil
+		return nil, false
 	}
 	var msg string
 	if a := e.p.attached; a != nil {
 		msg = a.note // the leader's scope, which the worker attached
 	} else if msg, err = source.AttachCache(options.Context, e.p.vms, vm.ID, job.scope); err != nil {
 		options.BuildLogger.Warningln("No cache disk: " + err.Error())
-		return nil
+		return nil, false
 	}
 	if msg == "" {
-		return nil
+		return nil, false
 	}
 	options.BuildLogger.Println(msg)
-	return cacheDirVolume(options.Config)
+	return cacheDirVolume(options.Config), true
 }
 
 // cacheDirVolume keeps the runner's cache directory, where the job's
@@ -422,6 +432,8 @@ type acquisitionRef struct {
 	vm    *source.VM
 	// volumes keep the runner's cache directory on the cache disk.
 	volumes []string
+	// stopCache ends the job's per-file cache, after the job.
+	stopCache func()
 
 	// conn returns the connection to a VM's machine.
 	conn func(vm string) (*proxy.Conn, error)
