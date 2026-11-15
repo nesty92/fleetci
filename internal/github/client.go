@@ -31,6 +31,8 @@ type job struct {
 	Name   string   `json:"name"`
 	Status string   `json:"status"`
 	Labels []string `json:"labels"`
+	// RunnerName is the runner that took it, once one has.
+	RunnerName string `json:"runner_name"`
 	// CreatedAt is when GitHub queued it.
 	CreatedAt time.Time `json:"created_at"`
 }
@@ -174,23 +176,37 @@ func (c *client) do(ctx context.Context, method, path string, body, out any) err
 // queuedJobs lists the repo's jobs waiting for a runner. A job can wait in
 // a queued run or in one that has already started other jobs.
 //
+// The runs are the newest not completed, and those the queued and
+// in-progress filters find: GitHub's queued filter can miss a new run for
+// many minutes, while the unfiltered list has it at once, and the filter
+// finds a queued run older than the newest 100.
+//
 // A run whose jobs cannot be listed does not hold up the others: the jobs
 // that could be listed come back with the error.
 func (c *client) queuedJobs(ctx context.Context, repo string) ([]job, error) {
 	var jobs []job
 	var errs []error
-	for _, status := range []string{"queued", "in_progress"} {
+	seen := map[int64]bool{}
+	for _, status := range []string{"", "queued", "in_progress"} {
 		var runs struct {
 			Runs []struct {
-				ID int64 `json:"id"`
+				ID     int64  `json:"id"`
+				Status string `json:"status"`
 			} `json:"workflow_runs"`
 		}
-		q := url.Values{"status": {status}, "per_page": {"100"}}
+		q := url.Values{"per_page": {"100"}}
+		if status != "" {
+			q.Set("status", status)
+		}
 		if err := c.do(ctx, http.MethodGet, "/repos/"+repo+"/actions/runs?"+q.Encode(), nil, &runs); err != nil {
 			errs = append(errs, err)
 			continue
 		}
 		for _, r := range runs.Runs {
+			if r.Status == "completed" || seen[r.ID] {
+				continue
+			}
+			seen[r.ID] = true
 			var page struct {
 				Jobs []job `json:"jobs"`
 			}

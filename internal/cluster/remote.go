@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nesty92/fleetci/internal/cachedisk"
 	"github.com/nesty92/fleetci/internal/fleet"
 	"github.com/nesty92/fleetci/internal/github"
 	"github.com/nesty92/fleetci/internal/proxy"
@@ -129,10 +131,23 @@ func (f fleetCapacity) Create(ctx context.Context, class string) (source.VM, err
 	if spec.Overflow != "" {
 		try = append(try, spec.Overflow)
 	}
+	dirs := source.Caches(ctx)
+	waitTill := time.Now().Add(time.Duration(c.cfg.Controller.CacheWait))
+	waiting := false
 	for {
 		wake := c.changed()
-		for _, cl := range try {
-			for _, w := range c.candidates(cl) {
+		for i, cl := range try {
+			ws, better := c.byCache(c.candidates(cl), cl, dirs)
+			if i == 0 && better && time.Now().Before(waitTill) {
+				// The worker with the job's cache is full: wait a while,
+				// rather than start the job cold.
+				if !waiting {
+					c.log.Info("waiting for the job's cache: its worker is full", "class", cl, "for", time.Until(waitTill).Round(time.Second).String())
+					waiting = true
+				}
+				break
+			}
+			for _, w := range ws {
 				vm, err := c.createOn(ctx, w, cl)
 				if err == nil {
 					return vm, nil
@@ -149,13 +164,65 @@ func (f fleetCapacity) Create(ctx context.Context, class string) (source.VM, err
 				}
 			}
 		}
+		next := 5 * time.Second
+		if w := time.Until(waitTill); waiting && w > 0 {
+			next = min(next, w)
+		}
 		select {
 		case <-ctx.Done():
 			return source.VM{}, ctx.Err()
 		case <-wake:
-		case <-time.After(5 * time.Second):
+		case <-time.After(next):
 		}
 	}
+}
+
+// byCache puts first the workers that have the best of the caches a job
+// starts from (dirs, the best first), and of those the newest copy,
+// keeping the order otherwise. better says none of ws has any of them,
+// but a worker without room has one: the job waits a while (cache_wait)
+// for room there. A worker with
+// the cache the job falls back on (main's) is good enough, and the job
+// doesn't wait for the one with its own.
+func (c *Controller) byCache(ws []*workerConn, class string, dirs []string) (_ []*workerConn, better bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if spec := c.cfg.Classes[class]; spec == nil || !spec.CacheDisk || len(dirs) == 0 {
+		return ws, false
+	}
+	rank := func(w *workerConn) (int, time.Time) {
+		for i, d := range dirs {
+			if _, ok := slices.BinarySearch(w.report.Caches, d); ok {
+				return i, w.report.CacheCommitted[d]
+			}
+		}
+		return len(dirs), time.Time{}
+	}
+	best := len(dirs) // over the workers that run the class
+	for _, w := range c.workers {
+		if _, runs := w.report.Room[class]; runs && w.state() == Ready {
+			r, _ := rank(w)
+			best = min(best, r)
+		}
+	}
+	type key struct {
+		rank      int
+		committed time.Time
+	}
+	keys := map[*workerConn]key{}
+	here := len(dirs)
+	for _, w := range ws {
+		r, t := rank(w)
+		keys[w] = key{r, t}
+		here = min(here, r)
+	}
+	slices.SortStableFunc(ws, func(a, b *workerConn) int {
+		if d := keys[a].rank - keys[b].rank; d != 0 {
+			return d
+		}
+		return keys[b].committed.Compare(keys[a].committed) // the newer first
+	})
+	return ws, here == len(dirs) && best < len(dirs)
 }
 
 // bootWait is how long a worker may take to boot an assignment's VM.
@@ -205,6 +272,96 @@ func (c *Controller) createOn(ctx context.Context, w *workerConn, class string) 
 	}
 }
 
+var _ source.CacheRelay = fleetCapacity{}
+
+// HasCache says whether the VM's class has a cache disk.
+func (f fleetCapacity) HasCache(id string) bool {
+	_, a, err := f.c.assignmentOf(id)
+	if err != nil || a == nil {
+		return false
+	}
+	f.c.mu.Lock()
+	class := cmp.Or(a.status.Class, a.Class)
+	f.c.mu.Unlock()
+	spec := f.c.cfg.Classes[class]
+	return spec != nil && spec.CacheDisk
+}
+
+// ClassHasCache says whether the class's VMs have a cache disk.
+func (f fleetCapacity) ClassHasCache(class string) bool {
+	spec := f.c.cfg.Classes[class]
+	return spec != nil && spec.CacheDisk
+}
+
+// AttachCache: a fleet's VM gets its disk from its worker (GiveCache).
+func (f fleetCapacity) AttachCache(context.Context, string, cachedisk.Scope) (*cachedisk.Start, error) {
+	return nil, errors.New("a fleet's worker attaches its VM's cache disk")
+}
+
+// JobHint waits for the worker to relay what the VM's job hook said.
+func (f fleetCapacity) JobHint(ctx context.Context, id string) (string, error) {
+	st, err := f.c.awaitStatus(ctx, id, func(s AssignmentStatus) bool { return s.JobHint != "" || s.CacheNote != "" })
+	if err != nil {
+		return "", err
+	}
+	if st.JobHint == "" {
+		return "", errors.New(st.CacheNote) // the worker got no word from the hook
+	}
+	return st.JobHint, nil
+}
+
+// GiveCache writes the leader's decision on the VM's assignment: its
+// worker attaches the disk and answers the job's hook.
+func (f fleetCapacity) GiveCache(ctx context.Context, id string, scope *cachedisk.Scope, note string) (string, error) {
+	c := f.c
+	w, a, err := c.assignmentOf(id)
+	if err != nil {
+		return "", err
+	}
+	if a == nil {
+		return "", fmt.Errorf("vm %s is gone", id)
+	}
+	c.mu.Lock()
+	if a.Cache == nil {
+		a.Cache = &CacheGrant{Scope: scope, Note: note}
+		w.bumpLocked()
+	}
+	c.mu.Unlock()
+	st, err := c.awaitStatus(ctx, id, func(s AssignmentStatus) bool { return s.CacheNote != "" })
+	return st.CacheNote, err
+}
+
+// awaitStatus waits for the VM's assignment's status to be done, or over.
+func (c *Controller) awaitStatus(ctx context.Context, id string, done func(AssignmentStatus) bool) (AssignmentStatus, error) {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancel()
+	for {
+		wake := c.changed()
+		_, a, err := c.assignmentOf(id)
+		if err != nil {
+			return AssignmentStatus{}, err
+		}
+		if a == nil {
+			return AssignmentStatus{}, fmt.Errorf("vm %s is gone", id)
+		}
+		c.mu.Lock()
+		st := a.status
+		c.mu.Unlock()
+		switch {
+		case done(st):
+			return st, nil
+		case st.terminal():
+			return st, fmt.Errorf("vm %s's job ended", id)
+		}
+		select {
+		case <-ctx.Done():
+			return st, ctx.Err()
+		case <-wake:
+		case <-time.After(5 * time.Second):
+		}
+	}
+}
+
 // Conn is nil: a fleet VM is reached by its worker, not the controller.
 func (f fleetCapacity) Conn(string) (*proxy.Conn, error) { return nil, nil }
 
@@ -248,16 +405,16 @@ const lostAfter = 10 * time.Minute
 // it by the worker's reports.
 func (c *Controller) GitHubStart(cfg github.Config) github.StartFunc {
 	return func(ctx context.Context, vm github.VM, jit string, took func(job string)) error {
-		run := RunSpec{GitHub: &GitHubRun{JITConfig: jit, RunnerVersion: cfg.RunnerVersion, CacheURL: cfg.CacheURL, IdleTimeout: time.Duration(cfg.IdleTimeout)}}
+		run := RunSpec{GitHub: &GitHubRun{JITConfig: jit, RunnerVersion: cfg.RunnerVersion, CacheURL: cfg.CacheURL, CacheStore: cfg.CacheStore, CacheBucket: cfg.CacheBucket, CacheTokenIssuer: cfg.CacheTokenIssuer, IdleTimeout: time.Duration(cfg.IdleTimeout), Cache: vm.Cache}}
 		return c.runOn(ctx, vm.ID, run, took)
 	}
 }
 
 // GitLabRemote puts a GitLab job on its VM's assignment, to run with the
 // job's own token, and follows it.
-func (c *Controller) GitLabRemote() func(ctx context.Context, vm source.VM, job, runner []byte) error {
-	return func(ctx context.Context, vm source.VM, job, runner []byte) error {
-		return c.runOn(ctx, vm.ID, RunSpec{GitLab: &GitLabRun{Job: job, Runner: runner}}, nil)
+func (c *Controller) GitLabRemote() func(ctx context.Context, vm source.VM, job, runner []byte, cache *cachedisk.Scope) error {
+	return func(ctx context.Context, vm source.VM, job, runner []byte, cache *cachedisk.Scope) error {
+		return c.runOn(ctx, vm.ID, RunSpec{GitLab: &GitLabRun{Job: job, Runner: runner, Cache: cache}}, nil)
 	}
 }
 

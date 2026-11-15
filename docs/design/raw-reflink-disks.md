@@ -122,3 +122,8 @@ the layers are the unit both of keeping and of sharing:
 
 Do the root disk first, and measure what a raw cache disk gains on real
 jobs before redesigning it.
+
+Measured since, on the lab's real caches: a raw reflink clone on XFS in a
+file was no faster than the qcow2 chain, and 18% slower at synced writes
+([measurements](../measurements.md#the-cache-disk-qcow2-layers-a-raw-copy-a-reflink-clone)).
+The cache disk stays qcow2.

@@ -3,11 +3,13 @@ package vmjob
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -186,5 +188,71 @@ func TestAKeyCantLeaveTheJobsDirectory(t *testing.T) {
 		if err := Start(t.Context(), v.client(t), key, "true", nil); err == nil {
 			t.Errorf("key %q accepted", key)
 		}
+	}
+}
+
+// A VM's sshd doesn't answer the close of a session whose command still
+// runs. Following ends with its context all the same.
+func TestFollowEndsWithItsContextWhenTheVMDoesntAnswer(t *testing.T) {
+	v := newVM(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	// A proxy that stops passing bytes on, both ways, once deaf.
+	var deaf atomic.Bool
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			s, err := net.Dial("tcp", v.Addr)
+			if err != nil {
+				c.Close()
+				return
+			}
+			t.Cleanup(func() { c.Close(); s.Close() })
+			pipe := func(dst, src net.Conn) {
+				buf := make([]byte, 32<<10)
+				for {
+					n, err := src.Read(buf)
+					if err != nil {
+						return
+					}
+					if !deaf.Load() {
+						_, _ = dst.Write(buf[:n])
+					}
+				}
+			}
+			go pipe(s, c)
+			go pipe(c, s)
+		}
+	}()
+	c, err := ssh.Dial("tcp", ln.Addr().String(), &ssh.ClientConfig{User: "t", HostKeyCallback: ssh.InsecureIgnoreHostKey(), Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	if err := Start(t.Context(), c, "fleetci-deaf-1", "sleep 30", nil); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	ended := make(chan error, 1)
+	go func() {
+		_, _, err := Follow(ctx, c, "fleetci-deaf-1", 1, func(string) {})
+		ended <- err
+	}()
+	time.Sleep(300 * time.Millisecond)
+	deaf.Store(true)
+	cancel()
+	select {
+	case err := <-ended:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("got %v, want context.Canceled", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("following went on after its context ended")
 	}
 }

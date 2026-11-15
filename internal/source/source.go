@@ -19,6 +19,7 @@ import (
 
 	"github.com/hashicorp/go-hclog"
 
+	"github.com/nesty92/fleetci/internal/cachedisk"
 	"github.com/nesty92/fleetci/internal/fleet"
 	"github.com/nesty92/fleetci/internal/proxy"
 )
@@ -43,6 +44,63 @@ type VM struct {
 	Class string `json:"class"`
 	// Instance is the fleeting plugin's id for the machine behind the VM.
 	Instance string `json:"instance"`
+}
+
+// CacheAttacher is a Capacity whose VMs can have a cache disk (see
+// package cachedisk): a source that knows a job's project and ref asks
+// for it once it has the job's VM. The VM gives it back when it is
+// Deleted.
+type CacheAttacher interface {
+	// AttachCache says what the disk starts from, or nil when the VM's
+	// class has no cache disk.
+	AttachCache(ctx context.Context, vm string, scope cachedisk.Scope) (*cachedisk.Start, error)
+	// HasCache says whether the VM's class has a cache disk: a source
+	// that learns the job only once it runs prepares the VM to wait.
+	HasCache(vm string) bool
+}
+
+// CacheRelay is a CacheAttacher whose VMs another machine runs, which a
+// source can't reach: that machine relays the VM's job-started hook (see
+// package github) and attaches the disk the source decides on.
+type CacheRelay interface {
+	// JobHint waits for what the VM's job said of itself when it started.
+	JobHint(ctx context.Context, vm string) (string, error)
+	// GiveCache has the VM's machine attach scope's disk, or none when
+	// scope is nil, and tell the job; it returns what the job was told.
+	// note is what to tell it when scope is nil.
+	GiveCache(ctx context.Context, vm string, scope *cachedisk.Scope, note string) (string, error)
+	// ClassHasCache says whether the class's VMs have a cache disk.
+	ClassHasCache(class string) bool
+}
+
+type cachesKey struct{}
+
+// WithCaches says, to a Capacity that places VMs across machines, which
+// caches the VM's job would start from, the best first (cachedisk.Scope's
+// Dirs): it boots the VM where they are when it can.
+func WithCaches(ctx context.Context, dirs []string) context.Context {
+	return context.WithValue(ctx, cachesKey{}, dirs)
+}
+
+// Caches are what WithCaches put in ctx.
+func Caches(ctx context.Context) []string {
+	dirs, _ := ctx.Value(cachesKey{}).([]string)
+	return dirs
+}
+
+// AttachCache gives the VM the scope's cache disk when capacity can, and
+// says what it got, for the job's log: "" when the VM's class has none.
+// Every source attaches this way; only when differs.
+func AttachCache(ctx context.Context, capacity any, vm string, scope cachedisk.Scope) (string, error) {
+	a, ok := capacity.(CacheAttacher)
+	if !ok {
+		return "", nil
+	}
+	st, err := a.AttachCache(ctx, vm, scope)
+	if err != nil || st == nil {
+		return "", err
+	}
+	return cachedisk.Describe(scope, *st), nil
 }
 
 // Reservation is room for one VM, held until Acquire or Release.

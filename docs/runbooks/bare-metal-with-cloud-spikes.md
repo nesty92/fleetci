@@ -56,7 +56,7 @@ curl -fsSL -o /usr/local/bin/cloud-hypervisor \
 chmod 755 /usr/local/bin/cloud-hypervisor
 
 # fleetingd, our fork
-curl -fsSL https://github.com/nesty92/fleeting-plugin-fleetingd/releases/download/v0.4.0-fleetci.3/fleeting-plugin-fleetingd_linux_amd64.tar.gz \
+curl -fsSL https://github.com/nesty92/fleeting-plugin-fleetingd/releases/download/v0.4.0-fleetci.4/fleeting-plugin-fleetingd_linux_amd64.tar.gz \
   | tar -xz -C /usr/local/bin fleeting-plugin-fleetingd
 
 # fleetci and its gitlab-runner plugin

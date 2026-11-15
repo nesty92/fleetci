@@ -1,11 +1,14 @@
 package cluster
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"maps"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,6 +23,7 @@ import (
 
 	"github.com/hashicorp/go-hclog"
 
+	"github.com/nesty92/fleetci/internal/cachedisk"
 	"github.com/nesty92/fleetci/internal/fleet"
 	"github.com/nesty92/fleetci/internal/github"
 	"github.com/nesty92/fleetci/internal/source"
@@ -60,6 +64,11 @@ type Worker struct {
 	clients  map[string]*client   // controller address → its client
 	tasks    map[string]*task     // assignment id → what this worker made of it
 	lists    map[string]time.Time // controller address → when it last listed this worker's assignments
+	// stores are the GitHub jobs' cache stores by their settings, kept
+	// for the issuer's keys and the bucket's client.
+	stores map[string]github.CacheStore
+	// subnets hold the VM subnets this process claimed; see freeSubnets.
+	subnets  []net.Listener
 	changed  chan struct{}
 	update   *updater
 	started  time.Time          // when this process started
@@ -75,6 +84,9 @@ type task struct {
 	status  AssignmentStatus
 	started bool
 	cancel  context.CancelFunc // the job's, once it runs
+	// granted is closed when the leader's Cache comes, for a job that
+	// waits for it.
+	granted chan struct{}
 	done    time.Time
 	listed  time.Time // when a controller last listed it
 	by      string    // the address of the controller that last listed it
@@ -106,6 +118,11 @@ func (t *task) reportable(now time.Time) bool {
 type GitLabJob struct {
 	Job    json.RawMessage // as GitLab gave it
 	Runner json.RawMessage // the [[runners]] table, without its token
+	// Cache is the cache disk the worker attached to the VM, nil for
+	// none; CacheNote says what it got, or why it has none, for the
+	// job's log.
+	Cache     *cachedisk.Scope
+	CacheNote string
 }
 
 type workerVM struct {
@@ -300,10 +317,18 @@ func (w *Worker) build(ctx context.Context, fit Fit) error {
 	}
 	classes := map[string]Class{}
 	fclasses := map[string]fleet.Class{}
-	subnets, err := freeSubnets(len(fit.Classes))
+	subnets, claims, err := freeSubnets(len(fit.Classes))
 	if err != nil {
 		return err
 	}
+	kept := false
+	defer func() {
+		if !kept {
+			for _, l := range claims {
+				l.Close()
+			}
+		}
+	}()
 	egress := w.cfg.EgressInterface
 	if egress == "" {
 		if egress, err = defaultInterface(); err != nil {
@@ -338,6 +363,7 @@ func (w *Worker) build(ctx context.Context, fit Fit) error {
 	}
 	w.mu.Lock()
 	w.backend = b
+	w.subnets, kept = claims, true
 	w.mu.Unlock()
 	return nil
 }
@@ -375,6 +401,18 @@ func (w *Worker) fleetClass(c Class, egress, images, subnet string) (fleet.Class
 		"vm_snapshot":              true,
 		"vm_image_url":             c.Image,
 	}
+	var cache *fleet.CacheDisk
+	if c.CacheDisk {
+		dir := filepath.Join(w.cfg.StateDir, "cache")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return fleet.Class{}, err
+		}
+		pc["vm_cache_directory"] = dir
+		cache = &fleet.CacheDisk{}
+		if w.cfg.CacheDisk != nil {
+			*cache = *w.cfg.CacheDisk
+		}
+	}
 	raw, err := json.Marshal(pc)
 	if err != nil {
 		return fleet.Class{}, err
@@ -391,10 +429,13 @@ func (w *Worker) fleetClass(c Class, egress, images, subnet string) (fleet.Class
 		MaxInstances: max(n, 1),
 		// Each VM takes one job, so one idle is never worth keeping: it
 		// holds room the budget can't give a job.
-		IdleTime: fleet.Duration(idleSpare),
-		Host:     &yes,
-		CPUs:     c.CPUs,
-		Memory:   c.Memory,
+		IdleTime:  fleet.Duration(idleSpare),
+		Host:      &yes,
+		CPUs:      c.CPUs,
+		Memory:    c.Memory,
+		CacheDisk: cache,
+
+		RegistryMirrors: c.RegistryMirrors,
 	}, nil
 }
 
@@ -405,24 +446,41 @@ func groupName(worker, class string) string {
 }
 
 // freeSubnets picks /24s for the classes' VMs that clash with no route on
-// this machine, in fleetingd's form "172.16.N.".
-func freeSubnets(n int) ([]string, error) {
+// this machine, in fleetingd's form "172.16.N.", and claims each for this
+// process.
+//
+// A route shows only while a VM runs, so two workers on one network (one
+// machine, or one container) would otherwise both pick the first free
+// ones, and each dial the other's VMs at the same address. The claim is an
+// abstract unix socket: it belongs to the network namespace, which is what
+// the subnets share, and goes when the process does, however it ends. The
+// caller keeps the listeners open for as long as its VMs run.
+func freeSubnets(n int) ([]string, []net.Listener, error) {
 	out, err := exec.Command("ip", "-4", "route", "show", "table", "all").Output()
 	if err != nil {
-		return nil, fmt.Errorf("ip route: %w", err)
+		return nil, nil, fmt.Errorf("ip route: %w", err)
 	}
 	routes := string(out)
 	var subnets []string
+	var claims []net.Listener
 	for i := 200; i < 250 && len(subnets) < n; i++ {
 		s := fmt.Sprintf("172.16.%d.", i)
-		if !strings.Contains(routes, s) {
-			subnets = append(subnets, s)
+		if strings.Contains(routes, s) {
+			continue
 		}
+		l, err := net.Listen("unix", "@fleetci-vm-subnet-"+s+"0")
+		if err != nil {
+			continue // another worker on this network has it
+		}
+		subnets, claims = append(subnets, s), append(claims, l)
 	}
 	if len(subnets) < n {
-		return nil, errors.New("no free 172.16.200-249 subnet for the VMs")
+		for _, l := range claims {
+			l.Close()
+		}
+		return nil, nil, errors.New("no free 172.16.200-249 subnet for the VMs")
 	}
-	return subnets, nil
+	return subnets, claims, nil
 }
 
 // defaultInterface is the default route's interface.
@@ -492,8 +550,26 @@ func (w *Worker) idleVMs(class string) int {
 
 func (w *Worker) report() Report {
 	w.mu.Lock()
+	b := w.backend
+	w.mu.Unlock()
+	var caches []string
+	var committed map[string]time.Time
+	var stats *cachedisk.Stats
+	if b != nil {
+		held := b.HeldCaches() // off the lock: it reads the disk
+		caches = slices.Sorted(maps.Keys(held))
+		if len(held) > 0 {
+			committed = make(map[string]time.Time, len(held))
+			for k, h := range held {
+				committed[k] = h.Committed
+			}
+		}
+		stats = b.CacheStats()
+	}
+	w.mu.Lock()
 	defer w.mu.Unlock()
-	r := Report{Room: w.roomLocked(), UsedCPUs: w.used.CPUs, UsedMemory: w.used.MemoryMB, Checks: map[string]string{}}
+	r := Report{Room: w.roomLocked(), UsedCPUs: w.used.CPUs, UsedMemory: w.used.MemoryMB, Checks: map[string]string{},
+		Caches: caches, CacheCommitted: committed, CacheStats: stats}
 	for name := range w.classes {
 		if k := w.idleVMs(name); k > 0 {
 			if r.Idle == nil {
@@ -654,6 +730,12 @@ func (w *Worker) reconcile(ctx context.Context, by string, list []Assignment) {
 			continue
 		}
 		t.a.Cancel = t.a.Cancel || a.Cancel
+		if t.a.Cache == nil && a.Cache != nil {
+			t.a.Cache = a.Cache
+			if t.granted != nil {
+				close(t.granted)
+			}
+		}
 		if t.a.Run == nil && a.Run != nil {
 			t.a.Run = a.Run
 		}
@@ -741,6 +823,7 @@ func (w *Worker) run(ctx context.Context, t *task) {
 	defer cancel()
 	run := *t.a.Run
 	v.cancel, t.cancel = cancel, cancel
+	t.granted = make(chan struct{})
 	t.status.Phase, t.status.Since = PhaseRunning, time.Now()
 	t.status.Started = t.status.Since
 	switch {
@@ -756,7 +839,7 @@ func (w *Worker) run(ctx context.Context, t *task) {
 	switch {
 	case run.GitHub != nil:
 		w.setJob(v, "github")
-		err = w.runGitHub(rctx, cancel, v, *run.GitHub, log, func(job string) {
+		err = w.runGitHub(rctx, cancel, t, v, *run.GitHub, log, func(job string) {
 			w.mu.Lock()
 			v.took, t.status.Took = job, job
 			w.mu.Unlock()
@@ -764,7 +847,15 @@ func (w *Worker) run(ctx context.Context, t *task) {
 		})
 	case run.GitLab != nil && w.GitLab != nil:
 		w.setJob(v, "gitlab")
-		err = w.GitLab(rctx, v.vm, GitLabJob{Job: run.GitLab.Job, Runner: run.GitLab.Runner})
+		job := GitLabJob{Job: run.GitLab.Job, Runner: run.GitLab.Runner}
+		if run.GitLab.Cache != nil {
+			var from string
+			job.Cache, job.CacheNote, from = w.attachCache(rctx, v, *run.GitLab.Cache, log)
+			w.mu.Lock()
+			t.status.CacheFrom = from
+			w.mu.Unlock()
+		}
+		err = w.GitLab(rctx, v.vm, job)
 	case run.GitLab != nil:
 		err = errors.New("this worker can't run GitLab jobs")
 	default:
@@ -899,8 +990,21 @@ func (w *Worker) delete(ctx context.Context, id string) error {
 // runGitHub runs a just-in-time runner on a VM until it exits. A runner
 // that takes no job is stopped, as the leader's idle watch would; the
 // leader may be gone.
-func (w *Worker) runGitHub(ctx context.Context, cancel context.CancelFunc, v *workerVM, req GitHubRun, log hclog.Logger, took func(string)) error {
-	start := github.SSHStart(req.RunnerVersion, req.CacheURL, log)
+func (w *Worker) runGitHub(ctx context.Context, cancel context.CancelFunc, t *task, v *workerVM, req GitHubRun, log hclog.Logger, took func(string)) error {
+	cs, err := w.cacheStore(req, log)
+	if err != nil {
+		return err
+	}
+	start := github.SSHStart(req.RunnerVersion, cs, log)
+	var hook sync.WaitGroup
+	defer hook.Wait()
+	if req.Cache {
+		hook.Add(1)
+		go func() {
+			defer hook.Done()
+			w.relayCache(ctx, t, v, log)
+		}()
+	}
 	tookc := make(chan struct{})
 	go func() {
 		idle := req.IdleTimeout + time.Minute
@@ -916,10 +1020,94 @@ func (w *Worker) runGitHub(ctx context.Context, cancel context.CancelFunc, v *wo
 		}
 	}()
 	var once sync.Once
-	return start(ctx, github.VM{VM: source.VM{ID: v.vm.ID, Class: v.vm.Class, Instance: v.vm.Instance}, Conn: v.vm.Conn}, req.JITConfig, func(job string) {
+	return start(ctx, github.VM{VM: source.VM{ID: v.vm.ID, Class: v.vm.Class, Instance: v.vm.Instance}, Conn: v.vm.Conn, Cache: req.Cache}, req.JITConfig, func(job string) {
 		once.Do(func() { close(tookc) })
 		took(job)
 	})
+}
+
+// relayCache is a GitHub job's cache disk: it relays what the job's hook
+// says of the job to the leader, which decides the disk, attaches that,
+// and answers the hook. A job that ends first leaves it.
+func (w *Worker) relayCache(ctx context.Context, t *task, v *workerVM, log hclog.Logger) {
+	from := "none"
+	set := func(hint, note string) {
+		w.mu.Lock()
+		if hint != "" {
+			t.status.JobHint = hint
+		}
+		if note != "" {
+			t.status.CacheNote, t.status.CacheFrom = note, from
+		}
+		w.mu.Unlock()
+		w.poke()
+	}
+	hint, err := github.WaitJobHook(ctx, v.vm.Conn)
+	if err != nil {
+		if ctx.Err() == nil {
+			log.Warn("no cache disk", "err", err)
+			set("", "No cache disk: "+err.Error())
+		}
+		return
+	}
+	set(hint, "")
+	w.mu.Lock()
+	grant, granted := t.a.Cache, t.granted
+	w.mu.Unlock()
+	if grant == nil {
+		select {
+		case <-granted:
+		case <-ctx.Done():
+			return
+		case <-time.After(3 * time.Minute):
+			log.Warn("no cache disk: the leader did not say which")
+			_ = github.AnswerJobHook(context.WithoutCancel(ctx), v.vm.Conn, "No cache disk: fleetci did not say which")
+			set("", "No cache disk: the leader did not say which")
+			return
+		}
+		w.mu.Lock()
+		grant = t.a.Cache
+		w.mu.Unlock()
+	}
+	note := cmp.Or(grant.Note, "No cache disk")
+	if grant.Scope != nil {
+		if _, n, f := w.attachCache(ctx, v, *grant.Scope, log); n != "" {
+			note, from = n, f
+		}
+	}
+	if err := github.AnswerJobHook(context.WithoutCancel(ctx), v.vm.Conn, note); err != nil {
+		log.Warn("the job's hook got no answer; it goes on after ten minutes", "err", err)
+	}
+	set("", note)
+}
+
+// attachCache gives the VM its job's cache disk, when its class has one.
+// It returns the scope attached, or nil, what to tell the job, and what
+// the disk started from (AssignmentStatus.CacheFrom).
+func (w *Worker) attachCache(ctx context.Context, v *workerVM, scope cachedisk.Scope, log hclog.Logger) (*cachedisk.Scope, string, string) {
+	w.mu.Lock()
+	b := w.backend
+	w.mu.Unlock()
+	if b == nil || !b.HasCache(v.vm.ID) {
+		return nil, "", ""
+	}
+	st, err := b.AttachCache(ctx, v.vm, scope)
+	switch {
+	case err != nil:
+		log.Warn("no cache disk", "err", err)
+		return nil, "No cache disk: " + err.Error(), "none"
+	case st == nil:
+		return nil, "", ""
+	}
+	w.poke() // the report's caches change
+	from := "fallback"
+	switch {
+	case st.Empty:
+		from = "empty"
+	case st.Own:
+		from = "own"
+	}
+	return &scope, cachedisk.Describe(scope, *st), from
 }
 
 // idleVM is how long a VM may wait for the job it was made for; one a
@@ -1033,4 +1221,27 @@ func (w *Worker) renewIfDue(ctx context.Context) error {
 		return nil
 	}
 	return err
+}
+
+// cacheStore is the cache store a GitHub job's settings say, made once
+// for each.
+func (w *Worker) cacheStore(req GitHubRun, log hclog.Logger) (github.CacheStore, error) {
+	k, err := json.Marshal([]any{req.CacheStore, req.CacheURL, req.CacheBucket, req.CacheTokenIssuer})
+	if err != nil {
+		return github.CacheStore{}, err
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if cs, ok := w.stores[string(k)]; ok {
+		return cs, nil
+	}
+	cs, err := github.NewCacheStore(req.CacheStore, req.CacheURL, req.CacheBucket, req.CacheTokenIssuer, w.log)
+	if err != nil {
+		return cs, err
+	}
+	if w.stores == nil {
+		w.stores = map[string]github.CacheStore{}
+	}
+	w.stores[string(k)] = cs
+	return cs, nil
 }

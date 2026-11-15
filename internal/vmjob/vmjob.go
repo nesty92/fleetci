@@ -186,25 +186,66 @@ func (b *syncBuffer) String() string {
 
 type stdio struct{ out, err io.Writer }
 
-// run runs cmd in a session of its own, closed when ctx ends.
+// run runs cmd in a session of its own, closed when ctx ends. It returns
+// as ctx ends, not when the session does: a VM that doesn't answer the
+// close would otherwise keep it, and so its VM, until the connection goes.
 func run(ctx context.Context, client *ssh.Client, cmd string, stdin io.Reader, out *stdio) error {
 	s, err := client.NewSession()
 	if err != nil {
 		return err
 	}
-	defer s.Close()
-	stop := context.AfterFunc(ctx, func() { _ = s.Close() })
-	defer stop()
 	s.Stdin = stdin
+	var g *gate
 	if out != nil {
-		s.Stdout, s.Stderr = out.out, out.err
+		g = &gate{}
+		s.Stdout, s.Stderr = g.to(out.out), g.to(out.err)
 	}
-	err = s.Run(cmd)
-	if ctx.Err() != nil {
+	done := make(chan error, 1)
+	go func() { done <- s.Run(cmd) }()
+	select {
+	case err = <-done:
+		_ = s.Close()
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return err
+	case <-ctx.Done():
+		_ = s.Close()
+		// Output that comes after this goes nowhere: the caller has moved on.
+		g.shut()
 		return ctx.Err()
 	}
-	return err
 }
+
+// gate passes writes on until it is shut, and none after.
+type gate struct {
+	mu     sync.Mutex
+	closed bool
+}
+
+func (g *gate) to(w io.Writer) io.Writer {
+	return writerFunc(func(p []byte) (int, error) {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		if g.closed {
+			return len(p), nil
+		}
+		return w.Write(p)
+	})
+}
+
+func (g *gate) shut() {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	g.closed = true
+	g.mu.Unlock()
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
 
 // lineWriter calls line with each whole line written to it.
 type lineWriter struct {

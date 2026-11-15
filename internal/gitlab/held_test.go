@@ -15,6 +15,7 @@ import (
 
 	"gitlab.com/gitlab-org/gitlab-runner/common"
 
+	"github.com/nesty92/fleetci/internal/cachedisk"
 	"github.com/nesty92/fleetci/internal/source"
 )
 
@@ -142,7 +143,7 @@ func TestResumeHeldPlacesTheJob(t *testing.T) {
 		capacity: fakeCapacity{create: func(_ context.Context, class string) (source.VM, error) {
 			return source.VM{ID: "vm-1", Class: class}, nil
 		}},
-		remote: func(_ context.Context, vm source.VM, job, runner []byte) error {
+		remote: func(_ context.Context, vm source.VM, job, runner []byte, _ *cachedisk.Scope) error {
 			if _, err := os.Stat(held(dir).path(7)); err == nil {
 				t.Error("the note outlived the job's placing")
 			}
@@ -188,5 +189,32 @@ func TestPlaceExitingKeepsTheNote(t *testing.T) {
 	}
 	if _, err := os.Stat(held(dir).path(8)); err != nil {
 		t.Errorf("the note is gone: %v", err)
+	}
+}
+
+// A job placed reports how long it waited, from GitLab queuing it to its
+// VM being up.
+func TestPlaceReportsQueueWait(t *testing.T) {
+	type wait struct {
+		class string
+		d     time.Duration
+	}
+	got := make(chan wait, 1)
+	mr := &RunCommand{dispatch: &dispatcher{
+		ctx: context.Background(),
+		log: hclog.NewNullLogger(),
+		capacity: fakeCapacity{create: func(_ context.Context, class string) (source.VM, error) {
+			return source.VM{ID: "vm-1", Class: class}, nil
+		}},
+		remote:    func(context.Context, source.VM, []byte, []byte, *cachedisk.Scope) error { return nil },
+		queueWait: func(class string, d time.Duration) { got <- wait{class, d} },
+	}}
+	n := heldJob{ID: 7, Class: "big", Queued: time.Now().Add(-42 * time.Second)}
+	if err := mr.place(common.RunnerConfig{}, n, hclog.NewNullLogger()); err != nil {
+		t.Fatal(err)
+	}
+	w := <-got
+	if w.class != "big" || w.d < 42*time.Second || w.d > 50*time.Second {
+		t.Fatalf("queue wait %v", w)
 	}
 }

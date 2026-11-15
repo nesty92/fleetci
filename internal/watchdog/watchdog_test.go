@@ -93,7 +93,12 @@ func TestPluginAlive(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	if !PluginAlive(sleep) {
+	// Under load the new process can take a moment to show in /proc.
+	seen := false
+	for end := time.Now().Add(2 * time.Second); !seen && time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		seen = PluginAlive(sleep)
+	}
+	if !seen {
 		t.Fatal("running process not seen")
 	}
 	if !PluginAlive("sleep") {

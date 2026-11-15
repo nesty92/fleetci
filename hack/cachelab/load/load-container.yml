@@ -1,0 +1,35 @@
+# A pull request's pipeline, or main's once it merges (load.py commits it
+# with @LABEL_GO@, @LABEL_WEB@, @RUN@ and @CACHE@ filled in). Each job keeps
+# its tools' caches with actions/cache, as a project would, unless @CACHE@
+# is false.
+name: load
+on:
+  push:
+    branches: [main, "load/**"]
+jobs:
+  go:
+    runs-on: @LABEL_GO@
+    container: golang:1.27
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        if: @CACHE@
+        with:
+          path: .tcache
+          key: load-@RUN@-go-${{ github.sha }}
+          restore-keys: load-@RUN@-go-
+      - run: sh ci/job.sh go
+  web:
+    runs-on: @LABEL_WEB@
+    container: node:24
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        if: @CACHE@
+        with:
+          path: .tcache
+          key: load-@RUN@-web-${{ github.sha }}
+          restore-keys: load-@RUN@-web-
+      - run: sh ci/job.sh web

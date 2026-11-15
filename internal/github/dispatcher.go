@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
-	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -31,6 +30,8 @@ import (
 
 	"github.com/hashicorp/go-hclog"
 
+	"github.com/nesty92/fleetci/internal/cachebucket"
+	"github.com/nesty92/fleetci/internal/cachedisk"
 	"github.com/nesty92/fleetci/internal/fleet"
 	"github.com/nesty92/fleetci/internal/proxy"
 	"github.com/nesty92/fleetci/internal/source"
@@ -51,6 +52,10 @@ type Config struct {
 	// "repo"), for Orgs "Self-hosted runners: write" on the org (classic:
 	// "admin:org"). Or authenticate as a GitHub App instead.
 	TokenFile string `json:"token_file" toml:"token_file"`
+	// CacheDisk says which jobs write the caches the rest of their repo
+	// reads, for classes with a cache disk (see cachedisk.Policy); repos
+	// match by "owner/name". Default: jobs on protected branches.
+	CacheDisk *cachedisk.Policy `json:"cache_disk" toml:"cache_disk"`
 	// AppID and AppPrivateKeyFile authenticate as a GitHub App, in place of
 	// TokenFile. The App is found installed on each owner, and its
 	// installation tokens are renewed as they expire.
@@ -75,6 +80,14 @@ type Config struct {
 	// RunnerGroupID is the runner group to register in. Default 1, the
 	// default group.
 	RunnerGroupID int64 `json:"runner_group_id" toml:"runner_group_id"`
+	// RunnerScope is where an org's runners are registered: "org", the
+	// default, or "repo", on the job's repo. GitHub gives a repo's runner
+	// only that repo's jobs, so a runner fleetci starts for a job takes
+	// that job or another of its repo, whose cache disk is more often on
+	// the VM's node. With "repo" the token needs "Administration: write"
+	// on the org's repos, and RunnerGroupID does not apply: groups are an
+	// org's.
+	RunnerScope string `json:"runner_scope" toml:"runner_scope"`
 	// APIURL is GitHub's REST API. Default https://api.github.com.
 	APIURL string `json:"api_url" toml:"api_url"`
 	// CacheURL sends actions/cache, the setup-* caches and buildx's
@@ -83,6 +96,21 @@ type Config struct {
 	// region. The runner is patched on the VM to accept it; other
 	// requests (artifacts) the server passes on to GitHub.
 	CacheURL string `json:"cache_url" toml:"cache_url"`
+	// CacheStore is where actions/cache keeps its caches, besides the
+	// VM's cache disk, which is in front of it: "github", the default,
+	// is GitHub's cache (or CacheURL's server); "bucket" is the bucket
+	// in CacheBucket; "off" is the cache disk alone. Jobs' workflows
+	// stay as they are.
+	CacheStore string `json:"cache_store" toml:"cache_store"`
+	// CacheBucket is the bucket for CacheStore "bucket", in the form of
+	// gitlab-runner's [runners.cache]: Type "s3", "gcs" or "azure", Path,
+	// and its [s3], [gcs] or [azure] table. The node lists it and signs
+	// links for its VMs; the credentials stay on the node.
+	CacheBucket *cachebucket.Config `json:"cache_bucket,omitempty" toml:"cache_bucket,omitempty"`
+	// CacheTokenIssuer issues the jobs' tokens, whose keys the node
+	// checks them with. Default https://token.actions.githubusercontent.com;
+	// GitHub Enterprise Server's is https://HOST/_services/token.
+	CacheTokenIssuer string `json:"cache_token_issuer" toml:"cache_token_issuer"`
 
 	// NameByJob, set by fleetci's controller and never by fleetci.toml,
 	// names each runner after the job it is started for and the try,
@@ -104,6 +132,11 @@ type Config struct {
 	// QueueWait, set by fleetci's controller, is told how long each job
 	// waited, from GitHub queuing it to its VM being up.
 	QueueWait func(class string, wait time.Duration) `json:"-" toml:"-"`
+	// Pickup, set by fleetci's controller, is told how long each job took
+	// to reach fleetci, from GitHub queuing it to fleetci first taking it,
+	// and how it came: "poll" or "webhook". It is fleetci's own part of a
+	// job's wait; the rest is waiting for room.
+	Pickup func(class, via string, wait time.Duration) `json:"-" toml:"-"`
 }
 
 // claimTimeout is how long a job whose runner's name GitHub already has,
@@ -144,6 +177,9 @@ type VM struct {
 	// Conn is the connection to the VM's machine, shared: never closed by
 	// a job.
 	Conn *proxy.Conn
+	// Cache says the VM's class has a cache disk: the runner's job waits
+	// at its start while fleetci attaches it (see jobStartedHook).
+	Cache bool
 }
 
 // StartFunc runs a just-in-time runner on the VM and returns when it exits.
@@ -204,6 +240,12 @@ type Dispatcher struct {
 
 	orphans []orphan // runners to remove once GitHub lets us
 
+	// What GitHub says of repos, runs and refs, for cache disks: jobs of
+	// one run, or one repo, ask the same.
+	repoInfos memo[repoInfo]
+	runs      memo[workflowRun]
+	refs      memo[bool]
+
 	// settle is how long a runner whose registration went unanswered is
 	// looked for, in case GitHub registers it late.
 	settle time.Duration
@@ -261,21 +303,28 @@ func New(ctx context.Context, cfg Config, capacity source.Capacity, start StartF
 	if strings.ContainsAny(cfg.RunnerVersion, "'\"\\ $`/") {
 		return nil, fmt.Errorf("github runner_version %q: want a release such as %s", cfg.RunnerVersion, DefaultRunnerVersion)
 	}
+	if err := cfg.CacheDisk.Validate(); err != nil {
+		return nil, fmt.Errorf("github: cache_disk %w", err)
+	}
+	switch cfg.RunnerScope {
+	case "", "org":
+	case "repo":
+		if cfg.RunnerGroupID > 1 {
+			return nil, errors.New(`github: runner_group_id with runner_scope = "repo": runner groups are an org's, and a repo's runners are in none`)
+		}
+	default:
+		return nil, fmt.Errorf(`github runner_scope %q: want "org" or "repo"`, cfg.RunnerScope)
+	}
 	if cfg.RunnerGroupID == 0 {
 		cfg.RunnerGroupID = 1
 	}
-	if cfg.CacheURL != "" {
-		u, err := url.Parse(cfg.CacheURL)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || strings.ContainsAny(cfg.CacheURL, "'\"\\ $`") {
-			return nil, fmt.Errorf("github cache_url %q: want an http(s) URL", cfg.CacheURL)
-		}
-		// The cache client appends paths to it.
-		if !strings.HasSuffix(cfg.CacheURL, "/") {
-			cfg.CacheURL += "/"
-		}
+	cs, err := NewCacheStore(cfg.CacheStore, cfg.CacheURL, cfg.CacheBucket, cfg.CacheTokenIssuer, log)
+	if err != nil {
+		return nil, err
 	}
+	cfg.CacheURL = cs.URL
 	if start == nil {
-		start = SSHStart(cfg.RunnerVersion, cfg.CacheURL, log)
+		start = SSHStart(cfg.RunnerVersion, cs, log)
 	}
 	d := &Dispatcher{
 		cfg:          cfg,
@@ -365,7 +414,7 @@ func (w WebhookConfig) check() (string, error) {
 // serves the org, otherwise on the repo.
 func (d *Dispatcher) scope(repo string) string {
 	owner, _, _ := strings.Cut(repo, "/")
-	if d.orgs[strings.ToLower(owner)] {
+	if d.orgs[strings.ToLower(owner)] && d.cfg.RunnerScope != "repo" {
 		return "/orgs/" + owner
 	}
 	return "/repos/" + repo
@@ -413,7 +462,17 @@ func Check(ctx context.Context, cfg Config) []Finding {
 		if err := gh.do(ctx, http.MethodGet, "/orgs/"+org+"/repos?per_page=1", nil, nil); err != nil {
 			errs = append(errs, fmt.Errorf("listing repos: %w", err))
 		}
-		if err := gh.do(ctx, http.MethodGet, "/orgs/"+org+"/actions/runners?per_page=1", nil, nil); err != nil {
+		if cfg.RunnerScope == "repo" {
+			// The runners go on the repos: try one of them.
+			var repos []struct {
+				FullName string `json:"full_name"`
+			}
+			if err := gh.do(ctx, http.MethodGet, "/orgs/"+org+"/repos?per_page=1", nil, &repos); err == nil && len(repos) > 0 {
+				if err := gh.do(ctx, http.MethodGet, "/repos/"+repos[0].FullName+"/actions/runners?per_page=1", nil, nil); err != nil {
+					errs = append(errs, fmt.Errorf("listing %s's runners (runner_scope = \"repo\" needs Administration: read and write on the org's repos): %w", repos[0].FullName, err))
+				}
+			}
+		} else if err := gh.do(ctx, http.MethodGet, "/orgs/"+org+"/actions/runners?per_page=1", nil, nil); err != nil {
 			errs = append(errs, fmt.Errorf("listing runners (needs Self-hosted runners: read and write): %w", err))
 		}
 		out = append(out, Finding{"org " + org, "can list repos and runners", errors.Join(errs...)})
@@ -627,7 +686,7 @@ func (d *Dispatcher) pollAll(ctx context.Context) {
 		}
 		for _, j := range jobs {
 			queued[j.ID] = true
-			d.offer(ctx, repo, j)
+			d.offer(ctx, repo, j, "poll")
 		}
 	}
 	if whole {
@@ -657,9 +716,16 @@ func (d *Dispatcher) unwait(queued map[int64]bool) {
 
 // offer starts a runner for a queued job, unless it has one or isn't
 // fleetci's.
-func (d *Dispatcher) offer(ctx context.Context, repo string, j job) {
+func (d *Dispatcher) offer(ctx context.Context, repo string, j job, via string) {
 	class, ok := d.classFor(repo, j)
-	if !ok || !d.take(j.ID) {
+	if !ok {
+		return
+	}
+	took, first := d.take(j.ID)
+	if first && d.cfg.Pickup != nil && !j.CreatedAt.IsZero() {
+		d.cfg.Pickup(class, via, max(time.Since(j.CreatedAt), 0))
+	}
+	if !took {
 		return
 	}
 	d.mu.Lock()
@@ -723,7 +789,7 @@ func (d *Dispatcher) classFor(repo string, j job) (string, bool) {
 	return class, true
 }
 
-func (d *Dispatcher) take(id int64) bool {
+func (d *Dispatcher) take(id int64) (took, first bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	a, ok := d.taken[id]
@@ -731,14 +797,15 @@ func (d *Dispatcher) take(id int64) bool {
 	case !ok:
 		a = &attempt{}
 		d.taken[id] = a
+		first = true
 	case a.running || a.tries >= maxTries || time.Now().Before(a.retryAt):
-		return false
+		return false, false
 	}
 	a.tries++
 	a.serves++
 	a.running = true
 	a.at = time.Now()
-	return true
+	return true, first
 }
 
 // attempt tracks the runners started for one job.
@@ -850,7 +917,17 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 		a.unwait = unwait
 	}
 	d.mu.Unlock()
-	created, err := d.capacity.Create(wctx, class)
+	// A fleet places the VM where the job's cache is, as far as the job
+	// queued says: the runner may take another, which then starts cold.
+	cctx := wctx
+	var ahead *factsAhead
+	if relay, ok := d.capacity.(source.CacheRelay); ok && relay.ClassHasCache(class) {
+		ahead = d.factsAhead(ctx, repo, j)
+		if f, ok := ahead.within(ctx, placeWait); ok {
+			cctx = source.WithCaches(wctx, cacheScope(d.cfg.CacheDisk, d.instance(), f).Dirs())
+		}
+	}
+	created, err := d.capacity.Create(cctx, class)
 	d.mu.Lock()
 	if a := d.taken[j.ID]; a != nil {
 		a.unwait = nil
@@ -918,6 +995,9 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 		return
 	}
 	vm := VM{VM: created, Conn: conn}
+	if ca, ok := d.capacity.(source.CacheAttacher); ok && ca.HasCache(created.ID) {
+		vm.Cache = true
+	}
 
 	if reg.err != nil {
 		log.Error("registering runner; retrying", "err", reg.err)
@@ -930,8 +1010,13 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 	log.Info("runner starting", "runner", reg.name, "runner_id", strconv.FormatInt(runnerID, 10), "labels", labels, "waited", time.Since(start).Round(time.Second).String())
 
 	rctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	// The cache disk is attached, or given up, before the VM goes.
+	var attaching sync.WaitGroup
+	defer func() { cancel(); attaching.Wait() }()
 	go d.watchIdle(rctx, cancel, scope, runnerID, log)
+	if vm.Cache && ahead == nil {
+		ahead = d.factsAhead(rctx, repo, j)
+	}
 
 	// What the job uses of its VM, measured from the VM's kernel: whether
 	// its class is too small or too big for it.
@@ -943,8 +1028,16 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 	}
 	var took atomic.Pointer[string]
 	err = d.start(rctx, vm, jit, func(job string) {
+		first := took.Load() == nil
 		took.Store(&job)
 		log.Info("runner took a job", "job", job)
+		if vm.Cache && first {
+			attaching.Add(1)
+			go func() {
+				defer attaching.Done()
+				d.attachCache(rctx, vm, repo, j.ID, reg.name, ahead, log.With("job", job))
+			}()
+		}
 	})
 	if job := took.Load(); job != nil {
 		log = log.With("job", *job)
@@ -1018,7 +1111,11 @@ type registration struct {
 // register registers a runner under name.
 func (d *Dispatcher) register(ctx context.Context, scope, name string, labels []string) registration {
 	r := registration{name: name}
-	r.id, r.jit, r.err = d.gh.jitConfig(ctx, scope, r.name, d.cfg.RunnerGroupID, labels)
+	group := d.cfg.RunnerGroupID
+	if strings.HasPrefix(scope, "/repos/") {
+		group = 1 // a repo's runners are in no group of the org's
+	}
+	r.id, r.jit, r.err = d.gh.jitConfig(ctx, scope, r.name, group, labels)
 	r.at = time.Now()
 	return r
 }

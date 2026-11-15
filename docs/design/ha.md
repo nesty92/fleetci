@@ -153,8 +153,8 @@ single machine is both, as `fleetci serve` is today:
 
 The fleet's API is HTTPS and JSON, as Kubernetes's is between the kubelet
 and the API server: versioned paths under `/v1`, HTTP/2, mutual TLS, one
-TCP port (9481). Workers dial every controller; nothing dials a worker, so
-workers can be behind any NAT. Controllers dial each other on the same
+TCP port (9481). Workers dial every controller; no controller dials a
+worker, so workers can be behind any NAT. Controllers dial each other on the same
 port. It works through HTTP proxies, and `curl --cert` can read it.
 
 It is declarative. The leader never calls a worker; it writes
@@ -338,7 +338,10 @@ as `docs/grafana/fleetci-fleet.json` does.
 | `fleetci_fleet_job_duration_seconds{forge,class}`, `fleetci_fleet_vm_boot_seconds{class}` | how long they ran, and their VMs took to boot |
 | `fleetci_fleet_vms_total{class,outcome}` | VMs by what came of them: `job`, `unused`, `boot_failed`, `no_room` |
 | `fleetci_fleet_leader_changes_total` | hand-overs of the lead this controller saw |
-| `fleetci_fleet_queue_wait_seconds{forge,class}` | from GitHub queuing a job to its VM being up; GitLab's runner API gives no queue time |
+| `fleetci_fleet_queue_wait_seconds{forge,class}` | from the forge queuing a job to its VM being up: GitLab's time in its queue, then the wait for a VM |
+| `fleetci_fleet_job_cache_total{forge,class,from}` | jobs of classes with cache disks, by what the disk started from: `own`, `fallback` (main's), `empty`, `none` (no disk) |
+| `fleetci_fleet_worker_cache_used_bytes{worker}`, `…_cache_budget_bytes`, `…_cache_low_space` | each worker's cache disks: what they take, may take, and 1 when its disk is under `min_free` |
+| `fleetci_fleet_worker_cache_evictions_total{worker}`, `…_cache_flattens_total` | caches it dropped and chains it flattened, since it started |
 | `fleetci_github_api_requests_total{code}`, `fleetci_github_api_request_seconds` | the calls to GitHub's API, `code` 0 for no answer |
 | `fleetci_github_api_ratelimit_remaining{resource}` | what GitHub's rate limit had left at its last answer |
 

@@ -116,6 +116,15 @@ The App needs the same permissions (*Self-hosted runners*, *Actions: Read*,
 and *Administration: Read and write* for repos listed in `repos`), and to
 be installed on each org or repo.
 
+`runner_scope = "repo"` registers an org's runners on each job's repo
+instead. GitHub gives a repo's runner only that repo's jobs, so the job a
+runner takes is the one it was started for or another of the same repo;
+with cache disks on several nodes, the VM's node then more often has that
+repo's disk. The token or App needs *Administration: Read and write* on
+the org's repos (not *Self-hosted runners*), runner groups don't apply, and
+the org must allow repos to have their own runners (Settings → Actions →
+Runners).
+
 ### Webhooks
 
 Without them fleetci finds jobs by listing each repo's queued runs every
@@ -169,8 +178,11 @@ given, and points it at the server; the server passes everything that isn't
 cache (artifacts) to GitHub. It speaks the v2 cache protocol, which
 `actions/cache` v4 and later use.
 
-Install `zstd` on every image. The cache key includes the compression,
-so a VM without zstd (gzip) misses what a VM with it saved.
+Install `zstd` on every VM image. `actions/cache` compresses with zstd on
+all cores where it finds zstd, and with gzip on one core where it doesn't:
+fleetci lends the VM's zstd to job containers (`container:`), so a job in
+`golang` or `node` gets it too. The cache key includes the compression, so
+a VM without zstd misses what a VM with it saved.
 `hack/cache/up.sh` runs the server on RustFS for [hack/local](hack/local).
 
 ## Install
@@ -352,6 +364,12 @@ waits for a VM, default 10m, or 50m with an `overflow`). Unknown keys are errors
 relative to the file. Each class's `plugin_config` goes to its fleeting plugin
 as it is.
 
+A class's `registry_mirrors`, Docker Hub pull-through mirrors such as
+`["http://10.0.0.5:5000"]`, are written into each VM's Docker `daemon.json`
+before it takes a job, so its pulls don't count against Docker Hub's limit
+for the network's address. An image whose `daemon.json` names mirrors
+already keeps its own.
+
 ### Is each job's class the right size?
 
 fleetci measures each job on its VM from the VM's own kernel: how long its
@@ -390,6 +408,89 @@ read or change another job's VM. fleetci refuses to start, and
 VMs. To reuse VMs for GitLab and serve GitHub too, split them: GitHub in a
 `fleetci serve` (or another runner) with single-use classes and groups of
 their own.
+
+### A cache disk per job
+
+A fleetingd class can keep pulled images and caches without reusing VMs:
+each job's VM gets a disk of that job's caches, with Docker's and
+containerd's data on it, so the images, volumes and gitlab-runner's local
+`cache:` of the job's last run are there. A runner's own S3 cache settings
+still apply. The disk is a new copy-on-write layer on the job's last one,
+kept only if the VM gives it back whole, so a job never sees another's
+half-written disk.
+
+```toml
+[classes.small]
+plugin = "fleeting-plugin-fleetingd"
+plugin_config = { vm_cache_directory = "/var/lib/fleetci/cache" }  # with the rest
+
+[classes.small.cache_disk]
+budget = "100GB"        # all of the class's caches; refs' own, then shared, least recently used first
+min_free = "20GB"       # left free on that disk; short of it, jobs run without a cache disk
+max_per_cache = "30GB"  # one job's, trimmed to half after each job; past it, it starts empty
+max_age = "168h"        # a cache no job used for that long goes
+reader_max_age = "48h"  # sooner for merge and pull requests' own
+```
+
+Each job has its own disk, by its ref and name; its first run on a branch
+starts from the same job's disk on the default branch. Nothing changes in
+`.gitlab-ci.yml`: the job's `cache:` archives are kept on the disk and
+restored from it before S3. `FLEETCI_CACHE: "off"` runs a job without one.
+
+[docs/cache-disk.md](docs/cache-disk.md) has `cache:` recipes for npm,
+pnpm, Yarn, Next.js, Go, Rust, Python, PHP, Ruby and Java, and a block to
+paste into a project's AGENTS.md or CLAUDE.md for coding agents.
+
+Who can change a cache that other jobs read is fleetci's to say, not the
+jobs'. A project's shared caches are written by its writers' jobs; any other
+job writes a disk of its ref's own, which starts from the same job's
+shared one, so a merge request can't change what the default branch runs
+with. By default the writers are the jobs on protected branches and tags.
+Set `writers` for a project that works another way:
+
+| Rule | A job is a writer when it runs on |
+|---|---|
+| `protected` | a protected branch or tag (the default) |
+| `default` | the default branch, protected or not |
+| `branch:<glob>` | a branch that matches, `release/*` |
+| `tag:<glob>` | a tag that matches, `v*` or `staging-*` |
+| `all` | any branch, merge requests' too |
+
+```toml
+[gitlab.cache_disk]
+writers = ["protected"]          # the default; [] makes no job a writer
+
+[[gitlab.cache_disk.projects]]   # the first that matches applies
+match = "group/trunk-app"        # no protected branches; main deploys
+writers = ["default"]
+
+[[gitlab.cache_disk.projects]]
+match = "group/services/**"      # main deploys to one place, tags elsewhere
+writers = ["default", "tag:staging-*", "tag:v*"]
+```
+
+`all` lets anyone who can push a branch change what the default branch's
+and the tags' jobs run with: a poisoned `node_modules` or Docker image would
+ship. It is there for projects where every branch is trusted; don't use it
+otherwise. fleetci reads only what GitLab says of a job (its ref, whether it
+is protected, whether it is a merge request's), never variables the job
+could set.
+
+GitHub jobs get a disk too, keyed by their repo and branch, with Docker's
+data on it; the same rules go in `[github.cache_disk]`, matching
+`owner/name`. A pull request's job never writes the shared cache unless the
+rule is `all`, and one from a fork never does. See
+[docs/cache-disk.md](docs/cache-disk.md#github-actions).
+
+On a fleet of machines, a class takes `cache_disk = true` in
+`controller.toml`, and jobs go to the worker that holds their cache; see
+[docs/cache-disk.md](docs/cache-disk.md#on-a-fleet-of-machines).
+
+fleetci makes the layers with `qemu-img`, which must be on the host, and
+needs the fleetingd fork
+[v0.4.0-fleetci.4](https://github.com/nesty92/fleeting-plugin-fleetingd/releases/tag/v0.4.0-fleetci.4)
+or later, which has the `disk` command. fleetci's releases bundle it.
+[docs/measurements.md](docs/measurements.md) has what it saved on real projects in several languages.
 
 ### Your machines first, the cloud for spikes
 

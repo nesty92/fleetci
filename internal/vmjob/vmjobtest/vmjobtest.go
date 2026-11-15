@@ -6,10 +6,13 @@ import (
 	"crypto/ed25519"
 	"encoding/binary"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -46,7 +49,7 @@ func New(t *testing.T) *VM {
 		t.Fatal(err)
 	}
 	v := &VM{Home: t.TempDir(), Addr: ln.Addr().String(), ln: ln}
-	t.Cleanup(func() { ln.Close(); v.Drop() })
+	t.Cleanup(func() { ln.Close(); v.Drop(); v.endJobs() })
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -86,21 +89,96 @@ func (v *VM) Gone() {
 	v.Drop()
 }
 
+// endJobs ends the jobs the VM still runs, at the test's end: each is a
+// session of its own, which the job's pid file names, and outlives the
+// connection, so nothing else would end one that waits for the test.
+func (v *VM) endJobs() {
+	pids, _ := filepath.Glob(filepath.Join(v.Home, ".fleetci", "jobs", "*", "pid"))
+	for _, f := range pids {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil && pid > 1 {
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
+		}
+	}
+}
+
 // Path is a file in the VM's home.
 func (v *VM) Path(elem ...string) string { return filepath.Join(append([]string{v.Home}, elem...)...) }
 
 func (v *VM) serve(c net.Conn, cfg *ssh.ServerConfig) {
-	_, chans, reqs, err := ssh.NewServerConn(c, cfg)
+	sc, chans, reqs, err := ssh.NewServerConn(c, cfg)
 	if err != nil {
 		return
 	}
-	go ssh.DiscardRequests(reqs)
+	go v.forwards(sc, reqs)
 	for nc := range chans {
 		ch, creqs, err := nc.Accept()
 		if err != nil {
 			continue
 		}
 		go v.session(ch, creqs)
+	}
+}
+
+// forwards serves the client's remote forwards ("ssh -R"), as sshd does:
+// a port on the VM's loopback whose connections come to the client.
+func (v *VM) forwards(sc *ssh.ServerConn, reqs <-chan *ssh.Request) {
+	var lns []net.Listener
+	defer func() {
+		for _, ln := range lns {
+			ln.Close()
+		}
+	}()
+	for r := range reqs {
+		if r.Type != "tcpip-forward" {
+			if r.WantReply {
+				_ = r.Reply(false, nil)
+			}
+			continue
+		}
+		var at struct {
+			Addr string
+			Port uint32
+		}
+		if ssh.Unmarshal(r.Payload, &at) != nil {
+			_ = r.Reply(false, nil)
+			continue
+		}
+		ln, err := net.Listen("tcp", net.JoinHostPort(at.Addr, strconv.Itoa(int(at.Port))))
+		if err != nil {
+			_ = r.Reply(false, nil)
+			continue
+		}
+		lns = append(lns, ln)
+		_ = r.Reply(true, nil)
+		go func() {
+			for {
+				c, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				go func() {
+					defer c.Close()
+					from := c.RemoteAddr().(*net.TCPAddr)
+					ch, creqs, err := sc.OpenChannel("forwarded-tcpip", ssh.Marshal(struct {
+						Addr     string
+						Port     uint32
+						OrigAddr string
+						OrigPort uint32
+					}{at.Addr, at.Port, from.IP.String(), uint32(from.Port)}))
+					if err != nil {
+						return
+					}
+					go ssh.DiscardRequests(creqs)
+					defer ch.Close()
+					go func() { _, _ = io.Copy(ch, c); _ = ch.CloseWrite() }()
+					_, _ = io.Copy(c, ch)
+				}()
+			}
+		}()
 	}
 }
 

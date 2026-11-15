@@ -120,6 +120,7 @@ func fleetSources(ctx context.Context, c *cluster.Controller, held *gitlab.Held,
 		gcfg.NameByJob = true    // one runner per job across leaders: GitHub refuses the second
 		gcfg.HandOverIdle = true // a leader stepping down leaves its runners to their workers
 		gcfg.Transport, gcfg.QueueWait = c.GitHubMetrics()
+		gcfg.Pickup = c.GitHubPickup()
 		d, err := github.New(ctx, gcfg, capacity, c.GitHubStart(gcfg), log.Named("github"))
 		if err != nil {
 			return err
@@ -129,6 +130,7 @@ func fleetSources(ctx context.Context, c *cluster.Controller, held *gitlab.Held,
 	if cfg.GitLab != nil {
 		gcfg := *cfg.GitLab
 		gcfg.HeldDir, gcfg.Held, gcfg.Exiting = heldDir(cfg), held, exiting
+		gcfg.QueueWait = c.GitLabQueueWait()
 		l, err := gitlab.NewDispatch(ctx, gcfg, capacity, c.GitLabRemote(), log.Named("gitlab"))
 		if err != nil {
 			return err
@@ -286,7 +288,7 @@ func runWorker(ctx context.Context, wc *cluster.WorkerConfig) error {
 		return err
 	}
 	w.GitLab = func(ctx context.Context, vm fleet.VM, job cluster.GitLabJob) error {
-		return gitlab.RunJob(ctx, source.VM{ID: vm.ID, Class: vm.Class, Instance: vm.Instance}, vm.Conn, job.Job, job.Runner, log.Named("gitlab"))
+		return gitlab.RunJob(ctx, source.VM{ID: vm.ID, Class: vm.Class, Instance: vm.Instance}, vm.Conn, job.Job, job.Runner, job.Cache, job.CacheNote, log.Named("gitlab"))
 	}
 	self, err := os.Executable() // before an update replaces it
 	if err != nil {

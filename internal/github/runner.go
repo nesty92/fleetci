@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -16,9 +17,11 @@ import (
 // stdin, which keeps it out of the SSH command line. The runner takes one
 // job and exits. It is the version asked for (%[1]s), or with none the
 // newest in the image's ~/actions-runner-<version>, or else %[3]s;
-// one the image lacks is downloaded.
+// one the image lacks is downloaded. A second line "cache" has each job
+// wait at its start while fleetci gives it its cache disk (jobStartedHook).
 const runScript = `set -eu
 read -r jit
+read -r hook || hook=
 case $(uname -m) in
   x86_64) arch=x64 ;;
   aarch64|arm64) arch=arm64 ;;
@@ -49,33 +52,189 @@ fi
 if [ -w /opt/hostedtoolcache ]; then
   export RUNNER_TOOL_CACHE=/opt/hostedtoolcache AGENT_TOOLSDIRECTORY=/opt/hostedtoolcache
 fi
+# actions/cache compresses with zstd only where zstd is: a job's container,
+# often an image without it, falls back to gzip, one core, several times
+# slower. The VM's zstd goes where the runner mounts into job containers
+# (externals, at /__e), with its libraries and the loader, so that it runs
+# in any of them, glibc or musl; the job-started hook puts it on the PATH.
+zd=externals/fleetci-zstd
+rm -rf "$zd"
+if zb=$(command -v zstd 2>/dev/null) && [ -d externals ] && command -v ldd >/dev/null 2>&1; then
+  ld=$(ldd "$zb" 2>/dev/null | awk '$1 ~ /^\/.*ld-linux/ { print $1 }')
+  if [ -n "$ld" ] && mkdir -p "$zd/lib" "$zd/bin" && cp -L "$zb" "$zd/zstd" && cp -L "$ld" "$zd/ld.so" &&
+    ldd "$zb" | awk '$3 ~ /^\// { print $3 }' | while read -r l; do cp -L "$l" "$zd/lib/"; done; then
+    for w in zstd: zstdmt:-T0 unzstd:-d; do
+      printf '#!/bin/sh\nexec /__e/fleetci-zstd/ld.so --library-path /__e/fleetci-zstd/lib /__e/fleetci-zstd/zstd %%s "$@"\n' "${w#*:}" > "$zd/bin/${w%%%%:*}"
+      chmod 755 "$zd/bin/${w%%%%:*}"
+    done
+  else
+    rm -rf "$zd"
+  fi
+fi
 if [ -r /etc/os-release ]; then . /etc/os-release; fi
 if [ "${ID:-}" = ubuntu ]; then export ImageOS="ubuntu${VERSION_ID%%%%.*}"; fi
 cache='%[2]s'
-if [ -n "$cache" ]; then
+# With a cache disk, actions/cache goes through fleetci-actions-cache (which
+# fleetci copied to ~/%[5]s), which keeps the archives on the disk, in
+# front of the cache server it would have used. With the user's bucket and
+# no disk ("bucket"), it keeps the job's archives on the VM's own disk,
+# which goes with the VM, and the bucket is the store. Without it, or if
+# it doesn't start, jobs go straight on.
+ac=
+store=/cache/actions any=
+if [ "$hook" = bucket ]; then store=$HOME/fleetci-actions-cache-store any='any '; fi
+if { [ "$hook" = cache ] || [ "$hook" = bucket ]; } && [ -x "$HOME/%[5]s" ]; then
+  mkdir -p _diag
+  nohup setsid "$HOME/%[5]s" %[6]d "${cache:-%[7]s}" "$store" ${any}%[8]s>> _diag/fleetci-actions-cache.log 2>&1 < /dev/null &
+  # The address the VM's containers reach it at too: Docker's bridge. A
+  # firewall that drops what comes in lets them through to it, and only it.
+  at=$(ip -4 -o addr show docker0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1)
+  if command -v iptables >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+    for i in docker0 br-+; do
+      sudo -n iptables -I INPUT -i "$i" -p tcp --dport %[6]d -j ACCEPT 2>/dev/null || true
+    done
+  fi
+  i=0
+  while [ $i -lt 50 ]; do
+    if curl -fsS -o /dev/null -m 1 "http://127.0.0.1:%[6]d/fleetci/ping" 2>/dev/null; then
+      ac="http://${at:-127.0.0.1}:%[6]d/"
+      break
+    fi
+    i=$((i+1))
+    sleep 0.1
+  done
+fi
+if [ -n "$ac$cache" ]; then
   # The runner sets ACTIONS_RESULTS_URL for each job from GitHub's answer.
-  # Renaming the variable it writes (same length, UTF-16) keeps ours.
-  sed -i 's/A\x00C\x00T\x00I\x00O\x00N\x00S\x00_\x00R\x00E\x00S\x00U\x00L\x00T\x00S\x00_\x00U\x00R\x00L\x00/A\x00C\x00T\x00I\x00O\x00N\x00S\x00_\x00R\x00E\x00S\x00U\x00L\x00T\x00S\x00_\x00O\x00R\x00L\x00/g' bin/Runner.Worker.dll
-  export ACTIONS_RESULTS_URL="$cache"
+  # Renaming the variable it writes (same length, UTF-16) keeps ours. A
+  # runner that updates itself before its job brings an unpatched one: it
+  # is patched too, within a second, before the job's message comes.
+  patch() {
+    if LC_ALL=C grep -qaP 'A\x00C\x00T\x00I\x00O\x00N\x00S\x00_\x00R\x00E\x00S\x00U\x00L\x00T\x00S\x00_\x00U\x00R\x00L\x00' bin/Runner.Worker.dll 2>/dev/null; then
+      sed -i 's/A\x00C\x00T\x00I\x00O\x00N\x00S\x00_\x00R\x00E\x00S\x00U\x00L\x00T\x00S\x00_\x00U\x00R\x00L\x00/A\x00C\x00T\x00I\x00O\x00N\x00S\x00_\x00R\x00E\x00S\x00U\x00L\x00T\x00S\x00_\x00O\x00R\x00L\x00/g' bin/Runner.Worker.dll
+    fi
+  }
+  patch
+  (while sleep 1; do patch; done) < /dev/null > /dev/null 2>&1 &
+  export ACTIONS_RESULTS_URL="${ac:-$cache}" FLEETCI_RESULTS_URL="${ac:-$cache}"
+fi
+if [ -n "$ac" ]; then
+  # The job's log ends with what its cache steps got.
+  # A job whose cache steps never reached it gets the server's last words.
+  cat > fleetci-job-completed.sh <<EOF
+s=\$(curl -fsS -m 3 http://127.0.0.1:%[6]d/fleetci/stats || true)
+echo "\$s"
+case "\$s" in *"no actions/cache calls"*) tail -n 20 "$dir/_diag/fleetci-actions-cache.log" 2>/dev/null || true;; esac
+EOF
+  export ACTIONS_RUNNER_HOOK_JOB_COMPLETED="$dir/fleetci-job-completed.sh"
 fi
 if ! ls /usr/lib*/libicuuc.so.* /usr/lib/*/libicuuc.so.* 2>/dev/null | grep -q .; then
   if command -v dnf >/dev/null 2>&1; then sudo dnf install -y -q libicu >/dev/null
   else sudo ./bin/installdependencies.sh >/dev/null
   fi
 fi
+: > fleetci-job-started.sh
+if [ -d "$zd" ]; then
+  # A path that is only there in a job's container: a job on the VM itself
+  # has the VM's zstd.
+  echo 'if [ -n "${GITHUB_PATH:-}" ]; then echo /__e/fleetci-zstd/bin >> "$GITHUB_PATH"; fi' >> fleetci-job-started.sh
+fi
+if [ -n "$ac$cache" ]; then
+  cat >> fleetci-job-started.sh <<'HOOK'
+%[9]s
+HOOK
+fi
+if [ "$hook" = cache ] && sudo -n true 2>/dev/null; then
+  sudo mkdir -p /run/fleetci && sudo chown "$(id -u):$(id -g)" /run/fleetci
+  cat >> fleetci-job-started.sh <<'HOOK'
+%[4]s
+HOOK
+fi
+# With saves that stay on the disk (the bucket's, or none), actions/cache
+# keeps its folders there as folders: fleetci-actions-cache is the job's
+# tar (internal/actionscache/tree.go).
+if [ "$hook" = cache ] && [ -n "$ac" ] && [ -n '%[8]s' ] && sudo -n true 2>/dev/null; then
+  mkdir -p "$HOME/fleetci-bin" && ln -sf "$HOME/%[5]s" "$HOME/fleetci-bin/tar"
+  cat >> fleetci-job-started.sh <<'HOOK'
+%[10]s
+HOOK
+fi
+if [ -s fleetci-job-started.sh ]; then
+  export ACTIONS_RUNNER_HOOK_JOB_STARTED="$dir/fleetci-job-started.sh"
+fi
 exec ./run.sh --jitconfig "$jit"
+`
+
+// resultsHook runs before the job's first step wherever actions/cache has
+// a cache server other than GitHub's, disk or no disk: a job's container
+// doesn't get the runner's environment, only the job's, so the job's,
+// through GITHUB_ENV, has the server too.
+const resultsHook = `if [ -n "${FLEETCI_RESULTS_URL:-}" ] && [ -n "${GITHUB_ENV:-}" ]; then
+  echo "ACTIONS_RESULTS_URL=$FLEETCI_RESULTS_URL" >> "$GITHUB_ENV"
+  echo "fleetci cache: actions/cache goes to $FLEETCI_RESULTS_URL"
+fi
+# An unpatched runner sends actions/cache to GitHub's cache and says nothing.
+if [ -n "${FLEETCI_RESULTS_URL:-}" ] &&
+  LC_ALL=C grep -qaP 'A\x00C\x00T\x00I\x00O\x00N\x00S\x00_\x00R\x00E\x00S\x00U\x00L\x00T\x00S\x00_\x00U\x00R\x00L\x00' "$(dirname "$0")/bin/Runner.Worker.dll" 2>/dev/null; then
+  echo "::warning::fleetci: this runner isn't patched, so actions/cache goes to GitHub's cache, not $FLEETCI_RESULTS_URL"
+fi
+`
+
+// treesHook runs after jobStartedHook, once the job has its cache disk:
+// the disk gets the trees' folder, and the job fleetci's tar.
+const treesHook = `if mountpoint -q /cache 2>/dev/null && [ -n "${GITHUB_PATH:-}" ] &&
+  sudo -n mkdir -p /cache/trees && sudo -n chown "$(id -u):$(id -g)" /cache/trees; then
+  echo "$HOME/fleetci-bin" >> "$GITHUB_PATH"
+fi
+`
+
+// jobStartedHook runs before the job's first step: it says which run the
+// job is in, and its ref's type and protection as GitHub gave them, and waits while fleetci gives the job its cache disk
+// (Dispatcher.attachCache). fleetci or the hook, whichever makes "decided"
+// first, decides: the hook gives up after a minute only if fleetci has not
+// begun, so fleetci never stops Docker under a job that has started.
+const jobStartedHook = `d=/run/fleetci
+printf '%s %s %s %s\n' "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "${GITHUB_REF_TYPE:--}" "${GITHUB_REF_PROTECTED:--}" > "$d/job.new" && mv "$d/job.new" "$d/job"
+i=0
+until [ -e "$d/done" ]; do
+  i=$((i+1))
+  if [ $i -ge 600 ] && mkdir "$d/decided" 2>/dev/null; then
+    echo "No cache disk: fleetci did not answer"
+    exit 0
+  fi
+  if [ $i -ge 6000 ]; then
+    echo "No cache disk: fleetci did not finish attaching it"
+    exit 0
+  fi
+  sleep 0.1
+done
+# The actions cache (fleetci-actions-cache) runs as this user and keeps its archives on the disk.
+if mountpoint -q /cache 2>/dev/null; then
+  sudo -n mkdir -p /cache/actions && sudo -n chown "$(id -u):$(id -g)" /cache/actions
+fi
+cat "$d/done"
 `
 
 // SSHStart runs the runner on the VM over SSH and logs its output. An
 // empty version is the newest in the image, or DefaultRunnerVersion.
-// With cacheURL set, jobs use that cache server instead of GitHub's.
+// The cache store says where actions/cache keeps its caches, besides the
+// job's cache disk.
 //
 // The runner runs on the VM apart from fleetci's sessions (see vmjob):
 // fleetci follows its output, and losing the connection, or fleetci
 // stopping, leaves it running. A VM handed over to the next fleetci is
 // followed by that one to the job's end.
-func SSHStart(version, cacheURL string, log hclog.Logger) StartFunc {
-	return sshStart(fmt.Sprintf(runScript, version, cacheURL, DefaultRunnerVersion), log)
+func SSHStart(version string, cs CacheStore, log hclog.Logger) StartFunc {
+	var node http.Handler
+	if cs.bucket != nil {
+		node = cs.bucket.Handler()
+	}
+	return startWith(vmScript(version, cs), node, log)
+}
+
+// vmScript is runScript for the runner version and cache store given.
+func vmScript(version string, cs CacheStore) string {
+	return fmt.Sprintf(runScript, version, cs.URL, DefaultRunnerVersion, jobStartedHook, actionsCachePath, actionsCachePort, githubResultsURL, cs.actionsCacheArgs(), resultsHook, treesHook)
 }
 
 // followTries is how many times in a row following the runner may fail
@@ -83,7 +242,15 @@ func SSHStart(version, cacheURL string, log hclog.Logger) StartFunc {
 const followTries = 5
 
 func sshStart(script string, log hclog.Logger) StartFunc {
+	return startWith(script, nil, log)
+}
+
+// startWith is sshStart with nodeSvc, the node's cache service for a VM
+// with a cache disk, served on the VM through the SSH connection; the
+// job's saves are uploaded through it after the runner exits.
+func startWith(script string, nodeSvc http.Handler, log hclog.Logger) StartFunc {
 	return func(ctx context.Context, vm VM, jit string, took func(job string)) error {
+		log := log.With("vm", vm.ID)
 		// The machine's connection, shared with its reclaim watch: the job
 		// opens sessions on it and leaves it open. A VM that dies mid-job
 		// closes lost in seconds, not when TCP gives up.
@@ -91,10 +258,28 @@ func sshStart(script string, log hclog.Logger) StartFunc {
 		if err != nil {
 			return err
 		}
-		if err := vmjob.Start(ctx, client, vm.ID, script, []byte(jit+"\n")); err != nil {
+		stdin := jit + "\n"
+		switch {
+		case vm.Cache:
+			stdin += "cache\n"
+		case nodeSvc != nil:
+			// No disk, but the user's bucket: the actions cache is the way to it.
+			stdin += "bucket\n"
+		}
+		// This job's: the closure serves every job of the node at once.
+		var node http.Handler
+		if vm.Cache || nodeSvc != nil {
+			node = nodeSvc
+			installActionsCache(ctx, client, log)
+		}
+		stop := func() {}
+		if node != nil {
+			stop = serveNode(client, node, log)
+		}
+		defer func() { stop() }()
+		if err := vmjob.Start(ctx, client, vm.ID, script, []byte(stdin)); err != nil {
 			return err
 		}
-		log := log.With("vm", vm.ID)
 		line := func(l string) {
 			l = strings.TrimSpace(l)
 			if l == "" {
@@ -108,6 +293,9 @@ func sshStart(script string, log hclog.Logger) StartFunc {
 		next, failed := 1, 0
 		for {
 			status, n, err := vmjob.Follow(ctx, client, vm.ID, next, line)
+			if err == nil && node != nil {
+				flushSaves(ctx, client, log)
+			}
 			switch {
 			case err == nil && status == 0:
 				return nil
@@ -139,6 +327,10 @@ func sshStart(script string, log hclog.Logger) StartFunc {
 					return ctx.Err()
 				}
 				return fmt.Errorf("lost the vm: %w (following the runner: %v)", derr, err)
+			}
+			if c != client && node != nil {
+				stop()
+				stop = serveNode(c, node, log)
 			}
 			client, lost = c, l
 			log.Warn("following the runner again", "err", err)

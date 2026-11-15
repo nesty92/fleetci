@@ -336,9 +336,9 @@ func (mr *RunCommand) processRunner(id int, runner *common.RunnerConfig, runners
 		return nil
 	}
 
-	// fleetci: this is where fleetci's provider reserves room for one VM
-	// of the runner's class, or fails with NoFreeExecutorError, so no job
-	// leaves GitLab's queue until it has room.
+	// fleetci: this is where fleetci's provider checks for room for one
+	// VM of the runner's class, or fails with NoFreeExecutorError, so no
+	// job leaves GitLab's queue while the host is full.
 	mr.log().WithFields(runnerFields).Debug("Acquiring executor from provider")
 	executorData, err := provider.Acquire(runner)
 	if err != nil {

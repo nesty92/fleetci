@@ -53,12 +53,14 @@ const (
 
 func supervise(ctx context.Context, start startFunc, log hclog.Logger) (*supervised, provider.ProviderInfo, error) {
 	s := &supervised{start: start, log: log, backoff: restartBackoffMin}
+	// Held through the start: a plugin that exits while it starts has its
+	// restart wait for this, which sets what the restart replaces.
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	group, info, kill, err := start(ctx, s.exited(0))
 	if err != nil {
 		// A plugin that exits as its start fails is not restarted.
-		s.mu.Lock()
 		s.closed = true
-		s.mu.Unlock()
 		return nil, provider.ProviderInfo{}, err
 	}
 	s.id, s.group, s.kill = info.ID, group, kill

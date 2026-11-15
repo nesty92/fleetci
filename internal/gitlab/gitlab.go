@@ -22,6 +22,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/hashicorp/go-hclog"
 
@@ -60,6 +61,9 @@ type Config struct {
 	// (concurrent, check_interval, shutdown_timeout...) apply unless set
 	// above.
 	ConfigFile string `json:"config_file" toml:"config_file"`
+	// CacheDisk says which jobs write their project's shared caches, on
+	// classes with a cache disk; by default, protected branches' and tags'.
+	CacheDisk *CacheDisk `json:"cache_disk" toml:"cache_disk"`
 
 	// HeldDir, set by fleetci's controller, keeps a note of each job taken
 	// and not yet on a worker, for the next start to place after a restart.
@@ -71,6 +75,9 @@ type Config struct {
 	// than only stops leading: a job still waiting for a VM is then left
 	// noted, not failed.
 	Exiting func() bool `json:"-" toml:"-"`
+	// QueueWait, set by fleetci's controller, is told how long each job
+	// waited, from GitLab queuing it to its VM being up.
+	QueueWait func(class string, wait time.Duration) `json:"-" toml:"-"`
 }
 
 // Runner is one class's GitLab runner.
@@ -88,6 +95,9 @@ type Runner struct {
 func (c Config) Validate(classes []string) error {
 	if len(c.Runners) == 0 && c.ConfigFile == "" {
 		return errors.New("gitlab: no runners and no config_file")
+	}
+	if err := c.CacheDisk.Validate(); err != nil {
+		return fmt.Errorf("gitlab: cache_disk %w", err)
 	}
 	seen := map[string]bool{}
 	for i, r := range c.Runners {
@@ -231,8 +241,12 @@ func New(ctx context.Context, c Config, capacity source.Capacity, log hclog.Logg
 	if config.Concurrent == 0 {
 		config.Concurrent = concurrent
 	}
+	for _, rc := range config.Runners {
+		rc.Environment = withCacheCompression(rc.Environment)
+	}
 
 	p := newProvider(docker.NewProvider(), capacityVMs{capacity}, func(rc *common.RunnerConfig) string { return classOf[rc] }, names, defaultClass)
+	p.cacheDisk = c.CacheDisk
 	providers := executors.NewProviderRegistry(map[string]common.ExecutorProvider{executorName: p})
 
 	// As gitlab-runner's main.go newClient, without a certificate
@@ -263,6 +277,30 @@ func (l *Loop) Run(ctx context.Context) error {
 	<-ctx.Done()
 	l.log.Info("stopping: aborting running GitLab jobs")
 	return l.mr.Stop()
+}
+
+// cacheCompression are the runner's settings for its cache archives that
+// fleetci sets unless the runner's environment does: fastzip, zstd inside
+// the zip at its fast level. In the lab they saved a busy job's cache in
+// 2.3 s instead of 3.4 s, and restored it in 1.9 s instead of 2.4 s (see
+// docs/measurements.md). A job's own variables still win, as over any of
+// the runner's environment.
+var cacheCompression = []string{
+	"FF_USE_FASTZIP=true",
+	"CACHE_COMPRESSION_FORMAT=zipzstd",
+	"CACHE_COMPRESSION_LEVEL=fast",
+}
+
+// withCacheCompression adds cacheCompression's settings to env, a
+// runner's environment, those it doesn't set already.
+func withCacheCompression(env []string) []string {
+	for _, kv := range cacheCompression {
+		key, _, _ := strings.Cut(kv, "=")
+		if !slices.ContainsFunc(env, func(e string) bool { return strings.HasPrefix(e, key+"=") }) {
+			env = append(env, kv)
+		}
+	}
+	return env
 }
 
 // systemID is this machine's id among a runner's managers, the same on

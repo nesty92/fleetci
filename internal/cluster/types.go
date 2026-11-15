@@ -3,6 +3,9 @@ package cluster
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/nesty92/fleetci/internal/cachebucket"
+	"github.com/nesty92/fleetci/internal/cachedisk"
 )
 
 // Facts are what a worker has, as it reports them on joining and on each
@@ -68,6 +71,14 @@ type Report struct {
 	// lately.
 	Assignments []AssignmentStatus `json:"assignments,omitempty"`
 	Update      *UpdateStatus      `json:"update,omitempty"`
+	// Caches are the cache disks it keeps (cachedisk.Scope.Dirs' names),
+	// sorted: the controllers place a job where its cache is.
+	Caches []string `json:"caches,omitempty"`
+	// CacheCommitted is when each of Caches' newest layer was kept: of two
+	// workers with a job's cache, the job goes to the newer one.
+	CacheCommitted map[string]time.Time `json:"cache_committed,omitempty"`
+	// CacheStats are its cache disks' stores', for metrics.
+	CacheStats *cachedisk.Stats `json:"cache_stats,omitempty"`
 }
 
 // VMInfo is one of a worker's VMs.
@@ -154,6 +165,16 @@ type Assignment struct {
 	// that is no longer listed is not cancelled: its controller may have
 	// gone, and the worker sees it through.
 	Cancel bool `json:"cancel,omitempty"`
+	// Cache answers a GitHub job's hook (AssignmentStatus.JobHint): the
+	// disk to attach before the job goes on.
+	Cache *CacheGrant `json:"cache,omitempty"`
+}
+
+// CacheGrant is the cache disk the leader decided on for a GitHub job.
+type CacheGrant struct {
+	// Scope is the disk to attach; nil for none, and Note says why.
+	Scope *cachedisk.Scope `json:"scope,omitempty"`
+	Note  string           `json:"note,omitempty"`
 }
 
 // RunSpec is the job an assignment runs: one of GitHub and GitLab.
@@ -164,16 +185,29 @@ type RunSpec struct {
 
 // GitHubRun is a just-in-time runner.
 type GitHubRun struct {
-	JITConfig     string        `json:"jit_config"`
-	RunnerVersion string        `json:"runner_version,omitempty"`
-	CacheURL      string        `json:"cache_url,omitempty"`
-	IdleTimeout   time.Duration `json:"idle_timeout"`
+	JITConfig     string `json:"jit_config"`
+	RunnerVersion string `json:"runner_version,omitempty"`
+	CacheURL      string `json:"cache_url,omitempty"`
+	// CacheStore, CacheBucket and CacheTokenIssuer are the [github]
+	// table's; the worker serves the bucket to its VMs, as the leader
+	// would. The bucket's credentials go only to workers, as a GitLab
+	// job's [runners.cache] does.
+	CacheStore       string              `json:"cache_store,omitempty"`
+	CacheBucket      *cachebucket.Config `json:"cache_bucket,omitempty"`
+	CacheTokenIssuer string              `json:"cache_token_issuer,omitempty"`
+	IdleTimeout      time.Duration       `json:"idle_timeout"`
+	// Cache: the VM's class has a cache disk, and each job waits at its
+	// start for the leader to say which (Assignment.Cache).
+	Cache bool `json:"cache,omitempty"`
 }
 
 // GitLabRun is a GitLab job, run with the job's own token.
 type GitLabRun struct {
 	Job    json.RawMessage `json:"job"`    // the job as GitLab gave it
 	Runner json.RawMessage `json:"runner"` // the [[runners]] table, without its token
+	// Cache is the job's cache disk, which the worker attaches when the
+	// VM's class has one; nil for none.
+	Cache *cachedisk.Scope `json:"cache,omitempty"`
 }
 
 // An assignment's phases.
@@ -190,15 +224,24 @@ const ReasonNoRoom = "NoRoom"
 
 // AssignmentStatus is an assignment as its worker reports it.
 type AssignmentStatus struct {
-	ID       string    `json:"id"`
-	Class    string    `json:"class"`
-	Phase    string    `json:"phase"`
-	Reason   string    `json:"reason,omitempty"`
-	Err      string    `json:"err,omitempty"`
-	VM       string    `json:"vm,omitempty"`
-	Instance string    `json:"instance,omitempty"`
-	Took     string    `json:"took,omitempty"` // the GitHub job its runner took
-	Since    time.Time `json:"since"`
+	ID       string `json:"id"`
+	Class    string `json:"class"`
+	Phase    string `json:"phase"`
+	Reason   string `json:"reason,omitempty"`
+	Err      string `json:"err,omitempty"`
+	VM       string `json:"vm,omitempty"`
+	Instance string `json:"instance,omitempty"`
+	Took     string `json:"took,omitempty"` // the GitHub job its runner took
+	// JobHint is what the GitHub job's hook said of the job, "owner/repo
+	// run-id", for the leader to decide its cache disk; CacheNote is what
+	// the job was told of its disk, once it was.
+	JobHint   string `json:"job_hint,omitempty"`
+	CacheNote string `json:"cache_note,omitempty"`
+	// CacheFrom is what its cache disk started from, for metrics: "own"
+	// (its own cache), "fallback" (one it falls back on, main's), "empty"
+	// (a cache's first job), or "none" (its class has disks, it got none).
+	CacheFrom string    `json:"cache_from,omitempty"`
+	Since     time.Time `json:"since"`
 	// Job is the forge of the job it ran, "github" or "gitlab"; the times
 	// are when the leader wrote it, its VM was up, its job started, and it
 	// ended. Every controller keeps its history from these.

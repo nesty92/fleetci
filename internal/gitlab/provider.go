@@ -3,18 +3,19 @@
 // acquisition.go; MIT, see LICENSE.gitlab-runner), with fleetci's host queue
 // in place of taskscaler and without nesting, suspend and resume:
 //
-//   - provider.Acquire reserves room for one VM of the runner's class before
-//     the job is requested, or fails with NoFreeExecutorError;
-//   - executor.Prepare, once a job has arrived, takes the VM;
+//   - provider.Acquire checks for room for one VM of the runner's class
+//     before the job is requested, or fails with NoFreeExecutorError; it
+//     doesn't hold the room;
+//   - executor.Prepare, once a job has arrived, takes the VM, waiting in
+//     the same queue as every other job;
 //   - acquisitionRef.Prepare is the executors.Environment the Docker
 //     executor runs the job on: it dials the VM with fleeting's connector.
 //
 // A runner of gitlab-runner's config.toml has no class of its own: the
 // job's FLEETCI_CLASS names it, as with fleetci's plugin. Its Acquire
-// reserves room for a VM of the first class that has some, the default
-// class first, so it asks for no job while the host is full; Prepare uses
-// the reservation when the job's class is the reserved one, and otherwise
-// gives it back and waits for room in the job's class.
+// checks for room for a VM of the first class that has some, the default
+// class first, so it asks for no job while the host is full; Prepare waits
+// for a VM of the job's class.
 
 package gitlab
 
@@ -25,6 +26,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"path"
 	"slices"
 	"strings"
 	"sync"
@@ -39,6 +41,7 @@ import (
 	"gitlab.com/gitlab-org/gitlab-runner/session/terminal"
 	"gitlab.com/gitlab-org/gitlab-runner/steps"
 
+	"github.com/nesty92/fleetci/internal/cachedisk"
 	"github.com/nesty92/fleetci/internal/proxy"
 	"github.com/nesty92/fleetci/internal/source"
 	"github.com/nesty92/fleetci/internal/usage"
@@ -70,33 +73,56 @@ type vms interface {
 // capacityVMs is vms over source.Capacity.
 type capacityVMs struct{ source.Capacity }
 
+// Reserve checks for room for a VM of the class, behind the jobs already
+// waiting, and gives it straight back: a job is asked of GitLab only when
+// there is room, and once it arrives it waits for its VM in the same queue
+// as every other job. Held instead, the room was kept from the other jobs
+// for as long as GitLab kept the request open, up to a minute with no job.
 func (c capacityVMs) Reserve(class string) (reservation, error) {
 	r, err := c.Capacity.Reserve(context.Background(), class)
 	if err != nil {
 		return nil, err
 	}
-	return &capacityReservation{c: c.Capacity, r: r}, nil
+	if err := c.Capacity.Release(context.Background(), r); err != nil {
+		return nil, err
+	}
+	return &roomSeen{c: c.Capacity, class: class}, nil
 }
 
-// capacityReservation is a source.Reservation, used once by Acquire or
-// Release.
-type capacityReservation struct {
-	c    source.Capacity
-	r    source.Reservation
-	once sync.Once
+// AttachCache gives the VM a cache disk, when the core can.
+func (c capacityVMs) AttachCache(ctx context.Context, vm string, scope cachedisk.Scope) (*cachedisk.Start, error) {
+	if a, ok := c.Capacity.(source.CacheAttacher); ok {
+		return a.AttachCache(ctx, vm, scope)
+	}
+	return nil, nil
 }
 
-func (r *capacityReservation) Class() string { return r.r.Class }
+// HasCache says whether the VM's class has a cache disk.
+func (c capacityVMs) HasCache(vm string) bool {
+	a, ok := c.Capacity.(source.CacheAttacher)
+	return ok && a.HasCache(vm)
+}
 
-func (r *capacityReservation) Acquire(ctx context.Context) (source.VM, error) {
+// capacityVMs passes cache disks through.
+var _ source.CacheAttacher = capacityVMs{}
+
+// roomSeen is room a class had when the job was asked for, not held:
+// Acquire waits for a VM of the class with the other jobs. Used once.
+type roomSeen struct {
+	c     source.Capacity
+	class string
+	once  sync.Once
+}
+
+func (r *roomSeen) Class() string { return r.class }
+
+func (r *roomSeen) Acquire(ctx context.Context) (source.VM, error) {
 	vm, err := source.VM{}, errors.New("reservation already used")
-	r.once.Do(func() { vm, err = r.c.Acquire(ctx, r.r) })
+	r.once.Do(func() { vm, err = r.c.Create(ctx, r.class) })
 	return vm, err
 }
 
-func (r *capacityReservation) Release() {
-	r.once.Do(func() { _ = r.c.Release(context.Background(), r.r) })
-}
+func (r *roomSeen) Release() { r.once.Do(func() {}) }
 
 type provider struct {
 	common.ExecutorProvider
@@ -107,6 +133,11 @@ type provider struct {
 	// classes and defaultClass resolve FLEETCI_CLASS.
 	classes      []string
 	defaultClass string
+	// cacheDisk says which jobs write their project's shared caches.
+	cacheDisk *CacheDisk
+	// attached is, on a fleet's worker, the cache disk the worker gave
+	// the VM before the job: the job only keeps its paths on it.
+	attached *attachedCache
 }
 
 func newProvider(docker common.ExecutorProvider, vms vms, classOf func(*common.RunnerConfig) string, classes []string, defaultClass string) *provider {
@@ -225,7 +256,7 @@ func (e *executor) Prepare(options common.ExecutorPrepareOptions) (err error) {
 
 	// If we already have an acquisition just retry preparing it
 	if acqRef.vm != nil {
-		return e.Executor.Prepare(options)
+		return e.Executor.Prepare(withVolumes(options, acqRef.volumes))
 	}
 
 	// fleetci: the class's acquire_timeout bounds the wait.
@@ -249,13 +280,94 @@ func (e *executor) Prepare(options common.ExecutorPrepareOptions) (err error) {
 	options.Build.Log().WithField("vm", vm.ID).Trace("Acquired capacity...")
 
 	acqRef.vm = &vm
+	acqRef.volumes = e.attachCache(options, vm)
 
-	return e.Executor.Prepare(options)
+	return e.Executor.Prepare(withVolumes(options, acqRef.volumes))
 }
 
-// prepareByJob takes a VM of the class the job's FLEETCI_CLASS names: in
-// the reserved room when it is that class's, else after the room is given
-// back, waiting for the job's class.
+// attachCache gives the job's VM its cache disk, when the VM's class has
+// one, and returns the Docker volumes that keep the job's paths on it.
+// Without it the job runs all the same, from cold.
+func (e *executor) attachCache(options common.ExecutorPrepareOptions, vm source.VM) []string {
+	if a := e.p.attached; a != nil {
+		// On a fleet's worker: the leader chose the disk, the worker
+		// attached it.
+		switch {
+		case a.scope == nil && a.note != "":
+			options.BuildLogger.Warningln(a.note)
+		case a.scope != nil && a.note != "":
+			options.BuildLogger.Println(a.note)
+			return cacheDirVolume(options.Config)
+		}
+		return nil
+	}
+	job, err := cacheFor(e.p.cacheDisk, options.Build)
+	if err != nil {
+		options.BuildLogger.Warningln("No cache disk: " + err.Error())
+		return nil
+	}
+	if job == nil {
+		return nil
+	}
+	msg, err := source.AttachCache(options.Context, e.p.vms, vm.ID, job.scope)
+	if err != nil {
+		options.BuildLogger.Warningln("No cache disk: " + err.Error())
+		return nil
+	}
+	if msg == "" {
+		return nil
+	}
+	options.BuildLogger.Println(msg)
+	return cacheDirVolume(options.Config)
+}
+
+// cacheDirVolume keeps the runner's cache directory, where the job's
+// cache: archives land, on the cache disk: a Docker volume, as
+// gitlab-runner register writes in config.toml. The next job's restore
+// then finds cache.zip as new as the one in S3 and skips the download
+// (fleet's unmount script dates the ones the job saved after their upload).
+// Nothing when the config has the volume already, or turns caches off.
+func cacheDirVolume(rc *common.RunnerConfig) []string {
+	if rc == nil || rc.Docker == nil || rc.Docker.DisableCache {
+		return nil
+	}
+	dir := path.Clean(cmp.Or(rc.CacheDir, "/cache"))
+	for _, v := range rc.Docker.Volumes {
+		parts := strings.Split(v, ":")
+		target := parts[0]
+		if len(parts) > 1 {
+			target = parts[1]
+		}
+		if path.Clean(target) == dir {
+			return nil
+		}
+	}
+	return []string{dir}
+}
+
+// attachedCache is the cache disk a fleet's worker attached, and what to
+// tell the job of it.
+type attachedCache struct {
+	scope *cachedisk.Scope
+	note  string
+}
+
+// withVolumes adds volumes to the job's Docker config, a copy of the
+// runner's.
+func withVolumes(options common.ExecutorPrepareOptions, volumes []string) common.ExecutorPrepareOptions {
+	if len(volumes) == 0 || options.Config == nil || options.Config.Docker == nil {
+		return options
+	}
+	cfg := *options.Config
+	d := *cfg.Docker
+	d.Volumes = append(slices.Clone(d.Volumes), volumes...)
+	cfg.Docker = &d
+	options.Config = &cfg
+	return options
+}
+
+// prepareByJob takes a VM of the class the job's FLEETCI_CLASS names,
+// waiting in the host queue for it.
 func (e *executor) prepareByJob(options common.ExecutorPrepareOptions, res reservation) (source.VM, error) {
 	class, err := e.p.jobClass(options.Build)
 	if err != nil {
@@ -315,6 +427,8 @@ type acquisitionRef struct {
 	// tried: Prepare has used res, or given it back.
 	tried bool
 	vm    *source.VM
+	// volumes keep the runner's cache directory on the cache disk.
+	volumes []string
 
 	// conn returns the connection to a VM's machine.
 	conn func(vm string) (*proxy.Conn, error)

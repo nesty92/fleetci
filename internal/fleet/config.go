@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -24,8 +25,15 @@ type Class struct {
 	Plugin string `json:"plugin" toml:"plugin"`
 	// PluginConfig is passed to the plugin as it is, as JSON.
 	PluginConfig RawConfig `json:"plugin_config" toml:"plugin_config"`
+	// CacheDisk gives each job's VM its project's and ref's caches on a
+	// disk kept across VMs. fleetingd only.
+	CacheDisk *CacheDisk `json:"cache_disk" toml:"cache_disk"`
 	// Connector is how to log in to this class's VMs.
 	Connector Connector `json:"connector_config" toml:"connector_config"`
+	// RegistryMirrors are Docker Hub pull-through mirrors, as URLs, the
+	// VMs' Docker pulls through: written into its daemon.json before a VM
+	// takes a job. An http:// mirror is also made an insecure registry.
+	RegistryMirrors []string `json:"registry_mirrors" toml:"registry_mirrors"`
 
 	// MaxInstances caps the VMs of this class, running jobs and idle.
 	MaxInstances int `json:"max_instances" toml:"max_instances"`
@@ -196,6 +204,17 @@ func (c Class) schedules() []taskscaler.Schedule {
 	return out
 }
 
+// CheckRegistryMirrors refuses registry_mirrors that aren't plain http(s)
+// URLs, so that they can go into a shell script as they are.
+func CheckRegistryMirrors(mirrors []string) error {
+	for _, m := range mirrors {
+		if u, err := url.Parse(m); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || strings.ContainsAny(m, `'"\ |&`) {
+			return fmt.Errorf("registry_mirrors: %q is not an http(s) URL", m)
+		}
+	}
+	return nil
+}
+
 func (c Class) validate(name string) error {
 	if c.Plugin == "" {
 		return fmt.Errorf("class %q: plugin is required", name)
@@ -209,8 +228,14 @@ func (c Class) validate(name string) error {
 	if c.Reclaim.Rebalance && !c.watchesReclaim() {
 		return fmt.Errorf("class %q: reclaim.rebalance needs reclaim.watch", name)
 	}
+	if err := CheckRegistryMirrors(c.RegistryMirrors); err != nil {
+		return fmt.Errorf("class %q: %w", name, err)
+	}
 	if c.CPUs < 0 || c.Memory < 0 {
 		return fmt.Errorf("class %q: cpus and memory can't be negative", name)
+	}
+	if err := c.validateCacheDisk(name); err != nil {
+		return err
 	}
 	if c.IdleCount < 0 || c.IdleCount > c.MaxInstances {
 		return fmt.Errorf("class %q: idle_count must be between 0 and max_instances", name)
