@@ -17,6 +17,7 @@ import (
 	"github.com/nesty92/fleetci/internal/github"
 	"github.com/nesty92/fleetci/internal/gitlab"
 	"github.com/nesty92/fleetci/internal/source"
+	jobusage "github.com/nesty92/fleetci/internal/usage"
 )
 
 // serve runs GitHub Actions jobs, and with [gitlab] GitLab CI jobs, on
@@ -48,6 +49,11 @@ func serve(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	rec := c.UsageRecorder(log.Named("usage"))
+	jobusage.SetDefault(rec)
+	if err := c.ServeMetrics(ctx, rec, log); err != nil {
+		return err
+	}
 	var opts []fleet.Option
 	if c.StateDir != "" {
 		opts = append(opts, fleet.WithStateDir(c.StateDir))

@@ -801,6 +801,265 @@
       },
       "options": {},
       "id": 21
+    },
+    {
+      "type": "row",
+      "title": "Job sizing: is each class the right size?",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 61,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "id": 22
+    },
+    {
+      "type": "timeseries",
+      "title": "Jobs by fit",
+      "description": "Jobs measured on their VM, by how their class fit them (docs/job-usage.md). Each job is counted by the controller that led as it ran: the sum is the fleet's.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 62,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (fit) (increase(fleetci_job_fit_total{fit!=\"short\"}[$__rate_interval]))",
+          "legendFormat": "{{fit}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "stacking": {
+              "mode": "normal"
+            },
+            "drawStyle": "bars",
+            "fillOpacity": 80
+          }
+        },
+        "overrides": []
+      },
+      "options": {},
+      "id": 23
+    },
+    {
+      "type": "timeseries",
+      "title": "Undersized and oversized, by class",
+      "description": "The share of each class's judged jobs, over the last day, whose class was too small (undersized) or too big (oversized).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 62,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (class) (increase(fleetci_job_fit_total{fit=\"undersized\"}[1d])) / sum by (class) (increase(fleetci_job_fit_total{fit!=\"short\"}[1d]))",
+          "legendFormat": "undersized {{class}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (class) (increase(fleetci_job_fit_total{fit=\"oversized\"}[1d])) / sum by (class) (increase(fleetci_job_fit_total{fit!=\"short\"}[1d]))",
+          "legendFormat": "oversized {{class}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {},
+      "id": 24
+    },
+    {
+      "type": "timeseries",
+      "title": "CPU and memory wait, p90 by class",
+      "description": "Of the last hour's jobs, the share of its time the 90th percentile job had a task waiting for a CPU, or for memory (PSI some). Over 20% CPU or 5% memory wait is undersized.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 70,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.9, sum by (le, class) (increase(fleetci_job_cpu_wait_ratio_bucket[1h])))",
+          "legendFormat": "cpu {{class}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.9, sum by (le, class) (increase(fleetci_job_memory_wait_ratio_bucket[1h])))",
+          "legendFormat": "memory {{class}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {},
+      "id": 25
+    },
+    {
+      "type": "timeseries",
+      "title": "Peak use of the VM, p90 by class",
+      "description": "Of the last hour's jobs, the 90th percentile of the CPUs busy at a job's busiest 5 s, and of its peak memory, each of what its VM has.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 70,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.9, sum by (le, class) (increase(fleetci_job_cpu_peak_ratio_bucket[1h])))",
+          "legendFormat": "cpu {{class}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.9, sum by (le, class) (increase(fleetci_job_memory_peak_ratio_bucket[1h])))",
+          "legendFormat": "memory {{class}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {},
+      "id": 26
+    },
+    {
+      "type": "timeseries",
+      "title": "Disk wait, p90 by class",
+      "description": "Of the last hour's jobs, the 90th percentile of the share of its time a task waited for the disk. A bigger class doesn't help a job waiting on its disk, unless its memory is near full.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 78,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.9, sum by (le, class) (increase(fleetci_job_io_wait_ratio_bucket[1h])))",
+          "legendFormat": "{{class}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {},
+      "id": 27
+    },
+    {
+      "type": "timeseries",
+      "title": "Jobs outgrowing their class",
+      "description": "Jobs that needed more than their earlier runs, per day: a memory or CPU peak up by a quarter, CPU or memory wait up 10 points, or undersized in most of their last runs. \"fleetci usage\" names them.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 78,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (class) (increase(fleetci_job_outgrowing_total[1d]))",
+          "legendFormat": "{{class}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {},
+      "id": 28
     }
   ]
 }

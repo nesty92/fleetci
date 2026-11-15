@@ -713,3 +713,30 @@ row; on these qcow2 disks io_uring made no measurable difference to fio
 or an untar of 60k files, while on raw disks it wrote 2.3-2.7x faster.
 So fleetci keeps archives on both forges, and the bucket to put first is
 one next to the runners.
+
+## Job usage verdicts
+
+fleetci's job usage measurement ([job-usage.md](job-usage.md)) on a 2 vCPU /
+4 GB VM, five workloads of about 40 s each: CPU-starved, memory-squeezed,
+mostly idle, right-sized and disk-bound. Each was judged as expected. The
+table is in [job-usage.md](job-usage.md#checked-on-a-real-vm).
+
+## Disks: qcow2, raw, reflink clones
+
+Same VM. fio direct I/O in the guest, and an untar of 60,823 files:
+
+| Disk | Random write 4k qd32 | Sequential write 1M | Untar + sync |
+| --- | --- | --- | --- |
+| qcow2 overlay (today) | 29–31k IOPS | 1.32–1.38 GB/s | 3.5–4.4 s |
+| qcow2 overlay, io_uring | 30.6–30.8k IOPS | 1.32–1.38 GB/s | 3.5–4.2 s |
+| raw, io_uring | 81k IOPS | 3.1 GB/s | 3.3–4.1 s |
+| raw reflink clone on XFS, io_uring | 90k IOPS | 3.8 GB/s | 3.3–4.4 s |
+
+A reflink clone of the 20 GB image takes 11–13 ms on XFS and 3–4 ms on
+btrfs, against 7 ms for a qcow2 overlay and 1.6 s for a full copy. What it
+would take: [design/raw-reflink-disks.md](design/raw-reflink-disks.md).
+
+Docker's default seccomp profile blocks io_uring. In a container,
+Cloud Hypervisor then logs "io_uring runtime probe failed" and uses a
+synchronous backend.
+

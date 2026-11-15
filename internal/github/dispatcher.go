@@ -35,6 +35,7 @@ import (
 	"github.com/nesty92/fleetci/internal/fleet"
 	"github.com/nesty92/fleetci/internal/proxy"
 	"github.com/nesty92/fleetci/internal/source"
+	"github.com/nesty92/fleetci/internal/usage"
 )
 
 // Config is plugin_config's [github] table.
@@ -1017,6 +1018,14 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 		ahead = d.factsAhead(rctx, repo, j)
 	}
 
+	// What the job uses of its VM, measured from the VM's kernel: whether
+	// its class is too small or too big for it.
+	rec := usage.Default()
+	if rec != nil {
+		if c, _, cerr := conn.Client(rctx); cerr == nil {
+			rec.Start(rctx, c, created.ID)
+		}
+	}
 	var took atomic.Pointer[string]
 	err = d.start(rctx, vm, jit, func(job string) {
 		first := took.Load() == nil
@@ -1032,6 +1041,11 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 	})
 	if job := took.Load(); job != nil {
 		log = log.With("job", *job)
+		if rec != nil && ctx.Err() == nil {
+			if c, _, cerr := conn.Client(ctx); cerr == nil {
+				rec.Collect(ctx, c, "github", repo+" "+*job, created.Class, created.ID)
+			}
+		}
 	}
 	switch {
 	case ctx.Err() != nil:

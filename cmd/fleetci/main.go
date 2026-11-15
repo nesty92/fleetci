@@ -68,6 +68,8 @@ func main() {
 		err = workerCmd(os.Args[2:])
 	case "fleet":
 		err = fleetCmd(os.Args[2:], os.Stdout)
+	case "usage":
+		err = usageCmd(os.Args[2:], os.Stdout)
 	case "version", "--version":
 		fmt.Println("fleetci", version, revision)
 		return
@@ -91,6 +93,7 @@ func usage(w io.Writer) {
   fleetci ci-include [flags]      print a GitLab CI include with one hidden job per class
   fleetci watchdog [flags]        restart gitlab-runner when its fleetci plugin is gone
   fleetci serve [flags]           run GitHub Actions jobs on the classes, without gitlab-runner
+  fleetci usage [flags]           what each job used of its VM: classes too small, too big, or outgrown
   fleetci version
 
 A fleet of machines, run from controllers:
