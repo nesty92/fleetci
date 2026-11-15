@@ -799,7 +799,7 @@ A repository whose clone takes a few seconds gains nothing; one that takes
 tens of seconds or more gets most of it back. A week's commits cost more
 than a day's at depth 1: each fetch of a shallow clone sends whole trees
 for the commits it hasn't got. With full history the warm fetch sends only
-the new objects, and saves the most: 30 to 46 times faster. Chromium's
+the new objects, and saves the most: 21 to 46 times faster. Chromium's
 full history did not clone at all: GitHub ended the 65 GB fetch partway
 (`early EOF`), so such a project can only run from a kept checkout.
 
