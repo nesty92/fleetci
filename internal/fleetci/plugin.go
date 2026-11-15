@@ -25,6 +25,7 @@ import (
 	"github.com/nesty92/fleetci/internal/github"
 	"github.com/nesty92/fleetci/internal/gitlab"
 	"github.com/nesty92/fleetci/internal/source"
+	"github.com/nesty92/fleetci/internal/usage"
 )
 
 const (
@@ -58,6 +59,11 @@ type Config struct {
 	// so a restart of fleetci keeps the GitHub jobs running on the VMs of
 	// classes not on this host, and follows them to their end.
 	StateDir string `json:"state_dir" toml:"state_dir"`
+	// UsageFile keeps what each job used of its VM, a line of JSON per
+	// job, so a job that outgrows its class shows across restarts (see
+	// "fleetci usage"). Default: usage.jsonl in state_dir; without
+	// state_dir, jobs are measured and logged, and kept only in memory.
+	UsageFile string `json:"usage_file" toml:"usage_file"`
 }
 
 type InstanceGroup struct {
@@ -98,6 +104,7 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 	}
 	g.log = log
 	g.settings = settings
+	usage.SetDefault(g.UsageRecorder(log.Named("usage")))
 
 	// Each class starts its own fleeting plugin and taskscaler.
 	backend, err := fleet.New(ctx, g.Classes, g.Host, log)
@@ -289,4 +296,14 @@ func (g *InstanceGroup) Shutdown(ctx context.Context) error {
 	case <-ctx.Done():
 	}
 	return os.RemoveAll(g.dir)
+}
+
+// UsageRecorder measures the jobs' use of their VMs and keeps it in
+// usage_file, or state_dir's usage.jsonl.
+func (c *Config) UsageRecorder(log hclog.Logger) *usage.Recorder {
+	file := c.UsageFile
+	if file == "" && c.StateDir != "" {
+		file = filepath.Join(c.StateDir, "usage.jsonl")
+	}
+	return usage.NewRecorder(file, log)
 }

@@ -19,6 +19,7 @@
 package gitlab
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -27,6 +28,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/sirupsen/logrus"
 
@@ -39,6 +41,7 @@ import (
 
 	"github.com/nesty92/fleetci/internal/proxy"
 	"github.com/nesty92/fleetci/internal/source"
+	"github.com/nesty92/fleetci/internal/usage"
 )
 
 // executorName is the executor fleetci's runners name.
@@ -181,6 +184,7 @@ func (p *provider) Release(_ *common.RunnerConfig, data common.ExecutorData) {
 	}
 
 	if acqRef.vm != nil {
+		acqRef.collect()
 		_ = p.vms.Delete(context.Background(), acqRef.vm.ID)
 		logrus.WithField("vm", acqRef.vm.ID).Trace("Released capacity...")
 
@@ -314,6 +318,29 @@ type acquisitionRef struct {
 
 	// conn returns the connection to a VM's machine.
 	conn func(vm string) (*proxy.Conn, error)
+
+	// measured: the job's usage is being measured on the VM, by usage's
+	// recorder rec, for the project's job job.
+	measured bool
+	rec      *usage.Recorder
+	job      string
+}
+
+// collect reads, judges and keeps what the job used of its VM.
+func (ref *acquisitionRef) collect() {
+	if !ref.measured {
+		return
+	}
+	ref.measured = false
+	conn, err := ref.conn(ref.vm.ID)
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if c, _, err := conn.Client(ctx); err == nil {
+		ref.rec.Collect(ctx, c, "gitlab", ref.job, ref.vm.Class, ref.vm.ID)
+	}
 }
 
 // AcquisitionKey labels the job's containers with its VM.
@@ -358,6 +385,16 @@ func (ref *acquisitionRef) Prepare(
 		return nil, err
 	}
 	logger.Println(fmt.Sprintf("Instance %s connected", ref.vm.Instance))
+
+	// fleetci: what the job uses of its VM, read back in Release.
+	if rec := usage.Default(); rec != nil && !ref.measured {
+		if c, _, err := conn.Client(dialCtx); err == nil {
+			rec.Start(dialCtx, c, ref.vm.ID)
+			ref.measured, ref.rec = true, rec
+			info := options.Build.JobInfo
+			ref.job = cmp.Or(info.ProjectFullPath, options.Build.GetAllVariables().Value("CI_PROJECT_PATH"), info.ProjectName) + " " + info.Name
+		}
+	}
 
 	return &client{client: sharedClient{conn: conn}, cleanup: nil}, nil
 }

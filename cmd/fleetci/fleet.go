@@ -25,6 +25,7 @@ import (
 	"github.com/nesty92/fleetci/internal/github"
 	"github.com/nesty92/fleetci/internal/gitlab"
 	"github.com/nesty92/fleetci/internal/source"
+	jobusage "github.com/nesty92/fleetci/internal/usage"
 )
 
 const (
@@ -95,6 +96,8 @@ func controllerCmd(args []string) error {
 		held = gitlab.LoadHeld(heldDir(cfg), log.Named("gitlab"))
 		go held.FailAfter(ctx, gitlab.ResumeWithin)
 	}
+	// What each job uses of its VM, judged against its class.
+	jobusage.SetDefault(jobusage.NewRecorder(filepath.Join(cfg.Controller.StateDir, "usage.jsonl"), log.Named("usage")))
 	exiting := func() bool { return ctx.Err() != nil }
 	c.Sources = func(lctx context.Context, c *cluster.Controller) error { return fleetSources(lctx, c, held, exiting) }
 	return c.Run(ctx)
