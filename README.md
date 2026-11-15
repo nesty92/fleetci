@@ -487,7 +487,9 @@ On a fleet of machines, a class takes `cache_disk = true` in
 [docs/cache-disk.md](docs/cache-disk.md#on-a-fleet-of-machines).
 
 fleetci makes the layers with `qemu-img`, which must be on the host, and
-needs a fleetingd with the `disk` command.
+needs the fleetingd fork
+[v0.4.0-fleetci.4](https://github.com/nesty92/fleeting-plugin-fleetingd/releases/tag/v0.4.0-fleetci.4)
+or later, which has the `disk` command. fleetci's releases bundle it.
 [docs/measurements.md](docs/measurements.md) has what it saved on real projects in several languages.
 
 ### Your machines first, the cloud for spikes
