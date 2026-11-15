@@ -27,8 +27,8 @@ func (c *Config) loadFile() error {
 	if c.ConfigFile == "" {
 		return nil
 	}
-	if c.DefaultClass != "" || len(c.Classes) > 0 || c.GitHub != nil || c.GitLab != nil || c.Host != nil || c.StateDir != "" || c.UsageFile != "" {
-		return errors.New("with config_file, put default_class, classes, github, gitlab, host, state_dir and usage_file in that file, not in plugin_config")
+	if c.DefaultClass != "" || len(c.Classes) > 0 || c.GitHub != nil || c.GitLab != nil || c.Host != nil || c.StateDir != "" || c.UsageFile != "" || c.MetricsListen != "" {
+		return errors.New("with config_file, put default_class, classes, github, gitlab, host, state_dir, usage_file and metrics_listen in that file, not in plugin_config")
 	}
 
 	var f Config
@@ -91,6 +91,7 @@ func (c *Config) loadFile() error {
 	if f.UsageFile != "" {
 		c.UsageFile = relativeTo(dir, f.UsageFile)
 	}
+	c.MetricsListen = f.MetricsListen
 	if c.Listen == "" {
 		c.Listen = f.Listen
 	}

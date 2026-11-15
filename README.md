@@ -369,6 +369,9 @@ gitlab  g/app lint      4vcpu-8gb  31    0.9/4     0.6/8 GB  oversized: at most 
 ```
 
 The runs are kept in `usage_file` (default `usage.jsonl` in `state_dir`).
+The figures by class are Prometheus metrics too, at `metrics_listen` (or a
+fleet controller's `/metrics`), with a "Job sizing" row in the Grafana
+dashboard.
 See [docs/job-usage.md](docs/job-usage.md) for the rules and how they were
 checked.
 

@@ -40,12 +40,14 @@ type Recorder struct {
 
 	mu   sync.Mutex
 	runs map[string][]Run // job → its runs, oldest first
+
+	metrics *metrics
 }
 
 // NewRecorder keeps runs in file ("" for memory only), reading the runs
 // already in it for trends.
 func NewRecorder(file string, log hclog.Logger) *Recorder {
-	r := &Recorder{file: file, log: log, runs: map[string][]Run{}}
+	r := &Recorder{file: file, log: log, runs: map[string][]Run{}, metrics: newMetrics()}
 	if file == "" {
 		return r
 	}
@@ -129,6 +131,7 @@ func (r *Recorder) Record(run Run) Run {
 	r.add(run)
 	r.mu.Unlock()
 	r.append(run)
+	r.metrics.observe(run)
 
 	rep := run.Report
 	args := []any{"forge", run.Forge, "job", run.Job, "class", run.Class, "vm", run.VM,

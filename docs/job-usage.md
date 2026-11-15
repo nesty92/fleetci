@@ -89,6 +89,45 @@ default `usage.jsonl` in `state_dir` (`fleetci serve`) or the controller's
 without `usage_file`, jobs are measured and logged, and their history lasts
 until fleetci restarts.
 
+## Metrics
+
+The same figures go to Prometheus, by forge and class. A job's name isn't a
+label, since it would make series without end: per-job detail stays in the
+file and `fleetci usage`.
+
+| Metric | Type | What |
+| --- | --- | --- |
+| `fleetci_job_fit_total{forge,class,fit}` | counter | jobs by verdict: `undersized`, `oversized`, `io-bound`, `fits`, `short` |
+| `fleetci_job_outgrowing_total{forge,class}` | counter | jobs that showed a trend against their earlier runs |
+| `fleetci_job_cpu_wait_ratio{forge,class}` | histogram | share of the job's time a task waited for a CPU |
+| `fleetci_job_memory_wait_ratio{forge,class}` | histogram | the same for memory |
+| `fleetci_job_io_wait_ratio{forge,class}` | histogram | the same for the disk |
+| `fleetci_job_cpu_peak_ratio{forge,class}` | histogram | CPUs busy at the job's busiest 5 s, of the VM's |
+| `fleetci_job_memory_peak_ratio{forge,class}` | histogram | peak memory in use, of the VM's |
+
+Short jobs (under 30 s) are counted in `fleetci_job_fit_total` and not in the
+histograms. The counters start at zero with each process: the runs read
+back from the usage file aren't counted again.
+
+Where they're served:
+
+- a fleet controller: its `/metrics` (`[controller] metrics`), next to the
+  fleet's. Each job is counted by the controller that led as it ran, so sum
+  over controllers rather than take the max;
+- `fleetci serve` and gitlab-runner's fleetci plugin: `metrics_listen` in
+  fleetci.toml, e.g. `metrics_listen = "127.0.0.1:9483"`, plain HTTP at
+  `/metrics`.
+
+The fleet dashboard (`docs/grafana/fleetci-fleet.json`) has a "Job sizing"
+row: jobs by fit, the share of each class undersized or oversized over a
+day, the p90 waits and peaks by class, and the jobs outgrowing their class.
+Alert on the share undersized, for example:
+
+```promql
+sum by (class) (increase(fleetci_job_fit_total{fit="undersized"}[1d]))
+  / sum by (class) (increase(fleetci_job_fit_total{fit!="short"}[1d])) > 0.2
+```
+
 ## Checked on a real VM
 
 A 2 vCPU / 4 GB Cloud Hypervisor VM (Ubuntu 26.04), each workload about 40 s,
