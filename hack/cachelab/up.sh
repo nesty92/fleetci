@@ -39,4 +39,5 @@ docker inspect fleetci-cachelab >/dev/null 2>&1 ||
     -v "$DATA:/data" -v "$DATA/srcs:/srcs:ro" -v "$IMAGES:/base:ro" \
     -v "$CH:/usr/local/bin/cloud-hypervisor:ro" -v "$here:/lab:ro" \
     fleetci-lab sleep infinity >/dev/null
+docker exec fleetci-cachelab sh /lab/tools.sh
 echo "cachelab up: docker exec fleetci-cachelab sh /lab/matrix.sh [name...]"
