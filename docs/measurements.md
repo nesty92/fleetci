@@ -803,3 +803,25 @@ the new objects, and saves the most: 21 to 46 times faster. Chromium's
 full history did not clone at all: GitHub ended the 65 GB fetch partway
 (`early EOF`), so such a project can only run from a kept checkout.
 
+### The checkout cache in real jobs
+
+The cachelab, one 8 vCPU / 8 GB VM with a cache disk, `checkout = true`
+on both playgrounds. GitHub: actions/checkout of kubernetes at depth 1, a
+job on the VM and one in a job container (`buildpack-deps:noble-scm`), on a
+branch, each job its own disk. GitLab: the playground with
+`GIT_STRATEGY: fetch`, GitLab's default. The checkout step's seconds, as
+GitHub reports them.
+
+| Job | First run | Next runs |
+| --- | --- | --- |
+| GitHub, on the VM | 13 (cloned) | 2, 2 (the last job's there, fetched in 0.9 s) |
+| GitHub, in a container | 13 (cloned) | 3 |
+| GitLab | Initialized empty Git repository | Reinitialized existing Git repository |
+
+The workspace was the disk's in every job (`/dev/vdc[/checkout/...]` on
+GitHub, `/builds` on GitLab), and a job's container saw it at `/__w`. What
+the next job found had no credentials: no `extraheader`, no token in a URL.
+On GitLab, gitlab-runner's `clean_git_config`, on by default, already
+empties the repository's config after each job, so it adds the remote again
+("Created fresh repository"), but keeps the objects and the working copy.
+
