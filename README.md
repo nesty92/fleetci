@@ -459,6 +459,10 @@ data on it; the same rules go in `[github.cache_disk]`, matching
 rule is `all`, and one from a fork never does. See
 [docs/cache-disk.md](docs/cache-disk.md#github-actions).
 
+On a class without a cache disk, GitLab jobs whose runner caches in a
+bucket keep their `cache:` there file by file, so a save uploads only what
+changed; see [docs/cache-disk.md](docs/cache-disk.md#gitlabs-caches-in-the-bucket).
+
 On a fleet of machines, a class takes `cache_disk = true` in
 `controller.toml`, and jobs go to the worker that holds their cache; see
 [docs/cache-disk.md](docs/cache-disk.md#on-a-fleet-of-machines).

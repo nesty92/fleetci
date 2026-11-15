@@ -389,6 +389,48 @@ from [falcondev-oss/github-actions-cache-server](https://github.com/falcondev-os
 server of its own: the disk is the store during the job, and fleetci's
 machine signs links to the bucket.
 
+## GitLab's caches in the bucket
+
+On a class without `cache_disk`, a GitLab job whose runner keeps its cache
+in a bucket (`[runners.cache]` of type `s3`, `gcs` or `azure`) keeps its
+`cache:` there file by file, not as one archive per key. Each file's
+contents are stored once per project, so a save uploads only the files
+that changed, and a restore fetches only the files the snapshot lists.
+The job's `.gitlab-ci.yml` stays as it is.
+
+How it goes:
+
+- fleetci starts a small service on the job's VM. The runner's cache
+  links point GitLab's helper at it, and the helper's archives are
+  tar.zst (`CACHE_COMPRESSION_FORMAT=tarzstd`) for these jobs.
+- On save, the service reads the archive as it arrives, hashes each file,
+  and uploads the contents the project's store doesn't have yet. Nothing
+  is written to the VM's disk.
+- On restore, it streams the snapshot back as the archive the helper
+  unpacks, reading each file straight from the bucket.
+- The VM never holds the bucket's credentials. fleetci's machine signs
+  each link, and only for the cache keys the runner gave that job: a job
+  that may only read a key can't write it, and no job writes another
+  key's snapshot.
+
+The stores are under each project's caches in the bucket
+(`…/project/<id>/fleetci-files/`). There is one for keys GitLab gives
+protected refs (`-protected`) and one for the rest, as GitLab keeps
+protected caches apart.
+
+To keep GitLab's own archives instead:
+
+```toml
+[gitlab]
+cache_store = "archive"          # the default is "files"
+```
+
+A runner in `config_file` can say so for itself, with
+`FLEETCI_CACHE_STORE=archive` in its `environment`. A job that sets
+`CACHE_COMPRESSION_FORMAT` to a zip format of its own can't save to the
+store; its saves fail as a cache upload fails, and the job goes on.
+Switching the store either way starts each key from cold once.
+
 ## On a fleet of machines
 
 With controllers and workers (`fleetci controller`, `fleetci join`), a
