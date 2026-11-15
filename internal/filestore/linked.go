@@ -9,13 +9,13 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/nesty92/fleetci/internal/cachebucket"
+	"github.com/nesty92/fleetci/internal/cachelink"
 )
 
 // Linked is a Remote over a cache bucket's signed links: what a VM can be
 // given, never the bucket's credentials.
 type Linked struct {
-	B cachebucket.Bucket
+	B cachelink.Bucket
 	C *http.Client
 }
 

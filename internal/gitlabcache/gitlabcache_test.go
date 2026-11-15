@@ -23,6 +23,7 @@ import (
 	"gitlab.com/gitlab-org/gitlab-runner/commands/helpers/archive/tarzstd"
 
 	"github.com/nesty92/fleetci/internal/cachebucket"
+	"github.com/nesty92/fleetci/internal/gitlabcache/vmcache"
 )
 
 // memBucket is a bucket whose links are to its own server, as a real
@@ -97,7 +98,7 @@ func newJob(t *testing.T, b *memBucket, runnerCfg *cacheconfig.Config) *jobVM {
 	j.cfg = cfg
 	j.node = httptest.NewServer(&Signer{B: b, J: grants, Log: hclog.NewNullLogger()})
 	t.Cleanup(j.node.Close)
-	vm.Config.Handler = &VM{Node: j.node.URL, Log: log.New(os.Stderr, "vm ", 0)}
+	vm.Config.Handler = &vmcache.VM{Node: j.node.URL, Log: log.New(os.Stderr, "vm ", 0)}
 	vm.Start()
 	t.Cleanup(vm.Close)
 	j.vm = vm

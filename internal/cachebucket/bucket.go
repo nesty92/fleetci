@@ -19,35 +19,21 @@ import (
 	_ "gitlab.com/gitlab-org/gitlab-runner/cache/gcsv2"
 	_ "gitlab.com/gitlab-org/gitlab-runner/cache/s3"
 	_ "gitlab.com/gitlab-org/gitlab-runner/cache/s3v2"
+
+	"github.com/nesty92/fleetci/internal/cachelink"
 )
 
 // Config is a GitLab runner's [runners.cache]: Type is s3, s3v2, gcs,
 // gcsv2 or azure, with its own table.
 type Config = cacheconfig.Config
 
-// Object is one object of a listing.
-type Object struct {
-	Name     string
-	Size     int64
-	Modified time.Time
-}
-
-// Link is a signed URL and the headers a request to it must send.
-type Link struct {
-	URL     string            `json:"url"`
-	Headers map[string]string `json:"headers,omitempty"`
-}
-
-// Bucket lists objects and signs links to them. Names are relative to
-// the configured Path.
-type Bucket interface {
-	// List is every object whose name starts with prefix.
-	List(ctx context.Context, prefix string) ([]Object, error)
-	// Download is a link to read the object, for ttl.
-	Download(ctx context.Context, name string, ttl time.Duration) (Link, error)
-	// Upload is a link to write the object, for ttl.
-	Upload(ctx context.Context, name string, ttl time.Duration) (Link, error)
-}
+// Object, Link and Bucket are cachelink's: what a VM is given of the
+// bucket.
+type (
+	Object = cachelink.Object
+	Link   = cachelink.Link
+	Bucket = cachelink.Bucket
+)
 
 // Validate says what is missing from cfg.
 func Validate(cfg *Config) error {

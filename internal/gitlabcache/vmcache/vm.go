@@ -1,4 +1,4 @@
-package gitlabcache
+package vmcache
 
 import (
 	"bufio"
@@ -15,7 +15,7 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 
-	"github.com/nesty92/fleetci/internal/cachebucket"
+	"github.com/nesty92/fleetci/internal/cachelink"
 	"github.com/nesty92/fleetci/internal/filestore"
 )
 
@@ -36,7 +36,7 @@ type VM struct {
 
 func (v *VM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	name, ok := strings.CutPrefix(r.URL.Path, "/gitlab/")
-	prefix, key, err := store(name)
+	prefix, key, err := Store(name)
 	if !ok || err != nil {
 		http.Error(w, "want /gitlab/<cache name>", http.StatusNotFound)
 		return
@@ -106,9 +106,9 @@ func (v *VM) logf(format string, args ...any) {
 // nodeBucket is the bucket through the node's signer.
 type nodeBucket struct{ v *VM }
 
-func (b nodeBucket) call(ctx context.Context, op, name string) (signResp, error) {
-	var out signResp
-	body, _ := json.Marshal(signReq{Op: op, Name: name})
+func (b nodeBucket) call(ctx context.Context, op, name string) (SignResp, error) {
+	var out SignResp
+	body, _ := json.Marshal(SignReq{Op: op, Name: name})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, b.v.Node+"/sign", bytes.NewReader(body))
 	if err != nil {
 		return out, err
@@ -129,33 +129,33 @@ func (b nodeBucket) call(ctx context.Context, op, name string) (signResp, error)
 	return out, json.NewDecoder(resp.Body).Decode(&out)
 }
 
-func (b nodeBucket) List(ctx context.Context, prefix string) ([]cachebucket.Object, error) {
+func (b nodeBucket) List(ctx context.Context, prefix string) ([]cachelink.Object, error) {
 	out, err := b.call(ctx, "list", prefix)
-	objs := make([]cachebucket.Object, len(out.Names))
+	objs := make([]cachelink.Object, len(out.Names))
 	for i, n := range out.Names {
 		objs[i].Name = n
 	}
 	return objs, err
 }
 
-func (b nodeBucket) Download(ctx context.Context, name string, _ time.Duration) (cachebucket.Link, error) {
+func (b nodeBucket) Download(ctx context.Context, name string, _ time.Duration) (cachelink.Link, error) {
 	out, err := b.call(ctx, "get", name)
 	if err == nil && out.Link == nil {
 		err = errors.New("the node: no link")
 	}
 	if err != nil {
-		return cachebucket.Link{}, err
+		return cachelink.Link{}, err
 	}
 	return *out.Link, nil
 }
 
-func (b nodeBucket) Upload(ctx context.Context, name string, _ time.Duration) (cachebucket.Link, error) {
+func (b nodeBucket) Upload(ctx context.Context, name string, _ time.Duration) (cachelink.Link, error) {
 	out, err := b.call(ctx, "put", name)
 	if err == nil && out.Link == nil {
 		err = errors.New("the node: no link")
 	}
 	if err != nil {
-		return cachebucket.Link{}, err
+		return cachelink.Link{}, err
 	}
 	return *out.Link, nil
 }
