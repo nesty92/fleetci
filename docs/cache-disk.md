@@ -283,12 +283,13 @@ work that way. It is not a good default.
 
 ## Keeping the checkout
 
-A big repository takes a while to clone on every job: about 12 s for
-kubernetes and 30 s for linux at actions/checkout's depth of 1, and two
-minutes for kubernetes' full history. A project can keep its checkout on
-the cache disk, so the next job cleans what the last one left and fetches
-only what is new: 2 to 6 s for kubernetes, 2 to 10 s for linux, 6 s for
-kubernetes' full history (see [the measurements](measurements.md#checkout)).
+A big repository takes a while to clone on every job: at actions/checkout's
+depth of 1, about 12 s for kubernetes, 30 s for linux and two and a half
+minutes for chromium; with full history, two minutes for kubernetes and
+three for next.js. A project can keep its checkout on the cache disk, so
+the next job cleans what the last one left and fetches only what is new:
+2 to 6 s for kubernetes, 2 to 10 s for linux, 14 to 43 s for chromium, and
+4 to 6 s with full history (see [the measurements](measurements.md#checkout)).
 
 It is off by default, and set per project:
 
