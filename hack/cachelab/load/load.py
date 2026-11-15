@@ -4,6 +4,10 @@ and GitHub measure their runners: each job's time in the queue and the
 time of each of its phases, at percentiles, not one end-to-end number.
 
     load.py <github|gitlab> <disk|plain|nocache> <run> [prs] [every]
+    load.py clean <github|gitlab> <load/<run>/|load/|train/>
+
+A run deletes its branches when it ends (LOAD_KEEP=1 keeps them);
+clean.sh deletes its caches from the lab bucket.
 
 Main first gets a base commit and its pipeline, which fills main's caches.
 Then a pull request arrives every <every> seconds on average (default 150,
@@ -280,9 +284,36 @@ class Load:
             time.sleep(15)
         self.metrics("metrics-end")
         log(f"done; {len(tracked)} pipelines left unrecorded" if tracked else "done")
+        if os.environ.get("LOAD_KEEP") != "1":
+            sh("rm", "-rf", self.dir)
+            clean(self.forge, f"load/{self.run}/")
+
+
+def clean(forge, prefix):
+    """Deletes the playground's branches under prefix (a run's
+    load/<run>/, or every load/ and train/ run's). The records stay;
+    LOAD_KEEP=1 keeps a run's branches and clone. clean.sh deletes the
+    lab bucket's caches."""
+    if not prefix.endswith("/") or prefix.strip("/") in ("", "main"):
+        raise SystemExit(f"clean: {prefix!r}: want a run's folder of branches, as load/<run>/")
+    out = sh("git", *CRED, "ls-remote", "--heads", REMOTE[forge], check=False, tries=3)
+    refs = [l.split()[1] for l in out.splitlines() if l.strip() and l.split()[1].startswith("refs/heads/" + prefix)]
+    d = os.path.join(OUT, "work", "clean")
+    sh("rm", "-rf", d)
+    sh("git", "init", "-q", d)
+    for i in range(0, len(refs), 50):
+        try:
+            sh("git", "-C", d, *CRED, "push", "-q", REMOTE[forge], "--delete", *refs[i:i + 50], tries=3)
+        except RuntimeError as e:
+            log(f"branches under {prefix} not deleted: {e}")
+    sh("rm", "-rf", d)
+    log(f"{forge}: deleted {len(refs)} branches under {prefix}")
 
 
 if __name__ == "__main__":
+    if sys.argv[1] == "clean":  # load.py clean <forge> <prefix/>
+        clean(sys.argv[2], sys.argv[3])
+        raise SystemExit
     forge, mode, run = sys.argv[1:4]
     if mode not in ("disk", "plain", "nocache"):
         raise SystemExit("mode: disk, plain or nocache")
