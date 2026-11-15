@@ -3,6 +3,7 @@ package filestore
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -111,7 +112,7 @@ func (l Linked) Open(ctx context.Context, name string, off, n int64) (io.ReadClo
 	if resp.StatusCode/100 != 2 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		resp.Body.Close()
-		return nil, fmt.Errorf("GET %s: %s %s", req.URL.Path, resp.Status, b)
+		return nil, statusErr(req, resp, b)
 	}
 	if n >= 0 && resp.ContentLength >= 0 && resp.ContentLength != n {
 		resp.Body.Close()
@@ -128,7 +129,7 @@ func (l Linked) do(req *http.Request, body *[]byte) error {
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("%s %s: %s %s", req.Method, req.URL.Path, resp.Status, b)
+		return statusErr(req, resp, b)
 	}
 	if body == nil {
 		_, _ = io.Copy(io.Discard, resp.Body)
@@ -141,5 +142,16 @@ func (l Linked) do(req *http.Request, body *[]byte) error {
 		return err
 	}
 	*body, err = io.ReadAll(resp.Body)
+	return err
+}
+
+// ErrNotFound is an object the bucket doesn't have.
+var ErrNotFound = errors.New("not in the bucket")
+
+func statusErr(req *http.Request, resp *http.Response, body []byte) error {
+	err := fmt.Errorf("%s %s: %s %s", req.Method, req.URL.Path, resp.Status, body)
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("%w: %w", ErrNotFound, err)
+	}
 	return err
 }
