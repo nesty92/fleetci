@@ -55,7 +55,7 @@ STAMP = re.compile(r"^20\d\d-\d\d-\d\dT[\d:.]+Z (\d\d[OE]\+? )?")
 SECTION = re.compile(r"section_(start|end):(\d+):([\w.-]+)")
 KEEP = ("TRAIN ", "Cache disk", "Cache restored", "Cache not found", "Cache saved", "Cache Size",
         "Downloading cache", "Successfully extracted", "No URL provided", "Uploading cache", "Created cache",
-        "Checking cache", "No cache disk", "fleetci cache", "Cache in ", "internal error has occurred in cache")
+        "Checking cache", "No cache disk", "fleetci cache", "internal error has occurred in cache")
 
 
 def sh(*args, check=True, tries=1):

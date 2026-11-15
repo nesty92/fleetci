@@ -620,7 +620,9 @@ with no packing on the CPUs the VMs share.
 
 ### A store of files, not archives
 
-`internal/filestore` keeps each save in the bucket by its files, as
+A prototype, since removed: it didn't make jobs faster (see GitLab's
+caches below), and fleetci keeps caches as the forges' own archives.
+`internal/filestore` kept each save in the bucket by its files, as
 restic's repository does: new files and the listings of changed folders,
 one zstd frame each, packed into objects of about 16 MB, an index object
 per save saying where each frame is, and a small snapshot object naming
@@ -676,7 +678,7 @@ it. One run of each, November 2026.
 
 GitLab jobs on classes without a cache disk, their runner's cache in the
 lab's S3 bucket (on the same host, no added latency): GitLab's archives
-(`cache_store = "archive"`, zipzstd) against the per-file store, one run
+(zipzstd) against the per-file store (removed since), one run
 after the other, the same six pull requests and their merges (12 jobs of
 each kind), November 2026. The Go job caches about 550 MB (module and
 build caches), the web job about 1 GB (`node_modules`, `.next/cache`).
@@ -707,4 +709,7 @@ bucket on the runners' own network (MinIO, RustFS, Garage beside the
 nodes), with archives, was the fastest of the four in every row. These
 VMs' disks used the synchronous backend (Docker's default seccomp
 refuses io_uring; hack/cachelab/up.sh now allows it), the same in every
-row.
+row; on these qcow2 disks io_uring made no measurable difference to fio
+or an untar of 60k files, while on raw disks it wrote 2.3-2.7x faster.
+So fleetci keeps archives on both forges, and the bucket to put first is
+one next to the runners.

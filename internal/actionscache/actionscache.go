@@ -671,7 +671,7 @@ func (s *Server) localURL(r *http.Request, path string) string {
 // --- routes ---
 
 func (s *Server) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
-	if !Allowed(r) {
+	if !allowed(r) {
 		http.Error(rw, "only this VM", http.StatusForbidden)
 		return
 	}
@@ -718,9 +718,9 @@ func (s *Server) route(w *writer, r *http.Request) error {
 	return s.passthrough(w, r, r.Method, s.cfg.Upstream+r.URL.RequestURI())
 }
 
-// Allowed: only this VM, by loopback, and its containers, by Docker's
+// allowed: only this VM, by loopback, and its containers, by Docker's
 // bridges.
-func Allowed(r *http.Request) bool {
+func allowed(r *http.Request) bool {
 	la, _ := r.Context().Value(http.LocalAddrContextKey).(net.Addr)
 	tcp, ok := la.(*net.TCPAddr)
 	if !ok {
