@@ -343,11 +343,17 @@ func (s *Store) Save(ctx context.Context, root, name string, prev *Snapshot) (*S
 		p.abort()
 		return nil, st, err
 	}
-	top, lists, err := s.trees(snap, tp, &pmu, pending)
+	return s.commit(ctx, snap, name, &st, p, tp, &pmu, pending, start)
+}
+
+// commit packs snap's listings, waits for both packers, and writes the
+// index of what this save packed, then the snapshot as name.
+func (s *Store) commit(ctx context.Context, snap *Snapshot, name string, st *Stats, p, tp *packer, pmu *sync.Mutex, pending map[string]bool, start time.Time) (*Snapshot, Stats, error) {
+	top, lists, err := s.trees(snap, tp, pmu, pending)
 	if err != nil {
 		p.abort()
 		tp.abort()
-		return nil, st, err
+		return nil, *st, err
 	}
 	// Both packers' last uploads at once.
 	var wt map[string]where
@@ -360,7 +366,7 @@ func (s *Store) Save(ctx context.Context, root, name string, prev *Snapshot) (*S
 		err = terr
 	}
 	if err != nil {
-		return nil, st, err
+		return nil, *st, err
 	}
 	for h, w := range wt {
 		written[h] = w
@@ -371,8 +377,8 @@ func (s *Store) Save(ctx context.Context, root, name string, prev *Snapshot) (*S
 		b, _ := json.Marshal(indexFile{Files: written})
 		sum := sha256.Sum256(b)
 		n := s.prefix + "index/" + hex.EncodeToString(sum[:])
-		if err := s.put(ctx, n, b, &st); err != nil {
-			return nil, st, err
+		if err := s.put(ctx, n, b, st); err != nil {
+			return nil, *st, err
 		}
 		s.mu.Lock()
 		s.loaded[n] = true
@@ -393,11 +399,11 @@ func (s *Store) Save(ctx context.Context, root, name string, prev *Snapshot) (*S
 		return a.Pack < b.Pack || a.Pack == b.Pack && a.Off < b.Off
 	})
 	b, _ := json.Marshal(o)
-	if err := s.put(ctx, s.prefix+"snaps/"+name, b, &st); err != nil {
-		return nil, st, err
+	if err := s.put(ctx, s.prefix+"snaps/"+name, b, st); err != nil {
+		return nil, *st, err
 	}
 	st.Elapsed = time.Since(start)
-	return snap, st, nil
+	return snap, *st, nil
 }
 
 func (s *Store) put(ctx context.Context, name string, b []byte, st *Stats) error {
