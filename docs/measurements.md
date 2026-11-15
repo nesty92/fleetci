@@ -682,13 +682,29 @@ each kind), November 2026. The Go job caches about 550 MB (module and
 build caches), the web job about 1 GB (`node_modules`, `.next/cache`).
 Medians, in seconds.
 
-| | restore | save | job |
-|---|---|---|---|
-| Go, archive | 3.0 | 3.0 | 31 |
-| Go, files | 5.0 | 3.0 | 35 |
-| web, archive | 7.0 | 7.0 | 80 |
-| web, files | 10.5 | 4.5 | 87 |
+Then again through the same region's latency (Toxiproxy in front of the
+bucket: 50 ms to first byte, 90 MB/s a connection), the same commits.
+Published S3 numbers put a same-region GET's first byte at a p50 near
+26 ms and a p99 near 86 ms (AWS's own guidance says 100-200 ms), and one
+connection at about 90 MB/s; 50 ms sits between them.
 
-With a fast bucket next door, the per-file store saves the web job's
-cache faster, as it uploads only what changed, but restores both more
-slowly, and the jobs end later. It isn't faster here.
+| | bucket | restore | save | job |
+|---|---|---|---|---|
+| Go, archive | next door | 3.0 | 3.0 | 31 |
+| Go, files | next door | 5.0 | 3.0 | 35 |
+| Go, archive | same region | 5.0 | 4.0 | 37 |
+| Go, files | same region | 5.0 | 4.0 | 35 |
+| web, archive | next door | 7.0 | 7.0 | 80 |
+| web, files | next door | 10.5 | 4.5 | 87 |
+| web, archive | same region | 10.0 | 5.5 | 85 |
+| web, files | same region | 11.0 | 5.0 | 88 |
+
+The bucket's distance matters more than how the cache is stored. Moving
+from a bucket next door to one in the same region costs GitLab's archives
+2-3 s per restore and 5-6 s per job; the per-file store barely moves, as
+it fetches in parallel, but it starts slower and only draws level. A
+bucket on the runners' own network (MinIO, RustFS, Garage beside the
+nodes), with archives, was the fastest of the four in every row. These
+VMs' disks used the synchronous backend (Docker's default seccomp
+refuses io_uring; hack/cachelab/up.sh now allows it), the same in every
+row.
