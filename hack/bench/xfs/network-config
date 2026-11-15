@@ -1,0 +1,7 @@
+version: 2
+ethernets:
+  eth0:
+    match: {name: "e*"}
+    addresses: [192.168.249.2/24]
+    routes: [{to: default, via: 192.168.249.1}]
+    nameservers: {addresses: [1.1.1.1, 8.8.8.8]}
