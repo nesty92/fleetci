@@ -3,7 +3,6 @@ package cluster
 import (
 	"cmp"
 	"context"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -77,15 +76,6 @@ type Worker struct {
 	checking bool               // the microVM checks run
 	stop     context.CancelFunc // ends Run
 	exitErr  error              // what Run returns: ErrRestart for an update
-	peers    *neighbourState
-	// peerNet is the network it reaches its peers over; nil for none.
-	peerNet *peerNet
-	// shareKick has the worker look at its neighbours' caches now.
-	shareKick chan struct{}
-	// arriving are the caches it is copying from a neighbour now.
-	arriving map[string]bool
-	// peerPool verifies the other workers, once they are reachable.
-	peerPool *x509.CertPool
 }
 
 // task is an assignment as this worker carries it out.
@@ -154,7 +144,7 @@ func NewWorker(cfg *WorkerConfig, version string, log hclog.Logger) (*Worker, er
 	w := &Worker{cfg: cfg, pki: p, log: log, version: version,
 		checks: map[string]string{}, passed: map[string]bool{}, count: map[string]int{},
 		vms: map[string]*workerVM{}, drainBy: map[string]bool{}, clients: map[string]*client{},
-		tasks: map[string]*task{}, changed: make(chan struct{}, 1), started: time.Now(), peers: newNeighbourState(), shareKick: make(chan struct{}, 1), arriving: map[string]bool{}}
+		tasks: map[string]*task{}, changed: make(chan struct{}, 1), started: time.Now()}
 	f, err := GatherFacts(cfg, version)
 	if err != nil {
 		return nil, err
@@ -229,22 +219,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	w.mu.Lock()
 	w.stop = stop
 	w.mu.Unlock()
-	lis, err := w.listenPeers()
-	if err != nil {
-		w.log.Warn("not reaching other workers, nor copying caches with them", "err", err)
-	}
-	if lis != nil {
-		w.facts.PeerAddrs = peerAddrs(lis.Addr(), w.peerNet)
-		w.log.Info("answering other workers", "network", w.peerNet.String(), "addrs", w.facts.PeerAddrs)
-	}
 	var wg sync.WaitGroup
-	if lis != nil {
-		w.mu.Lock()
-		w.peerPool = pool
-		w.mu.Unlock()
-		wg.Go(func() { w.peerLoop(ctx, lis, pool) })
-		wg.Go(func() { w.shareLoop(ctx, pool) })
-	}
 	wg.Go(func() { w.updateLoop(ctx) })
 	for _, cl := range w.clients {
 		wg.Go(func() { w.watchLoop(ctx, cl) })
@@ -385,9 +360,6 @@ func (w *Worker) build(ctx context.Context, fit Fit) error {
 	b, err := fleet.New(bctx, fclasses, w.cfg.Host, w.log.Named("fleet"))
 	if err != nil {
 		return err
-	}
-	if w.fetching() {
-		b.SetFetch(w.fetchFor)
 	}
 	w.mu.Lock()
 	w.backend = b
@@ -597,7 +569,7 @@ func (w *Worker) report() Report {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	r := Report{Room: w.roomLocked(), UsedCPUs: w.used.CPUs, UsedMemory: w.used.MemoryMB, Checks: map[string]string{},
-		Caches: caches, CacheCommitted: committed, CachesArriving: slices.Sorted(maps.Keys(w.arriving)), CacheStats: stats}
+		Caches: caches, CacheCommitted: committed, CacheStats: stats}
 	for name := range w.classes {
 		if k := w.idleVMs(name); k > 0 {
 			if r.Idle == nil {
@@ -625,7 +597,6 @@ func (w *Worker) report() Report {
 		anyPassed = anyPassed || ok
 	}
 	r.Update = w.updateReportLocked()
-	r.Neighbours = w.peers.list()
 	switch {
 	case w.draining:
 		r.State = Draining
@@ -661,7 +632,6 @@ func (w *Worker) reportLoop(ctx context.Context) {
 				var resp StatusResponse
 				if err := cl.do(rctx, http.MethodPut, workerPath(w.cfg.ID, "/status"), up, &resp); err != nil {
 					w.setDrain(addr, nil) // what it said no longer counts
-					w.peers.set(addr, nil)
 					w.takeUpdateOrders(addr, nil)
 					var se *StatusError
 					if errors.As(err, &se) && se.Code == http.StatusConflict {
@@ -676,7 +646,6 @@ func (w *Worker) reportLoop(ctx context.Context) {
 				}
 				w.configure(ctx, resp.Fit)
 				w.setDrain(addr, &resp.Draining)
-				w.peers.set(addr, &resp.Peers)
 				w.takeUpdateOrders(addr, &resp)
 				w.takeVerify(ctx, resp.Verify)
 				w.reached()

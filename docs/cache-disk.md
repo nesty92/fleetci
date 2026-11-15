@@ -413,69 +413,25 @@ min_free = "20GB"
 max_per_cache = "30GB"
 ```
 
-The workers report which caches they hold, when each was last written,
-and which they are copying from a neighbour. The leader boots a job's VM
+The workers report which caches they hold, and when each was last
+written. The leader boots a job's VM
 on the worker that has the best one: the job's own disk, then the same
 job's on the default branch, which it falls back on; of two workers with
 it, the one whose copy is newer. If that worker is full, the job goes to
 one with the default branch's, rather than wait. Only when no worker with
 room has any of its caches does it wait, up to `cache_wait`, for room on
-one that has or for a copy arriving at one with room, then goes to any
-worker and starts empty. A GitHub job
+one that has, then goes to any worker and starts empty. A GitHub job
 is placed by what its queued job says; GitHub may give the runner another
 job, which then starts from what that worker has.
 
 The writers' rules are the controllers', as on one machine. Each job
-writes its own worker's copy of a cache.
-
-**A job's cache from another worker** (`fetch_caches = true`, off by
-default): a job that lands on a worker with none of the caches it could
-start from (a merge request's first job there, say, without main's) has
-its worker fetch the first of them another worker has, the newest copy,
-before its VM starts, and waits for it up to a minute. Only that cache
-moves, when a job needs it, and it may evict others to fit. The other
-workers must have `fetch_caches` on too, to answer. It is checked and
-compressed as the copies below are.
-
-**Copies between workers are off by default** (`share_caches = true` turns
-them on). In the lab, four workers refreshing each other's copies after
-every merge moved 119 GB in an hour and a quarter of the jobs still
-started empty; they will be reworked. Turned on, the workers copy each
-other's newer copies of the shared caches, those writers make: never a
-merge request's or another ref's own cache.
-
-- **Every 30 s** each worker asks the others it reaches (see
-  [Neighbours](design/ha.md#neighbours-which-workers-reach-each-other))
-  for their shared caches. It copies a newer copy of one it has, and one
-  it lacks while its budget has room to spare: a copied cache never
-  evicts one of its own.
-- **Only the new layers move.** Layers never change once kept, so a
-  newer copy costs the layers its jobs added since; a chain flattened
-  on its worker comes over whole once.
-- **Each layer is checked:** it comes over the workers' mutual TLS with
-  its SHA-256 after it, and is kept only when they agree, and only once
-  the whole chain has come. A job that starts meanwhile uses the copy
-  its worker had.
-- **Compressed:** a layer comes S2-compressed, at about half its size,
-  with two cores of the sending worker.
-- Two workers that run jobs of one cache at once each keep their own
-  result, and the newer wins on both, as one machine's last job does.
-
-```toml
-# worker.toml
-fetch_caches = true      # fetch a job's cache from another worker when it has none here (default off)
-share_caches = true      # copy shared caches to and from the others (default off)
-share_compress = false   # copy them uncompressed: on links faster than 10 Gbit
-peer_network = "eth1"    # or "192.168.10.0/24": copy over this network
-```
-
-Copies go over one network, by default the default route's, never one
-that looks like a VPN (see
-[Neighbours](design/ha.md#neighbours-which-workers-reach-each-other)).
-
-A worker that runs any branch's jobs as writers (see the controllers'
-`writers`) shares what they write too: one more reason to keep writers to
-protected branches.
+writes its own worker's copy of a cache, and caches never move between
+workers: a worker has only what its own jobs made, and a job with none
+of its caches there reads the bucket, as a VM without a disk does. (Copies
+between workers were tried and taken out: in the lab, four workers
+refreshing each other's copies after every merge moved 119 GB in an hour,
+and a quarter of the jobs still started empty; see
+[measurements](measurements.md).)
 
 ## For coding agents
 

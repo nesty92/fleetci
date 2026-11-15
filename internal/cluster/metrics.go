@@ -143,13 +143,12 @@ var (
 	descCacheLow      = prometheus.NewDesc("fleetci_fleet_worker_cache_low_space", "1 when a worker's cache disks' filesystem is under min_free: its jobs get no cache disk.", []string{"worker"}, nil)
 	descCacheEvicted  = prometheus.NewDesc("fleetci_fleet_worker_cache_evictions_total", "Caches a worker dropped, over budget or too old, since it started.", []string{"worker"}, nil)
 	descCacheFlattens = prometheus.NewDesc("fleetci_fleet_worker_cache_flattens_total", "Cache chains a worker flattened since it started.", []string{"worker"}, nil)
-	descCacheCopied   = prometheus.NewDesc("fleetci_fleet_worker_cache_copied_bytes_total", "Bytes of cache a worker copied from its neighbours since it started.", []string{"worker"}, nil)
 )
 
 func (fleetCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, d := range []*prometheus.Desc{descController, descLeader, descLive, descWorker, descState,
 		descBudgetCPU, descBudgetMem, descUsedCPU, descUsedMem, descRoom, descVMs,
-		descCacheUsed, descCacheBudget, descCacheLow, descCacheEvicted, descCacheFlattens, descCacheCopied} {
+		descCacheUsed, descCacheBudget, descCacheLow, descCacheEvicted, descCacheFlattens} {
 		ch <- d
 	}
 }
@@ -213,7 +212,6 @@ func (f fleetCollector) Collect(ch chan<- prometheus.Metric) {
 			}
 			counter(descCacheEvicted, cs.Evicted)
 			counter(descCacheFlattens, cs.Flattens)
-			counter(descCacheCopied, cs.Copied)
 		}
 	}
 }

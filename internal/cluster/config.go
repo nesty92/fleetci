@@ -190,29 +190,6 @@ type WorkerConfig struct {
 	FleetingdPlugin string `toml:"fleetingd_plugin"`
 	// Update is how the worker updates itself; off by default.
 	Update UpdateConfig `toml:"update,omitempty"`
-	// PeerListen is where this worker answers other workers, which check
-	// which of them reach each other. Default ":9483"; "off" for none.
-	PeerListen string `toml:"peer_listen,omitempty"`
-	// PeerNetwork is the network it reaches other workers over, and copies
-	// caches over: a CIDR ("192.168.10.0/24") or an interface ("eth1").
-	// Default the network of the interface the default route leaves by,
-	// unless that looks like a VPN.
-	PeerNetwork string `toml:"peer_network,omitempty"`
-	// ShareCaches copies the shared caches, those writers make, to and from
-	// the other workers it reaches. Default false: in the lab the copies
-	// moved 119 GB an hour between four workers and still left a quarter
-	// of the jobs starting empty, so they stay off until reworked.
-	ShareCaches *bool `toml:"share_caches,omitempty"`
-	// FetchCaches copies a shared cache from the nearest worker that has
-	// it when a job starts here with none of its caches (a pull request's
-	// first job on this worker gets its target branch's), waiting for it
-	// up to a minute. Only that one, as the job needs it. Default false.
-	// The other workers must have it on too, to answer.
-	FetchCaches *bool `toml:"fetch_caches,omitempty"`
-	// ShareCompress asks for the layers it copies compressed (S2), which
-	// takes about half the network and two cores on the sending worker
-	// while one comes. Default true.
-	ShareCompress *bool `toml:"share_compress,omitempty"`
 	// CacheDisk sizes this worker's cache disks, for the classes with
 	// cache_disk; they are kept under StateDir/cache.
 	CacheDisk *fleet.CacheDisk `toml:"cache_disk,omitempty"`

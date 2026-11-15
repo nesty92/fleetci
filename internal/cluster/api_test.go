@@ -333,7 +333,7 @@ func TestJobHistory(t *testing.T) {
 func TestMetrics(t *testing.T) {
 	f := newTestFleet(t)
 	f.report(t, Report{State: Ready, Room: map[string]int{"small": 3}, VMs: []VMInfo{{ID: "v", Class: "small", Job: "github"}},
-		CacheStats: &cachedisk.Stats{Used: 5 << 30, Budget: 100 << 30, LowSpace: true, Evicted: 2, Flattens: 1, Copied: 677 << 20}})
+		CacheStats: &cachedisk.Stats{Used: 5 << 30, Budget: 100 << 30, LowSpace: true, Evicted: 2, Flattens: 1}})
 	f.c.metrics.jobDone(JobRecord{Forge: "gitlab", Class: "small", Result: PhaseSucceeded, CacheFrom: "fallback"})
 	// GitHub's API, through the transport the dispatcher is given.
 	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -370,7 +370,6 @@ func TestMetrics(t *testing.T) {
 		`fleetci_fleet_worker_cache_low_space{worker="w1"} 1`,
 		`fleetci_fleet_worker_cache_evictions_total{worker="w1"} 2`,
 		`fleetci_fleet_worker_cache_flattens_total{worker="w1"} 1`,
-		`fleetci_fleet_worker_cache_copied_bytes_total{worker="w1"} 7.09885952e+08`,
 	} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("no %s", want)

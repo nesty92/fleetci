@@ -72,9 +72,3 @@ func copyFile(src, dst string) error {
 	}
 	return out.Close()
 }
-
-// Rebase points the layer at path to parent without touching its data
-// (-u): the parent is the same layer, at this node's path.
-func (q QemuImg) Rebase(path, parent string) error {
-	return q.run(time.Minute, "rebase", "-q", "-u", "-f", "qcow2", "-F", "qcow2", "-b", parent, path)
-}

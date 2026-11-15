@@ -139,11 +139,10 @@ func (f fleetCapacity) Create(ctx context.Context, class string) (source.VM, err
 		for i, cl := range try {
 			ws, better := c.byCache(c.candidates(cl), cl, dirs)
 			if i == 0 && better && time.Now().Before(waitTill) {
-				// The worker with the job's cache is full, or the cache is
-				// still being copied to one with room: wait a while, rather
-				// than start the job cold.
+				// The worker with the job's cache is full: wait a while,
+				// rather than start the job cold.
 				if !waiting {
-					c.log.Info("waiting for the job's cache: its worker is full, or a copy is arriving", "class", cl, "for", time.Until(waitTill).Round(time.Second).String())
+					c.log.Info("waiting for the job's cache: its worker is full", "class", cl, "for", time.Until(waitTill).Round(time.Second).String())
 					waiting = true
 				}
 				break
@@ -181,8 +180,8 @@ func (f fleetCapacity) Create(ctx context.Context, class string) (source.VM, err
 // byCache puts first the workers that have the best of the caches a job
 // starts from (dirs, the best first), and of those the newest copy,
 // keeping the order otherwise. better says none of ws has any of them,
-// but a worker without room has one, or one of ws is copying one from a
-// neighbour: the job waits a while (cache_wait) for either. A worker with
+// but a worker without room has one: the job waits a while (cache_wait)
+// for room there. A worker with
 // the cache the job falls back on (main's) is good enough, and the job
 // doesn't wait for the one with its own.
 func (c *Controller) byCache(ws []*workerConn, class string, dirs []string) (_ []*workerConn, better bool) {
@@ -211,16 +210,11 @@ func (c *Controller) byCache(ws []*workerConn, class string, dirs []string) (_ [
 		committed time.Time
 	}
 	keys := map[*workerConn]key{}
-	here, arriving := len(dirs), false
+	here := len(dirs)
 	for _, w := range ws {
 		r, t := rank(w)
 		keys[w] = key{r, t}
 		here = min(here, r)
-		for _, d := range dirs {
-			if slices.Contains(w.report.CachesArriving, d) {
-				arriving = true
-			}
-		}
 	}
 	slices.SortStableFunc(ws, func(a, b *workerConn) int {
 		if d := keys[a].rank - keys[b].rank; d != 0 {
@@ -228,7 +222,7 @@ func (c *Controller) byCache(ws []*workerConn, class string, dirs []string) (_ [
 		}
 		return keys[b].committed.Compare(keys[a].committed) // the newer first
 	})
-	return ws, here == len(dirs) && (best < len(dirs) || arriving)
+	return ws, here == len(dirs) && best < len(dirs)
 }
 
 // bootWait is how long a worker may take to boot an assignment's VM.

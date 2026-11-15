@@ -27,8 +27,6 @@ type Facts struct {
 	Protocol int `json:"protocol"`
 	// Hosts are a joining controller's addresses, for its certificate.
 	Hosts []string `json:"hosts,omitempty"`
-	// PeerAddrs are where it answers other workers.
-	PeerAddrs []string `json:"peer_addrs,omitempty"`
 }
 
 // Class is a class a worker runs: its name and spec.
@@ -76,18 +74,11 @@ type Report struct {
 	// Caches are the cache disks it keeps (cachedisk.Scope.Dirs' names),
 	// sorted: the controllers place a job where its cache is.
 	Caches []string `json:"caches,omitempty"`
-	// CacheCommitted is when each of Caches' newest layer was kept, on
-	// whichever node: of two workers with a job's cache, the job goes to
-	// the newer copy.
+	// CacheCommitted is when each of Caches' newest layer was kept: of two
+	// workers with a job's cache, the job goes to the newer one.
 	CacheCommitted map[string]time.Time `json:"cache_committed,omitempty"`
-	// CachesArriving are caches it is copying from a neighbour now: a job
-	// whose cache only they have waits a while for the copy.
-	CachesArriving []string `json:"caches_arriving,omitempty"`
 	// CacheStats are its cache disks' stores', for metrics.
 	CacheStats *cachedisk.Stats `json:"cache_stats,omitempty"`
-	// Neighbours are the workers it reaches, of those the controllers
-	// name to it.
-	Neighbours []Neighbour `json:"neighbours,omitempty"`
 }
 
 // VMInfo is one of a worker's VMs.
@@ -130,8 +121,6 @@ type StatusResponse struct {
 	// Verify, when later than the worker's last request, asks it to run
 	// its microVM checks again: fleetci fleet verify.
 	Verify time.Time `json:"verify,omitzero"`
-	// Peers are the other workers, for it to find which it reaches.
-	Peers []PeerHint `json:"peers,omitempty"`
 }
 
 // The update policies: how far a worker may update itself, set on the

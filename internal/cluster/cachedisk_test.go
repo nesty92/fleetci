@@ -192,21 +192,11 @@ func TestPlaceByFreshness(t *testing.T) {
 	if ws, _ := c.byCache(c.candidates("small"), "small", dirs); ids(ws)[0] != "w1" {
 		t.Fatalf("own cache first: %v", ids(ws))
 	}
-	// Neither has any, one is copying main's in: wait.
+	// Neither has any: no wait.
 	for _, w := range c.workers {
 		w.report.Caches, w.report.CacheCommitted = nil, nil
 	}
 	if _, better := c.byCache(c.candidates("small"), "small", dirs); better {
 		t.Fatal("waits with no cache anywhere")
-	}
-	c.workers["w1"].report.CachesArriving = []string{"main"}
-	if _, better := c.byCache(c.candidates("small"), "small", dirs); !better {
-		t.Fatal("doesn't wait for main's cache arriving")
-	}
-	// Arrived: placed there, no wait.
-	c.workers["w1"].report.CachesArriving = nil
-	c.workers["w1"].report.Caches = []string{"main"}
-	if ws, better := c.byCache(c.candidates("small"), "small", dirs); ids(ws)[0] != "w1" || better {
-		t.Fatalf("after the copy: %v, better %v", ids(ws), better)
 	}
 }

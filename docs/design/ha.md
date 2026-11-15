@@ -154,8 +154,7 @@ single machine is both, as `fleetci serve` is today:
 The fleet's API is HTTPS and JSON, as Kubernetes's is between the kubelet
 and the API server: versioned paths under `/v1`, HTTP/2, mutual TLS, one
 TCP port (9481). Workers dial every controller; no controller dials a
-worker, so workers can be behind any NAT. (Workers on one network also
-check which of them reach each other: see Neighbours, below.) Controllers dial each other on the same
+worker, so workers can be behind any NAT. Controllers dial each other on the same
 port. It works through HTTP proxies, and `curl --cert` can read it.
 
 It is declarative. The leader never calls a worker; it writes
@@ -216,47 +215,6 @@ certificate against the fleet's CA, never the system's.
   controllers trust both and sign with the new one, workers pick up the
   new chain on renewal, and the old CA is dropped once no live
   certificate uses it.
-
-#### Neighbours: which workers reach each other
-
-With `share_caches = true` (off by default), workers on one network copy shared caches to each other, directly,
-without anything passing through a controller or another network (see
-[docs/cache-disk.md](../cache-disk.md#on-a-fleet-of-machines)). For that,
-each worker first finds which of the others it reaches:
-
-- **One network.** Workers reach each other, and copy caches, over one
-  network only: by default the one of the interface the default route
-  leaves by. If that interface looks like a VPN (point to point, without
-  a hardware address, or named as tunnels are: `tun`, `tap`, `wg`,
-  `tailscale`, `zt`, `ppp`, …), the worker reaches no peers, and says so,
-  until `peer_network` in `worker.toml` names the network: a CIDR or an
-  interface, which is then used as it is.
-- **Each worker answers its peers** on its own port, `peer_listen`
-  (`:9483` by default; `"off"` for none), at its addresses in that
-  network, which it tells the controllers in its report. It takes
-  connections only from that network, and dials only peers' addresses
-  in it, so nothing goes through a router, a VPN or a container's bridge.
-- **The controllers name the peers.** Each status answer lists the other
-  workers that report, answer peers and aren't revoked: their ids, their
-  certificates' serials and their addresses.
-- **Each worker checks them** with mutual TLS, the fleet's certificates
-  on both sides. It believes a peer only if it shows a worker
-  certificate from the fleet's CA, with the id and the serial the
-  controllers named, so a revoked or an old certificate doesn't pass.
-  Each worker answers only the peers the controllers named to it.
-- **It times them:** the best of three requests on an open connection,
-  per address. It checks again when the controllers name others, and
-  every 30 s. What it reaches, and how fast, is in its report, and
-  `fleetci fleet status` shows it:
-
-```
-WORKER  VERSION  STATE  …  NEIGHBOURS  NOTE
-w1      v0.8.0   Ready  …  w2 40µs
-w2      v0.8.0   Ready  …  w1 40µs
-```
-
-A worker that reaches none of the others works as before, with only the
-caches its own jobs made.
 
 #### GitHub
 
@@ -383,7 +341,7 @@ as `docs/grafana/fleetci-fleet.json` does.
 | `fleetci_fleet_queue_wait_seconds{forge,class}` | from the forge queuing a job to its VM being up: GitLab's time in its queue, then the wait for a VM |
 | `fleetci_fleet_job_cache_total{forge,class,from}` | jobs of classes with cache disks, by what the disk started from: `own`, `fallback` (main's), `empty`, `none` (no disk) |
 | `fleetci_fleet_worker_cache_used_bytes{worker}`, `…_cache_budget_bytes`, `…_cache_low_space` | each worker's cache disks: what they take, may take, and 1 when its disk is under `min_free` |
-| `fleetci_fleet_worker_cache_evictions_total{worker}`, `…_cache_flattens_total`, `…_cache_copied_bytes_total` | caches it dropped, chains it flattened, and bytes it copied from neighbours, since it started |
+| `fleetci_fleet_worker_cache_evictions_total{worker}`, `…_cache_flattens_total` | caches it dropped and chains it flattened, since it started |
 | `fleetci_github_api_requests_total{code}`, `fleetci_github_api_request_seconds` | the calls to GitHub's API, `code` 0 for no answer |
 | `fleetci_github_api_ratelimit_remaining{resource}` | what GitHub's rate limit had left at its last answer |
 

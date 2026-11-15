@@ -95,7 +95,7 @@ def run(name):
         return
     for key in sorted(b):
         if key.startswith(("fleetci_fleet_worker_cache_evictions_total", "fleetci_fleet_worker_cache_flattens_total",
-                           "fleetci_fleet_worker_cache_copied_bytes_total", "fleetci_fleet_job_cache_total")):
+                           "fleetci_fleet_job_cache_total")):
             d = b[key] - a.get(key, 0)
             if d:
                 print(f"     {key} +{d:.0f}")

@@ -190,9 +190,6 @@ type Images interface {
 	// the chain, what differs from it; with base "", all of it, in a file
 	// of its own.
 	Flatten(src, base, dst string) error
-	// Rebase points the layer at path to parent, its data unchanged: for
-	// a layer copied from another node, whose parent is elsewhere here.
-	Rebase(path, parent string) error
 }
 
 // head is a scope's newest layer, in its head.json.
@@ -222,15 +219,9 @@ type Store struct {
 	leases map[*Lease]struct{}
 	// flattening: scopes whose chain is being flattened.
 	flattening map[string]bool
-	// pulling: layers being copied from another node, as .part files.
-	pulling map[string]bool
-	// declined: shared caches this store evicted or would not take, and
-	// the commit it had or was offered; a neighbour's copy comes again
-	// only when newer, so evicting and copying back don't take turns.
-	declined map[string]time.Time
-	wg       sync.WaitGroup
+	wg         sync.WaitGroup
 	// counts since it opened, for Stats
-	evicted, flattened, copied int64
+	evicted, flattened int64
 }
 
 // Stats are what a store holds and has done since it opened, for metrics.
@@ -240,13 +231,12 @@ type Stats struct {
 	LowSpace bool  `json:"low_space"` // under MinFree: it adds nothing
 	Evicted  int64 `json:"evicted"`   // caches it dropped
 	Flattens int64 `json:"flattens"`  // chains it flattened
-	Copied   int64 `json:"copied"`    // bytes it copied from neighbours
 }
 
 // Add is s and o together, for a node's stores.
 func (s Stats) Add(o Stats) Stats {
 	return Stats{Used: s.Used + o.Used, Budget: s.Budget + o.Budget, LowSpace: s.LowSpace || o.LowSpace,
-		Evicted: s.Evicted + o.Evicted, Flattens: s.Flattens + o.Flattens, Copied: s.Copied + o.Copied}
+		Evicted: s.Evicted + o.Evicted, Flattens: s.Flattens + o.Flattens}
 }
 
 // Stats says what the store holds and has done.
@@ -254,7 +244,7 @@ func (s *Store) Stats() Stats {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return Stats{Used: s.used(), Budget: s.cfg.Budget, LowSpace: !s.leavesFree(0),
-		Evicted: s.evicted, Flattens: s.flattened, Copied: s.copied}
+		Evicted: s.evicted, Flattens: s.flattened}
 }
 
 // Open opens the store in dir, making it if needed.
@@ -266,8 +256,7 @@ func Open(dir string, cfg Config, img Images, log hclog.Logger) (*Store, error) 
 		return nil, err
 	}
 	s := &Store{dir: dir, cfg: cfg.withDefaults(), img: img, log: log, now: time.Now,
-		leases: map[*Lease]struct{}{}, flattening: map[string]bool{}, pulling: map[string]bool{},
-		declined: map[string]time.Time{}}
+		leases: map[*Lease]struct{}{}, flattening: map[string]bool{}}
 	// Layers a stopped fleetci left half-made, and chains it left deep.
 	s.mu.Lock()
 	s.sweep()
@@ -423,8 +412,7 @@ func (s *Store) Abort(l *Lease) {
 
 // keepShallow flattens the scope's chain in the background once it is
 // deeper than MaxDepth, well before a VM can't take it: whichever way the
-// chain got deep (a commit, a neighbour's copy, a restart that stopped a
-// flattening). s.mu is held.
+// chain got deep (a commit, a restart that stopped a flattening). s.mu is held.
 func (s *Store) keepShallow(key string, h *head) {
 	if len(h.Chain) > s.cfg.MaxDepth {
 		s.flattenLater(key, h.Chain)
@@ -555,7 +543,7 @@ func (s *Store) sweep() {
 		for _, e := range entries {
 			p := filepath.Join(dir, e.Name())
 			if strings.HasSuffix(e.Name(), ".qcow2") && !keep[p] ||
-				strings.HasSuffix(e.Name(), ".part") && !s.pulling[p] {
+				strings.HasSuffix(e.Name(), ".part") {
 				_ = os.Remove(p)
 				continue
 			}
@@ -574,11 +562,10 @@ func (s *Store) evict() { s.evictFor(0) }
 // evictFor is evict with room left for need more bytes.
 func (s *Store) evictFor(need int64) {
 	type scope struct {
-		key       string
-		used      time.Time
-		committed time.Time
-		shared    bool
-		maxAge    time.Duration
+		key    string
+		used   time.Time
+		shared bool
+		maxAge time.Duration
 	}
 	var heads []scope
 	for _, key := range s.keys() {
@@ -586,7 +573,7 @@ func (s *Store) evictFor(need int64) {
 		if err != nil {
 			continue
 		}
-		heads = append(heads, scope{key, h.Used, h.Committed, h.Scope.Writer, s.maxAge(h)})
+		heads = append(heads, scope{key, h.Used, h.Scope.Writer, s.maxAge(h)})
 	}
 	// A ref's own cache goes before any shared one: it is read by its ref
 	// alone, and it is a layer on the shared cache it started from, so
@@ -617,9 +604,6 @@ func (s *Store) evictFor(need int64) {
 		s.log.Info("cache: evicting", "scope", h.key, "unused for", s.now().Sub(h.used).Round(time.Minute).String())
 		_ = os.Remove(filepath.Join(s.dir, "scopes", h.key, "head.json"))
 		s.evicted++
-		if h.shared {
-			s.declined[h.key] = h.committed
-		}
 		s.sweep()
 	}
 }
