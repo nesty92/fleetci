@@ -257,7 +257,7 @@ config, not the job, says otherwise:
 [gitlab.cache_disk]
 writers = ["protected"]          # the default; [] makes no job a writer
 
-# The first entry that matches the project applies.
+# The first entry that matches the project applies; each sets writers.
 [[gitlab.cache_disk.projects]]
 match = "group/trunk-app"        # no protected branches; main deploys
 writers = ["default"]
@@ -272,6 +272,9 @@ Merge request pipelines are never writers, except under `all`, or under
 GitLab says of the job: its ref, whether that is a tag, whether it is
 protected, and whether it is a merge request's. Variables the job sets don't
 count, so a job can't make itself a writer by setting `CI_DEFAULT_BRANCH`.
+
+A tag counts as protected where its forge protects it: GitLab's protected
+tags, GitHub's tag rulesets.
 
 **Don't use `all`** unless everyone who can push a branch is trusted with
 what the default branch and the tags ship. It is there because some teams
@@ -296,6 +299,10 @@ Cache disk "feature/login · build" (this ref's own): starting from "main · bui
 ```
 
 If fleetci doesn't answer within a minute, the job runs without a disk.
+
+A job that is still running when fleetci restarts keeps its disk to the
+end, but that run's layer isn't kept: the next job starts from the one
+before.
 
 Who writes is decided as on GitLab, from what the job's runner says of it:
 its branch, whether that branch is protected, and whether the run is a pull

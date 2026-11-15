@@ -3,6 +3,8 @@ package cachedisk
 import (
 	"slices"
 	"testing"
+
+	"github.com/BurntSushi/toml"
 )
 
 func TestPolicyScope(t *testing.T) {
@@ -22,5 +24,24 @@ func TestPolicyScope(t *testing.T) {
 	var none *Policy
 	if none.Scope(Request{Job: Job{Ref: "main"}}).Writer || !none.Scope(Request{Job: Job{Ref: "main", Protected: true}}).Writer {
 		t.Fatal("default writers")
+	}
+}
+
+// A project's writers = [] is no writers, which Validate takes; left out,
+// it is an error, not the same.
+func TestProjectWritersFromTOML(t *testing.T) {
+	var p Policy
+	if _, err := toml.Decode("[[projects]]\nmatch = \"g/*\"\nwriters = []\n", &p); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Validate(); err != nil || p.Rules("g/a") == nil || len(p.Rules("g/a")) != 0 {
+		t.Fatalf("writers = []: %v, %#v", err, p.Rules("g/a"))
+	}
+	p = Policy{}
+	if _, err := toml.Decode("[[projects]]\nmatch = \"g/*\"\n", &p); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Validate(); err == nil {
+		t.Fatal("a project without writers passed")
 	}
 }

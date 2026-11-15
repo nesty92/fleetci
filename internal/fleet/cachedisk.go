@@ -79,17 +79,28 @@ func (d CacheDisk) config() cachedisk.Config {
 		MaxPerCache: int64(d.MaxPerCache) * mb, MaxAge: time.Duration(d.MaxAge), ReaderMaxAge: time.Duration(d.ReaderMaxAge)}
 }
 
-// openCache opens the class's store. Classes on one directory share it.
-func openCache(stores map[string]*cachedisk.Store, c Class, log hclog.Logger) (*cachedisk.Store, error) {
+// openStore is a store openCache opened, and the class it opened it for.
+type openStore struct {
+	store *cachedisk.Store
+	class string
+	disk  CacheDisk
+}
+
+// openCache opens the class's store. Classes on one directory share it,
+// and so must have the same cache_disk.
+func openCache(stores map[string]openStore, name string, c Class, log hclog.Logger) (*cachedisk.Store, error) {
 	dir := filepath.Clean(c.cacheDirectory())
-	if s, ok := stores[dir]; ok {
-		return s, nil
+	if o, ok := stores[dir]; ok {
+		if o.disk != *c.CacheDisk {
+			return nil, fmt.Errorf("its vm_cache_directory is class %q's too, with another cache_disk: give the two the same, or each a directory", o.class)
+		}
+		return o.store, nil
 	}
 	s, err := cachedisk.Open(dir, c.CacheDisk.config(), cachedisk.QemuImg{Path: c.CacheDisk.QemuImg}, log.Named("cache"))
 	if err != nil {
 		return nil, err
 	}
-	stores[dir] = s
+	stores[dir] = openStore{s, name, *c.CacheDisk}
 	return s, nil
 }
 
@@ -111,13 +122,25 @@ func (b *Backend) AttachCache(ctx context.Context, vm VM, scope cachedisk.Scope)
 	b.mu.Lock()
 	p, ok := b.vms[id]
 	_, has := b.caches[id]
+	busy := b.attaching[id]
+	if ok && p.cache != nil && !has && !busy {
+		if b.attaching == nil {
+			b.attaching = map[string]bool{}
+		}
+		b.attaching[id] = true
+	}
 	b.mu.Unlock()
 	if !ok {
 		return nil, fmt.Errorf("no vm %q", id)
 	}
-	if p.cache == nil || has {
+	if p.cache == nil || has || busy {
 		return nil, nil
 	}
+	defer func() {
+		b.mu.Lock()
+		delete(b.attaching, id)
+		b.mu.Unlock()
+	}()
 	lease, err := p.cache.Begin(scope)
 	if err != nil {
 		return nil, err
@@ -135,6 +158,13 @@ func (b *Backend) AttachCache(ctx context.Context, vm VM, scope cachedisk.Scope)
 		return nil, fmt.Errorf("mounting the cache: %w: %s", err, out)
 	}
 	b.mu.Lock()
+	if _, still := b.vms[id]; !still {
+		// Deleted meanwhile: Delete found no disk to take back.
+		b.mu.Unlock()
+		_ = pluginDisk(context.WithoutCancel(ctx), p.class, "detach", inst)
+		p.cache.Abort(lease)
+		return nil, fmt.Errorf("vm %q went while its cache disk was attached", id)
+	}
 	if b.caches == nil {
 		b.caches = map[string]*cacheVM{}
 	}

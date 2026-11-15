@@ -175,7 +175,8 @@ func TestCacheFactsAsksOnlyWhatTheRulesNeed(t *testing.T) {
 	if f, err := facts(refHint{known: true, protected: true}); err != nil || !f.protected || branches != 0 {
 		t.Fatalf("protected, from the runner: %+v %v, %d branch calls", f, err, branches)
 	}
-	if f, err := facts(refHint{known: true, tag: true, protected: true}); err != nil || f.protected || !f.tag {
+	// A tag a ruleset protects is protected, as on GitLab.
+	if f, err := facts(refHint{known: true, tag: true, protected: true}); err != nil || !f.protected || !f.tag {
 		t.Fatalf("tag, from the runner: %+v %v", f, err)
 	}
 	// It didn't (an older hook): GitHub is asked, and refuses.

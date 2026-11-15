@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/hashicorp/go-hclog"
 )
 
 func TestCacheDiskValidate(t *testing.T) {
@@ -144,5 +146,25 @@ func TestUnmountDatesTheJobsCacheZips(t *testing.T) {
 	}
 	if fi, _ := os.Stat(old); !fi.ModTime().Equal(past) {
 		t.Errorf("a cache.zip the job didn't touch was dated %v", fi.ModTime())
+	}
+}
+
+// Two classes on one vm_cache_directory share its store only with the
+// same cache_disk: one store can't keep two budgets.
+func TestOpenCacheSharedDirectory(t *testing.T) {
+	dir := t.TempDir()
+	class := func(budget Size) Class {
+		return Class{PluginConfig: RawConfig(`{"vm_cache_directory": "` + dir + `"}`), CacheDisk: &CacheDisk{Budget: budget}}
+	}
+	stores := map[string]openStore{}
+	a, err := openCache(stores, "a", class(1024), hclog.NewNullLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, err := openCache(stores, "b", class(1024), hclog.NewNullLogger()); err != nil || b != a {
+		t.Fatalf("same settings: %v, shared %v", err, b == a)
+	}
+	if _, err := openCache(stores, "c", class(2048), hclog.NewNullLogger()); err == nil || !strings.Contains(err.Error(), `class "a"`) {
+		t.Fatalf("another budget: %v", err)
 	}
 }

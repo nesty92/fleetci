@@ -289,9 +289,15 @@ func (e *executor) Prepare(options common.ExecutorPrepareOptions) (err error) {
 // one, and returns the Docker volumes that keep the job's paths on it.
 // Without it the job runs all the same, from cold.
 func (e *executor) attachCache(options common.ExecutorPrepareOptions, vm source.VM) []string {
-	if a := e.p.attached; a != nil && a.scope == nil {
-		if a.note != "" {
+	if a := e.p.attached; a != nil {
+		// On a fleet's worker: the leader chose the disk, the worker
+		// attached it.
+		switch {
+		case a.scope == nil && a.note != "":
 			options.BuildLogger.Warningln(a.note)
+		case a.scope != nil && a.note != "":
+			options.BuildLogger.Println(a.note)
+			return cacheDirVolume(options.Config)
 		}
 		return nil
 	}
@@ -303,10 +309,8 @@ func (e *executor) attachCache(options common.ExecutorPrepareOptions, vm source.
 	if job == nil {
 		return nil
 	}
-	var msg string
-	if a := e.p.attached; a != nil {
-		msg = a.note // the leader's scope, which the worker attached
-	} else if msg, err = source.AttachCache(options.Context, e.p.vms, vm.ID, job.scope); err != nil {
+	msg, err := source.AttachCache(options.Context, e.p.vms, vm.ID, job.scope)
+	if err != nil {
 		options.BuildLogger.Warningln("No cache disk: " + err.Error())
 		return nil
 	}

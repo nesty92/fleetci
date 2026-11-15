@@ -167,6 +167,8 @@ type Backend struct {
 	adopted  map[string]string
 	// caches are the VMs with a cache disk.
 	caches map[string]*cacheVM
+	// attaching are the VMs whose cache disk AttachCache is attaching.
+	attaching map[string]bool
 
 	stateDir string
 	// ctx ends when the backend stops, and with it adopted jobs' follows.
@@ -224,8 +226,8 @@ func New(ctx context.Context, classes map[string]Class, host *HostConfig, log hc
 		local := hq.hosts[localHost]
 		log.Info("host budget", "host", local.name, "budget", local.Budget.String(), "reserved", local.fixed.String(), "nominate_after", hq.NominateAfter.String(), "placement", hq.Placement)
 	}
-	groups := map[string]string{}           // group id → class
-	stores := map[string]*cachedisk.Store{} // vm_cache_directory → its store
+	groups := map[string]string{}    // group id → class
+	stores := map[string]openStore{} // vm_cache_directory → its store
 	for _, name := range slices.Sorted(maps.Keys(classes)) {
 		c := classes[name]
 		if err := c.validate(name); err != nil {
@@ -247,7 +249,7 @@ func New(ctx context.Context, classes map[string]Class, host *HostConfig, log hc
 			p.size, _ = c.Size() // checked by newHostQueue
 		}
 		if c.CacheDisk != nil {
-			if p.cache, err = openCache(stores, c, log); err != nil {
+			if p.cache, err = openCache(stores, name, c, log); err != nil {
 				_ = b.Shutdown(ctx)
 				return nil, fmt.Errorf("class %q: cache_disk: %w", name, err)
 			}
@@ -763,6 +765,13 @@ func (b *Backend) HandOver(id string) bool {
 	set(&b.handed, id, b.instance[id])
 	delete(b.instance, id)
 	b.log.Info("vm left to the next fleetci with its job", "vm", id, "class", p.name)
+	if cv, ok := b.caches[id]; ok {
+		// The next fleetci can't take the disk back from the VM: the job
+		// goes on with it, and its layer isn't kept.
+		delete(b.caches, id)
+		cv.store.Abort(cv.lease)
+		b.log.Warn("the vm's cache disk goes with it; its layer isn't kept", "vm", id)
+	}
 	return true
 }
 

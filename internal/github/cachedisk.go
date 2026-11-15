@@ -373,7 +373,7 @@ func (d *Dispatcher) refFacts(ctx context.Context, f *cacheFacts, ref refHint) e
 		return nil
 	}
 	if ref.known {
-		f.tag, f.protected = ref.tag, ref.protected && !ref.tag
+		f.tag, f.protected = ref.tag, ref.protected
 		return nil
 	}
 	repo := f.repo

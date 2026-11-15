@@ -135,6 +135,7 @@ func TestCacheDiskValidate(t *testing.T) {
 		{Projects: []CacheDiskProject{{Writers: ok}}},
 		{Projects: []CacheDiskProject{{Match: "g/[", Writers: ok}}},
 		{Projects: []CacheDiskProject{{Match: "g/*", Writers: []string{"main"}}}},
+		{Projects: []CacheDiskProject{{Match: "g/*"}}}, // writers left out
 	} {
 		if c.Validate() == nil {
 			t.Errorf("%+v passed", c)

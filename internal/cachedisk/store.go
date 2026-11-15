@@ -483,6 +483,9 @@ func (s *Store) flatten(key string, chain []string) {
 	delete(s.flattening, key)
 	h, herr := s.readHead(key)
 	switch {
+	case errors.Is(err, ErrLowSpace):
+		// The next commit tries again, once there may be room.
+		_ = os.Remove(dst)
 	case err != nil:
 		s.log.Warn("cache: flattening failed; trying again", "cache", key, "in", flattenRetry, "err", err)
 		_ = os.Remove(dst)

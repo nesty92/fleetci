@@ -88,6 +88,9 @@ func (p *Policy) Validate() error {
 		if _, err := path.Match(strings.TrimSuffix(pp.Match, "/**"), ""); err != nil {
 			return fmt.Errorf("%s: match %q: %w", where, pp.Match, err)
 		}
+		if pp.Writers == nil {
+			return errors.New(where + ": writers is required; [] makes no job a writer")
+		}
 		if err := check(where, pp.Writers); err != nil {
 			return err
 		}
