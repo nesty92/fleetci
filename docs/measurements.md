@@ -740,3 +740,34 @@ Docker's default seccomp profile blocks io_uring. In a container,
 Cloud Hypervisor then logs "io_uring runtime probe failed" and uses a
 synchronous backend.
 
+### The cache disk: qcow2 layers, a raw copy, a reflink clone
+
+The lab's two real caches of main, GitHub jobs on the VM: go (6 layers,
+1.2 GB, 29,252 files) and web (3 layers, 3.1 GB, 159,265 files). Each job
+gets its disk three ways: a new qcow2 layer on the chain (fleetci today), a
+raw file fully copied on ext4, or a raw file cloned with `cp --reflink` on
+XFS kept in one file on the host's ext4 (loop-mounted, as a node without
+XFS would have it). A 4 vCPU / 4 GB VM, Cloud Hypervisor v54 with io_uring;
+in the guest, after dropping its caches: read the whole cache, copy its
+biggest folder (`trees`) and sync, delete it, write 1 GB direct, read it,
+and 4,000 synced 4k writes. Medians of 3 runs, in seconds; the host's page
+cache was not dropped.
+
+| | go qcow2 | go copy | go reflink | web qcow2 | web copy | web reflink |
+| --- | --- | --- | --- | --- | --- | --- |
+| make the disk | 0.012 | 0.66 | 0.005 | 0.009 | 1.61 | 0.009 |
+| read the cache | 1.95 | 1.18 | 2.37 | 10.96 | 7.96 | 10.42 |
+| copy the biggest folder | 3.31 | 2.21 | 2.51 | 12.24 | 10.94 | 12.40 |
+| delete it | 0.45 | 0.45 | 0.45 | 2.38 | 2.42 | 2.40 |
+| write 1 GB | 0.41 | 0.57 | 0.35 | 0.56 | 0.40 | 0.42 |
+| 4,000 synced 4k writes | 10.54 | 10.78 | 12.54 | 10.70 | 10.78 | 12.58 |
+
+A reflink clone on XFS in a file did no better than the qcow2 chain: reads
+from 5% faster to 20% slower, copies the same, synced writes 18% slower
+(each flush goes through XFS, the loop device and ext4). The 3× random-write
+gain fio showed on the root disk does not show on cache-shaped work. A full
+copy was fastest in the VM, partly because the copy has just been read into
+the host's page cache, but takes 0.7–1.6 s and the cache's whole size again
+per job. So the cache disk stays qcow2 layers, which need nothing of the
+host's filesystem. XFS on a real partition was not measured: this host has
+none.
