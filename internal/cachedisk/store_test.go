@@ -2,6 +2,7 @@ package cachedisk
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -17,12 +18,16 @@ type fakeImages struct {
 	parent  map[string]string
 	data    int // bytes each new layer gets, as if a job wrote them
 	flatten chan struct{}
+	create  chan struct{} // Create waits for it, when set
 	fail    error
 	// flattenFail fails Flatten, as qemu-img did on a VM's locks.
 	flattenFail error
 }
 
 func (f *fakeImages) Create(path, parent string, _ int64) error {
+	if f.create != nil {
+		<-f.create
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.fail != nil {
@@ -619,5 +624,63 @@ func TestBeginKeepsItsSource(t *testing.T) {
 	}
 	if _, err := s.readHead(other.key()); err == nil {
 		t.Fatal("over budget, the other cache was kept")
+	}
+}
+
+// TestBeginLetsOthersOnWhileItCreates: qemu-img making one job's layer
+// doesn't hold up another job's Begin, or the worker's report.
+func TestBeginLetsOthersOnWhileItCreates(t *testing.T) {
+	img := &fakeImages{create: make(chan struct{})}
+	s := open(t, Config{}, img)
+	done := make(chan error)
+	go func() { _, err := s.Begin(main_); done <- err }()
+	held := make(chan struct{})
+	go func() { s.Held(); close(held) }()
+	select {
+	case <-held:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Held waited for another job's qemu-img")
+	}
+	close(img.create)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// BenchmarkEvict: a node's store with many caches, over budget.
+func BenchmarkEvict(b *testing.B) {
+	img := &fakeImages{data: 4 << 10}
+	s, err := Open(b.TempDir(), Config{MinFree: 1}, img, hclog.NewNullLogger())
+	if err != nil {
+		b.Fatal(err)
+	}
+	for i := 0; i < 500; i++ {
+		sc := main_
+		sc.Project = fmt.Sprint(i)
+		l, err := s.Begin(sc)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if err := s.Commit(l); err != nil {
+			b.Fatal(err)
+		}
+	}
+	// Every cache over budget but in use, so none can go: each is weighed
+	// against the budget, the worst case for the scan.
+	for i := 0; i < 500; i++ {
+		sc := main_
+		sc.Project = fmt.Sprint(i)
+		l, err := s.Begin(sc)
+		if err != nil {
+			b.Fatal(err)
+		}
+		defer s.Abort(l)
+	}
+	s.cfg.Budget = 1
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		s.mu.Lock()
+		s.evict()
+		s.mu.Unlock()
 	}
 }

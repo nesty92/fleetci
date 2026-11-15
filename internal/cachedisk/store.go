@@ -345,10 +345,16 @@ func (s *Store) Begin(scope Scope) (*Lease, error) {
 	if parent != nil {
 		p = parent.layer()
 	}
-	// The lease is held before the file exists, so sweep keeps it.
+	// The lease is held before the file exists, so sweep keeps it, and
+	// eviction keeps the chain it starts from while qemu-img makes it,
+	// without the store's lock: other jobs' Begin and Commit, and the
+	// worker's reports, don't wait for it.
 	l.chain = append(l.chain, layer)
 	s.leases[l] = struct{}{}
-	if err := s.img.Create(layer, p, s.cfg.Size); err != nil {
+	s.mu.Unlock()
+	err := s.img.Create(layer, p, s.cfg.Size)
+	s.mu.Lock()
+	if err != nil {
 		delete(s.leases, l)
 		_ = os.Remove(layer)
 		return nil, fmt.Errorf("cache layer: %w", err)
@@ -562,21 +568,54 @@ func (s *Store) sweep() {
 // used first, until the store is in budget, and those past MaxAge. A scope with a lease on its layers stays.
 func (s *Store) evict() { s.evictFor(0) }
 
-// evictFor is evict with room left for need more bytes.
+// evictFor is evict with room left for need more bytes. It reads the
+// store once: each file's size and which heads and leases need it. A
+// scope it drops frees the files nothing else needs, and one sweep at the
+// end removes them.
 func (s *Store) evictFor(need int64) {
+	sizes := map[string]int64{}
+	var used int64
+	_ = filepath.WalkDir(filepath.Join(s.dir, "scopes"), func(p string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			n := allocated(d)
+			sizes[p] = n
+			used += n
+		}
+		return nil
+	})
 	type scope struct {
 		key    string
 		used   time.Time
 		shared bool
 		maxAge time.Duration
+		chain  []string
 	}
 	var heads []scope
+	refs := map[string]int{}
 	for _, key := range s.keys() {
 		h, err := s.readHead(key)
 		if err != nil {
 			continue
 		}
-		heads = append(heads, scope{key, h.Used, h.Scope.Writer, s.maxAge(h)})
+		heads = append(heads, scope{key, h.Used, h.Scope.Writer, s.maxAge(h), h.Chain})
+		for _, f := range h.Chain {
+			refs[f]++
+		}
+	}
+	leased := map[string]bool{}
+	for l := range s.leases {
+		for _, f := range l.chain {
+			refs[f]++
+			leased[filepath.Base(filepath.Dir(f))] = true
+		}
+	}
+	// Layers nothing needs go at the sweep below.
+	stray := false
+	for f, n := range sizes {
+		if strings.HasSuffix(f, ".qcow2") && refs[f] == 0 || strings.HasSuffix(f, ".part") {
+			used -= n
+			stray = true
+		}
 	}
 	// A ref's own cache goes before any shared one: it is read by its ref
 	// alone, and it is a layer on the shared cache it started from, so
@@ -588,16 +627,10 @@ func (s *Store) evictFor(need int64) {
 		}
 		return heads[i].used.Before(heads[j].used)
 	})
-	leased := map[string]bool{}
-	for l := range s.leases {
-		for _, f := range l.chain {
-			leased[filepath.Base(filepath.Dir(f))] = true
-		}
-	}
-	fits := false
+	fits, dropped := false, false
 	for _, h := range heads {
 		old := s.now().Sub(h.used) > h.maxAge
-		fits = fits || s.inBudget(need)
+		fits = fits || used+need <= s.cfg.Budget
 		if !old && fits {
 			continue
 		}
@@ -605,8 +638,18 @@ func (s *Store) evictFor(need int64) {
 			continue
 		}
 		s.log.Info("cache: evicting", "scope", h.key, "unused for", s.now().Sub(h.used).Round(time.Minute).String())
-		_ = os.Remove(filepath.Join(s.dir, "scopes", h.key, "head.json"))
+		hp := filepath.Join(s.dir, "scopes", h.key, "head.json")
+		_ = os.Remove(hp)
+		used -= sizes[hp]
 		s.evicted++
+		dropped = true
+		for _, f := range h.chain {
+			if refs[f]--; refs[f] == 0 {
+				used -= sizes[f]
+			}
+		}
+	}
+	if dropped || stray {
 		s.sweep()
 	}
 }
