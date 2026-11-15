@@ -671,3 +671,24 @@ it. One run of each, November 2026.
 |---|---|---|
 | poll, every 10 s | 69 | 8.8 s |
 | webhook | 24 | 1.8 s |
+
+### GitLab's caches: archives or file by file
+
+GitLab jobs on classes without a cache disk, their runner's cache in the
+lab's S3 bucket (on the same host, no added latency): GitLab's archives
+(`cache_store = "archive"`, zipzstd) against the per-file store, one run
+after the other, the same six pull requests and their merges (12 jobs of
+each kind), November 2026. The Go job caches about 550 MB (module and
+build caches), the web job about 1 GB (`node_modules`, `.next/cache`).
+Medians, in seconds.
+
+| | restore | save | job |
+|---|---|---|---|
+| Go, archive | 3.0 | 3.0 | 31 |
+| Go, files | 5.0 | 3.0 | 35 |
+| web, archive | 7.0 | 7.0 | 80 |
+| web, files | 10.5 | 4.5 | 87 |
+
+With a fast bucket next door, the per-file store saves the web job's
+cache faster, as it uploads only what changed, but restores both more
+slowly, and the jobs end later. It isn't faster here.
