@@ -43,7 +43,7 @@ func TestProjectWritersFromTOML(t *testing.T) {
 	if err := p.Validate(); err != nil || !slices.Equal(p.Rules("g/a"), []string{"default"}) {
 		t.Fatalf("writers left out: %v, %q", err, p.Rules("g/a"))
 	}
-	if !p.Checkout("g/a") || p.Checkout("other/a") {
+	if !p.Checkout("g/a") || !p.Checkout("G/A") || p.Checkout("other/a") {
 		t.Fatal("checkout is the matching project's")
 	}
 	if s := p.Scope(Request{Forge: "gitlab", Path: "g/a", Project: "1", Job: Job{Ref: "main"}}); !s.Checkout {

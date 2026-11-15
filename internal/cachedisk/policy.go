@@ -177,6 +177,8 @@ func IsWriter(rules []string, j Job) bool {
 }
 
 func matchProject(pattern, project string) bool {
+	// GitHub's and GitLab's paths are the same project in any case.
+	pattern, project = strings.ToLower(pattern), strings.ToLower(project)
 	if group, ok := strings.CutSuffix(pattern, "/**"); ok {
 		return strings.HasPrefix(project, group+"/")
 	}
