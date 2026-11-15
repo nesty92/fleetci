@@ -168,3 +168,15 @@ func TestOpenCacheSharedDirectory(t *testing.T) {
 		t.Fatalf("another budget: %v", err)
 	}
 }
+
+// The VM's shell gets each script whole: it has single quotes, which
+// guestCommand wraps it in.
+func TestGuestCommandKeepsScript(t *testing.T) {
+	for name, s := range map[string]string{"mount": mountScript, "unmount": unmountScript(1)} {
+		cmd := strings.Replace(guestCommand(s), "exec $s sh -euc", "exec printf %s", 1)
+		out, err := exec.Command("sh", "-c", cmd).CombinedOutput()
+		if err != nil || string(out) != s {
+			t.Errorf("%s: %v\n%s", name, err, out)
+		}
+	}
+}

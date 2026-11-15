@@ -298,14 +298,19 @@ func guest(ctx context.Context, conn *proxy.Conn, script string) (string, error)
 		case <-done:
 		}
 	}()
-	out, err := s.CombinedOutput(`s=; [ "$(id -u)" = 0 ] || s="sudo -n"; exec $s sh -euc '` + script + `'`)
+	out, err := s.CombinedOutput(guestCommand(script))
 	return strings.TrimSpace(string(out)), err
+}
+
+// guestCommand runs script as root on the VM: the script whole, single
+// quotes and all.
+func guestCommand(script string) string {
+	return `s=; [ "$(id -u)" = 0 ] || s="sudo -n"; exec $s sh -euc '` + strings.ReplaceAll(script, `'`, `'\''`) + `'`
 }
 
 // mountScript waits for the disk, formats it the first time, and puts
 // Docker's and containerd's data on it. The disk's serial names it.
 // /run/fleetci-cache-mounted marks when, for unmountScript.
-// No single quotes: guest wraps it in them.
 const mountScript = `
 dev=/dev/disk/by-id/virtio-cache
 i=0
