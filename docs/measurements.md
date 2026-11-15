@@ -570,7 +570,7 @@ unpacking takes 1.9 s and packing 3.6 s, of it `zstd` 3.2 s (2.3 s at
 level 1, for an entry 10% larger); the lab's VMs share the host's 16
 threads, which the runs keep busy.
 
-What a chunk store would upload instead (`hack/cachelab/cdcstat`, gear
+What a chunk store would upload instead (a tool since removed, gear
 hash chunks of 64 KiB on average, each new chunk a zstd frame), over the
 run's entries in the order they were saved:
 
@@ -585,7 +585,7 @@ less); Go's is 3.4 GB, of which about a fifth is new. That is bucket
 traffic and storage; the jobs' own time is in the packing.
 
 Kept by whole files instead, each file known by its content's hash and
-uploaded once (`cdcstat -files`, over the 72 entries of the run below that
+uploaded once (the same tool, over the 72 entries of the run below that
 kept folders on the disk), a store would upload 4% of saving whole for web
 (395 MB of 11.1 GB) and 6% for Go (1.0 GB of 18.7 GB). Chunking the files
 themselves comes to the same, 401 MB and 1.04 GB: what changes between two
@@ -633,7 +633,7 @@ store streams one tar.zst, its files' frames copied from the packs as
 stored and only the tar headers framed anew (as zstd:chunked frames
 headers and contents apart).
 
-`hack/cachelab/fsreplay` replays the 72 entries of the run below
+A replay tool, since removed, replayed the 72 entries of the run below
 (`vm-trees-1`), in the order they were saved, against keeping whole
 archives: each entry unpacked, packed again with `tar` and `zstd -T0` and
 uploaded whole, saved into the store knowing the last save, restored from
