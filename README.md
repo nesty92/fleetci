@@ -352,6 +352,29 @@ waits for a VM, default 10m, or 50m with an `overflow`). Unknown keys are errors
 relative to the file. Each class's `plugin_config` goes to its fleeting plugin
 as it is.
 
+### Is each job's class the right size?
+
+fleetci measures each job on its VM from the VM's own kernel: how long its
+tasks waited for a CPU, for memory or for the disk (pressure stall
+information), the CPUs busy at its busiest, and its peak memory. Each job
+logs a verdict, `undersized`, `oversized`, `io-bound` or `fits`, with the
+size to try. It also warns when a job is outgrowing its class: its memory
+peak or CPU wait growing over its earlier runs.
+
+```console
+$ fleetci usage
+FORGE   JOB             CLASS      RUNS  CPU PEAK  MEM PEAK  LAST
+github  acme/api build  2vcpu-4gb  14    2.0/2     0.5/4 GB  undersized: tasks waited for a CPU 97% of the time; try 4 vCPU
+gitlab  g/app lint      4vcpu-8gb  31    0.9/4     0.6/8 GB  oversized: at most 0.9 of 4 CPUs busy; used at most 0.6 GB of 8 GB memory; try 2 vCPU, 1 GB
+```
+
+The runs are kept in `usage_file` (default `usage.jsonl` in `state_dir`).
+The figures by class are Prometheus metrics too, at `metrics_listen` (or a
+fleet controller's `/metrics`), with a "Job sizing" row in the Grafana
+dashboard.
+See [docs/job-usage.md](docs/job-usage.md) for the rules and how they were
+checked.
+
 ### Reusing VMs
 
 By default each VM runs one job and is removed. A class can reuse them, as

@@ -25,6 +25,7 @@ import (
 	"github.com/nesty92/fleetci/internal/github"
 	"github.com/nesty92/fleetci/internal/gitlab"
 	"github.com/nesty92/fleetci/internal/source"
+	"github.com/nesty92/fleetci/internal/usage"
 )
 
 const (
@@ -58,6 +59,15 @@ type Config struct {
 	// so a restart of fleetci keeps the GitHub jobs running on the VMs of
 	// classes not on this host, and follows them to their end.
 	StateDir string `json:"state_dir" toml:"state_dir"`
+	// UsageFile keeps what each job used of its VM, a line of JSON per
+	// job, so a job that outgrows its class shows across restarts (see
+	// "fleetci usage"). Default: usage.jsonl in state_dir; without
+	// state_dir, jobs are measured and logged, and kept only in memory.
+	UsageFile string `json:"usage_file" toml:"usage_file"`
+	// MetricsListen is an address to serve Prometheus metrics on, plain
+	// HTTP at /metrics, e.g. "127.0.0.1:9483": what jobs used of their
+	// VMs, by class (see docs/job-usage.md). Default none.
+	MetricsListen string `json:"metrics_listen" toml:"metrics_listen"`
 }
 
 type InstanceGroup struct {
@@ -70,8 +80,9 @@ type InstanceGroup struct {
 	stopped  chan struct{}
 	dir      string
 
-	ghStop context.CancelFunc
-	ghDone chan struct{}
+	metricsStop context.CancelFunc
+	ghStop      context.CancelFunc
+	ghDone      chan struct{}
 
 	mu      sync.Mutex
 	running bool
@@ -98,6 +109,20 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 	}
 	g.log = log
 	g.settings = settings
+	rec := g.UsageRecorder(log.Named("usage"))
+	usage.SetDefault(rec)
+	mctx, mstop := context.WithCancel(context.Background())
+	if err := g.ServeMetrics(mctx, rec, log); err != nil {
+		mstop()
+		return provider.ProviderInfo{}, err
+	}
+	g.metricsStop = mstop
+	initDone := false
+	defer func() {
+		if !initDone { // Init failed: gitlab-runner won't call Shutdown
+			mstop()
+		}
+	}()
 
 	// Each class starts its own fleeting plugin and taskscaler.
 	backend, err := fleet.New(ctx, g.Classes, g.Host, log)
@@ -170,6 +195,7 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 	}
 
 	log.Info("fleetci ready", "gateway", g.gw.Addr(), "classes", len(g.Classes), "default_class", g.DefaultClass)
+	initDone = true
 	return provider.ProviderInfo{ID: "fleetci/gateway", MaxSize: 1}, nil
 }
 
@@ -273,6 +299,9 @@ func (g *InstanceGroup) Resume(context.Context, []string) ([]string, error)  { r
 // Shutdown stops GitHub's runners, then the gateway and the nesting API,
 // which removes every VM.
 func (g *InstanceGroup) Shutdown(ctx context.Context) error {
+	if g.metricsStop != nil {
+		g.metricsStop()
+	}
 	if g.ghStop != nil {
 		g.ghStop()
 		select {
@@ -289,4 +318,14 @@ func (g *InstanceGroup) Shutdown(ctx context.Context) error {
 	case <-ctx.Done():
 	}
 	return os.RemoveAll(g.dir)
+}
+
+// UsageRecorder measures the jobs' use of their VMs and keeps it in
+// usage_file, or state_dir's usage.jsonl.
+func (c *Config) UsageRecorder(log hclog.Logger) *usage.Recorder {
+	file := c.UsageFile
+	if file == "" && c.StateDir != "" {
+		file = filepath.Join(c.StateDir, "usage.jsonl")
+	}
+	return usage.NewRecorder(file, log)
 }

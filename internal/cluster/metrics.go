@@ -18,6 +18,11 @@ func (c *Controller) metricsHandler() http.Handler {
 	return mux
 }
 
+// RegisterMetrics adds collectors to the controller's /metrics.
+func (c *Controller) RegisterMetrics(cs ...prometheus.Collector) {
+	c.metrics.reg.MustRegister(cs...)
+}
+
 // metrics are a controller's, for Prometheus. Every controller has the
 // whole fleet's: the workers report to all of them, and each counts the
 // jobs it sees end, so any one can be scraped; with more, dashboards take
