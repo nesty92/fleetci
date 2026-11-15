@@ -825,3 +825,19 @@ On GitLab, gitlab-runner's `clean_git_config`, on by default, already
 empties the repository's config after each job, so it adds the remote again
 ("Created fresh repository"), but keeps the objects and the working copy.
 
+Chromium the same way, on one 8 vCPU / 10 GB VM, each job's cache disk
+100 GB. The second run came five minutes after the first. The checkout
+step's time, as GitHub reports it:
+
+| Chromium | First run | Second run |
+| --- | --- | --- |
+| Depth 1 | 2 min 15 s (about 3.4 GB) | 11 s |
+| Full history | 67 min 14 s | 25 s |
+
+The full history was one fetch of about 67 GB, at a steady 30 MB/s, after
+three and a half quiet minutes while GitHub made the pack, and then about
+twenty minutes of resolving deltas. The connection held throughout, so the
+early EOF on the host above was not GitHub's doing. The kept checkout took
+80 GB of the cache disk: a project like this needs a disk bigger than the
+100 GB default.
+
