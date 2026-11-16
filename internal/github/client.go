@@ -26,10 +26,10 @@ type client struct {
 }
 
 type job struct {
-	ID     int64    `json:"id"`
-	RunID  int64    `json:"run_id"`
-	Name   string   `json:"name"`
-	Status string   `json:"status"`
+	ID     int64  `json:"id"`
+	RunID  int64  `json:"run_id"`
+	Name   string `json:"name"`
+	Status string `json:"status"`
 	// Conclusion is how it ended, once Status is "completed": "failure"
 	// for a job that failed.
 	Conclusion string   `json:"conclusion"`
