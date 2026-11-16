@@ -18,3 +18,23 @@ func TestRunningJob(t *testing.T) {
 		}
 	}
 }
+
+func TestJobResult(t *testing.T) {
+	for _, c := range []struct {
+		line, result string
+		ok           bool
+	}{
+		{"2026-11-05 00:51:40Z: Job build completed with result: Succeeded", "Succeeded", true},
+		{"2026-11-05 00:51:40Z: Job fails (1) completed with result: Failed", "Failed", true},
+		{"2026-11-05 00:51:40Z: Running job: build", "", false},
+		{"echo completed with result: Succeeded", "", false},
+	} {
+		r, ok := jobResult(c.line)
+		if r != c.result || ok != c.ok {
+			t.Errorf("jobResult(%q) = %q %v, want %q %v", c.line, r, ok, c.result, c.ok)
+		}
+	}
+	if !SucceededResult("SucceededWithIssues") || SucceededResult("Canceled") || SucceededResult("") {
+		t.Error("SucceededResult")
+	}
+}

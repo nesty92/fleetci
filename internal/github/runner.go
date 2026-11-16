@@ -314,6 +314,9 @@ func startWith(script string, nodeSvc http.Handler, log hclog.Logger) StartFunc 
 			if job, ok := runningJob(l); ok && took != nil {
 				took(job)
 			}
+			if r, ok := jobResult(l); ok && vm.Result != nil {
+				vm.Result(r)
+			}
 		}
 		next, failed := 1, 0
 		for {
@@ -361,6 +364,24 @@ func startWith(script string, nodeSvc http.Handler, log hclog.Logger) StartFunc 
 			log.Warn("following the runner again", "err", err)
 		}
 	}
+}
+
+// jobResult reads the job's result from the runner's line
+// "2026-11-05 00:51:40Z: Job build completed with result: Failed", which
+// actions/runner writes when its job ends (Runner.Listener's
+// JobDispatcher).
+func jobResult(line string) (string, bool) {
+	i := strings.LastIndex(line, " completed with result: ")
+	if i < 0 || !strings.Contains(line[:i], ": Job ") {
+		return "", false
+	}
+	r := strings.TrimSpace(line[i+len(" completed with result: "):])
+	return r, r != ""
+}
+
+// SucceededResult says whether the runner's result is a success.
+func SucceededResult(r string) bool {
+	return r == "Succeeded" || r == "SucceededWithIssues"
 }
 
 // runningJob reads the job's name from the runner's line

@@ -232,6 +232,12 @@ On GitHub, the same tools' `setup-*` actions with `cache:` set, or
   into config.toml; a runner's own `environment` or a job's variables
   win. GitHub's actions/cache uses zstd, which fleetci lends to job
   containers.
+- **A failed job's layer.** Only a job that succeeded keeps what it left
+  on the disk, as actions/cache and GitLab's `cache:` (`when: on_success`
+  by default) save only then: a failed, cancelled or timed-out job's layer
+  is thrown away, and the next job starts from the one before. What broke
+  a job can be on its disk; a [shell](../README.md#a-shell-into-a-failed-job)
+  into it finds the disk as the job left it.
 - **Emptying a cache.** Change the `cache:` key, as without fleetci.
 
 ## Who writes the shared caches

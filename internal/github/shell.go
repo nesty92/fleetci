@@ -13,7 +13,6 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/nesty92/fleetci/internal/shell"
-	"github.com/nesty92/fleetci/internal/source"
 )
 
 // ShellConfig lets a failed job's VM be debugged over SSH (package shell),
@@ -197,9 +196,10 @@ func (d *Dispatcher) shellFor(ctx context.Context, repo string, queued int64, ru
 }
 
 // holdForShell keeps a failed job's VM for its shell, then closes it; a
-// job that didn't fail has its shell closed at once. The VM's cache disk
-// is taken back first, as at any job's end, so nothing done in the shell
-// reaches the caches. It returns when the VM may go.
+// job that didn't fail has its shell closed at once. The VM keeps its cache
+// disk, as the job left it; the job failed, so the disk's layer is thrown
+// away when the VM goes, and nothing done in the shell reaches the caches.
+// It returns when the VM may go.
 func (d *Dispatcher) holdForShell(ctx context.Context, a *shellAsk, vm VM, log hclog.Logger) {
 	srv, repo, j, actor := a.result()
 	if srv == nil {
@@ -214,17 +214,6 @@ func (d *Dispatcher) holdForShell(ctx context.Context, a *shellAsk, vm VM, log h
 	if conclusion != "failure" {
 		log.Info("shell: the job didn't fail: its VM isn't kept", "conclusion", conclusion)
 		return
-	}
-	if vm.Cache {
-		dc, ok := d.capacity.(source.CacheDetacher)
-		if !ok {
-			log.Warn("shell: the job's VM isn't kept: its cache disk can't be taken back first")
-			return
-		}
-		if err := dc.DetachCache(ctx, vm.ID); err != nil {
-			log.Warn("shell: the job's VM isn't kept: its cache disk wasn't taken back", "err", err)
-			return
-		}
 	}
 	hold := d.cfg.Shell.HoldFor()
 	srv.Open()

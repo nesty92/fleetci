@@ -183,6 +183,9 @@ type VM struct {
 	// Cache says the VM's class has a cache disk: the runner's job waits
 	// at its start while fleetci attaches it (see jobStartedHook).
 	Cache bool
+	// Result, if set, is told the result the runner gives the job it ran:
+	// Succeeded, SucceededWithIssues, Failed, Canceled, ...
+	Result func(result string)
 }
 
 // StartFunc runs a just-in-time runner on the VM and returns when it exits.
@@ -997,7 +1000,10 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 		d.forget(j.ID, false, false)
 		return
 	}
-	vm := VM{VM: created, Conn: conn}
+	// Whether the runner said its job succeeded: a cache disk layer is
+	// kept only then, as actions/cache saves only on success.
+	var succeeded atomic.Bool
+	vm := VM{VM: created, Conn: conn, Result: func(r string) { succeeded.Store(SucceededResult(r)) }}
 	if ca, ok := d.capacity.(source.CacheAttacher); ok && ca.HasCache(created.ID) {
 		vm.Cache = true
 	}
@@ -1057,6 +1063,16 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 			}
 		}
 	}
+	// Whether the runner was stopped, read before the cancel below.
+	stopped := rctx.Err() != nil
+	if vm.Cache && ctx.Err() == nil && !succeeded.Load() {
+		// The disk is attached, or given up, first.
+		cancel()
+		attaching.Wait()
+		if cd, ok := d.capacity.(source.CacheDropper); ok {
+			cd.DropCache(created.ID)
+		}
+	}
 	switch {
 	case ctx.Err() != nil:
 		// A runner that took no job yet goes with its VM, and its job
@@ -1065,10 +1081,10 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 			handedOver = true
 			log.Info("fleetci stopping: runner left on its vm, for the next fleetci", "took", took.Load() != nil)
 		}
-	case err != nil || rctx.Err() != nil:
+	case err != nil || stopped:
 		// Retried while the job is still queued: a runner that failed or
 		// was stopped idle never took it.
-		if rctx.Err() == nil {
+		if !stopped {
 			log.Error("runner failed; retrying if the job is still queued", "err", err)
 		}
 		d.forget(j.ID, true, true)

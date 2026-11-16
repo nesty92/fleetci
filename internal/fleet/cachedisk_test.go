@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/hashicorp/go-hclog"
+
+	"github.com/nesty92/fleetci/internal/cachedisk"
 )
 
 func TestCacheDiskValidate(t *testing.T) {
@@ -211,5 +213,44 @@ func TestUnmountStripsCheckoutCredentials(t *testing.T) {
 	}
 	if !strings.Contains(got, "url = https://gitlab.example.com/g/app.git") {
 		t.Fatalf("the remote changed:\n%s", got)
+	}
+}
+
+// plainImages makes layers as empty files.
+type plainImages struct{}
+
+func (plainImages) Create(path, _ string, _ int64) error { return os.WriteFile(path, nil, 0o600) }
+func (plainImages) Flatten(_, _, dst string) error       { return os.WriteFile(dst, nil, 0o600) }
+
+// A VM whose job didn't succeed gives its layer back thrown away: never
+// unmounted in the guest (there is no guest here to answer), never kept.
+func TestDropCacheThrowsTheLayerAway(t *testing.T) {
+	store, err := cachedisk.Open(t.TempDir(), cachedisk.Config{MinFree: 1}, plainImages{}, hclog.NewNullLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := cachedisk.Scope{Forge: "gitlab", Instance: "gitlab.com", Project: "1", Ref: "main", Writer: true, From: []string{"main"}}
+	lease, err := store.Begin(scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(lease.Layer()); err != nil {
+		t.Fatal(err)
+	}
+	true_, err := exec.LookPath("true")
+	if err != nil {
+		t.Skip("no true(1)")
+	}
+	b := &Backend{log: hclog.NewNullLogger(), caches: map[string]*cacheVM{
+		"vm-1": {store: store, lease: lease, class: Class{Plugin: true_}, inst: "i-1"},
+	}}
+	b.DropCache("vm-1")
+	b.DropCache("vm-gone") // a VM without a disk: nothing to do
+	b.detachCache("vm-1")
+	if _, err := os.Stat(lease.Layer()); !os.IsNotExist(err) {
+		t.Fatalf("the layer is still there: %v", err)
+	}
+	if next, err := store.Begin(scope); err != nil || next.From() != "" {
+		t.Fatalf("the next job starts from %q (%v); want empty", next.From(), err)
 	}
 }

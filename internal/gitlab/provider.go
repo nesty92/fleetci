@@ -105,18 +105,17 @@ func (c capacityVMs) HasCache(vm string) bool {
 	return ok && a.HasCache(vm)
 }
 
-// DetachCache takes the VM's cache disk back, when the core can.
-func (c capacityVMs) DetachCache(ctx context.Context, vm string) error {
-	if d, ok := c.Capacity.(source.CacheDetacher); ok {
-		return d.DetachCache(ctx, vm)
+// DropCache has the VM's cache disk layer thrown away when it goes.
+func (c capacityVMs) DropCache(vm string) {
+	if d, ok := c.Capacity.(source.CacheDropper); ok {
+		d.DropCache(vm)
 	}
-	return errors.New("the cache disk can't be taken back")
 }
 
 // capacityVMs passes cache disks through.
 var (
 	_ source.CacheAttacher = capacityVMs{}
-	_ source.CacheDetacher = capacityVMs{}
+	_ source.CacheDropper  = capacityVMs{}
 )
 
 // roomSeen is room a class had when the job was asked for, not held:
@@ -273,8 +272,13 @@ type executor struct {
 }
 
 // Finish offers the job's VM for a shell, if the job failed and asked for
-// one, while the job's log is still open.
+// one, while the job's log is still open. A job that didn't succeed has its
+// cache disk layer thrown away, as GitLab's cache: saves only on success by
+// default: what it left there may be what broke it.
 func (e *executor) Finish(err error) {
+	if err != nil {
+		e.dropCache()
+	}
 	e.offerShell(err)
 	e.Executor.Finish(err)
 }

@@ -606,7 +606,7 @@ h1 small { display: block; font: 400 1rem/1.4 "Source Sans 3", system-ui, sans-s
     const s3 = { x: 248, y: 130, w: 104, t: "bucket", s: "S3 · GCS · Azure" };
     D.cachedisk = {
       t: "cache disk", c: "core",
-      d: { w: 600, h: 200, label: "Each job's VM gets a copy-on-write layer on its last run's cache disk, in front of the runner's bucket; the layer is kept only when the VM gives it back whole",
+      d: { w: 600, h: 200, label: "Each job's VM gets a copy-on-write layer on its last run's cache disk, in front of the runner's bucket; the layer is kept only when its job succeeded and the VM gives it back whole",
         nodes: [...r, s3], edges: [...chain(r, "fg"), { p: [[300, 70], [300, 130]], dash: true, l: "misses go to", lp: [310, 104] }] },
       tags: ["images · volumes · cache:", "writers: protected by default", "checkout = true, per project", "FLEETCI_CACHE: off"],
     };
@@ -616,7 +616,7 @@ h1 small { display: block; font: 400 1rem/1.4 "Source Sans 3", system-ui, sans-s
     const r = row(20, [
       { t: "job fails", s: "asked for a shell", c: "accent" },
       { t: "VM kept", s: "hold, 10 min", c: "core" },
-      { t: "cache disk", s: "taken back", c: "core" },
+      { t: "cache disk", s: "as the job left it", c: "core" },
       { t: "shell opens", s: "job's keys only", c: "accent" },
       { t: "VM deleted", s: "at the hold's end" },
     ]);
@@ -628,7 +628,7 @@ h1 small { display: block; font: 400 1rem/1.4 "Source Sans 3", system-ui, sans-s
     ], { w: 120, gap: 30 });
     D.shell = {
       t: "shell", c: "accent",
-      d: { w: 600, h: 200, label: "A failed job's VM is kept for a while; after its cache disk is taken back, the person who ran it connects through a tailcat relay with the SSH keys on their account",
+      d: { w: 600, h: 200, label: "A failed job's VM is kept for a while, its cache disk as the job left it and never kept; the person who ran it connects through a tailcat relay with the SSH keys on their account",
         nodes: [...r, ...r2], edges: [...chain(r, "fg"), ...chain(r2, "core")] },
       tags: ["GitHub: re-run with debug logging", "GitLab: FLEETCI_SSH: \"1\"", "never for forks", "counts against max_instances"],
     };

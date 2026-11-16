@@ -92,16 +92,30 @@ func (e *executor) offerShell(jobErr error) {
   tailcat ssh %[3]s
 or
   fleetci ssh %[3]s
-(tailcat: https://github.com/tailscale/tailcat). The job's containers are gone; %[4]s`, cfg.HoldFor(), user, srv.Addr(), leftOnVM(e.p.vms, vm.ID)))
+(tailcat: https://github.com/tailscale/tailcat). The job's containers are gone; its images, volumes and files are as it left them.%[4]s`, cfg.HoldFor(), user, srv.Addr(), cacheNote(e.p.vms, vm.ID)))
 }
 
-// leftOnVM says what of the job a shell finds: with a cache disk, the
-// job's images and volumes leave with it.
-func leftOnVM(vms any, vm string) string {
+// cacheNote says, for a VM with a cache disk, that the disk is the job's
+// and isn't kept.
+func cacheNote(vms any, vm string) string {
 	if c, ok := vms.(interface{ HasCache(string) bool }); ok && c.HasCache(vm) {
-		return "its images and Docker volumes were on the cache disk, which is taken back first: Docker on the VM starts empty."
+		return " Its cache disk is too; the job failed, so what is on it isn't kept for the next job."
 	}
-	return "its images and Docker volumes are on the VM."
+	return ""
+}
+
+// dropCache has the job's VM's cache disk layer thrown away when it goes.
+func (e *executor) dropCache() {
+	if e.build == nil {
+		return
+	}
+	ref, ok := e.build.ExecutorData.(*acquisitionRef)
+	if !ok || ref.vm == nil {
+		return
+	}
+	if d, ok := e.p.vms.(source.CacheDropper); ok {
+		d.DropCache(ref.vm.ID)
+	}
 }
 
 // startShell is shell.Start, which tests replace.
@@ -120,30 +134,17 @@ type shellServer interface {
 	Close() error
 }
 
-// keepForShell keeps a failed job's VM for its shell, then deletes it: the
-// VM's cache disk is taken back first, as at any job's end, so nothing done
-// in the shell reaches the caches, and only then is the shell let through.
-// The VM still counts against its class's max_instances while kept.
+// keepForShell keeps a failed job's VM for its shell, then deletes it. The
+// VM keeps its cache disk, as the job left it; the job failed, so the disk's
+// layer is thrown away when the VM goes, and nothing done in the shell
+// reaches the caches. The VM still counts against its class's
+// max_instances while kept.
 func (p *provider) keepForShell(vm string, h *heldShell) {
 	log := logrus.WithField("vm", vm)
 	defer func() {
 		_ = h.srv.Close()
 		_ = p.vms.Delete(context.Background(), vm)
 	}()
-	if c, ok := p.vms.(interface{ HasCache(string) bool }); ok && c.HasCache(vm) {
-		d, ok := p.vms.(source.CacheDetacher)
-		if !ok {
-			log.Warn("shell: the job's VM isn't kept: its cache disk can't be taken back first")
-			return
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		err := d.DetachCache(ctx, vm)
-		cancel()
-		if err != nil {
-			log.WithError(err).Warn("shell: the job's VM isn't kept: its cache disk wasn't taken back")
-			return
-		}
-	}
 	h.srv.Open()
 	log.WithFields(logrus.Fields{"for": h.hold.String(), "user": h.who}).Info("shell: the failed job's VM is kept")
 	time.Sleep(h.hold)

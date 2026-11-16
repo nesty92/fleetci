@@ -59,11 +59,11 @@ type CacheAttacher interface {
 	HasCache(vm string) bool
 }
 
-// CacheDetacher is a CacheAttacher that can take a VM's cache disk back
-// before the VM goes, as Delete would: the job's layer is kept, and the VM
-// goes on without the disk.
-type CacheDetacher interface {
-	DetachCache(ctx context.Context, vm string) error
+// CacheDropper is a CacheAttacher that can be told a VM's job didn't
+// succeed: its cache disk layer is then thrown away when the VM goes,
+// not kept.
+type CacheDropper interface {
+	DropCache(vm string)
 }
 
 // CacheRelay is a CacheAttacher whose VMs another machine runs, which a

@@ -142,25 +142,22 @@ type cacheHost struct {
 }
 
 func (h *cacheHost) HasCache(string) bool { return true }
-func (h *cacheHost) DetachCache(context.Context, string) error {
-	h.ev.note("detach")
-	return nil
-}
+func (h *cacheHost) DropCache(string)     { h.ev.note("drop") }
 func (h *cacheHost) Delete(_ context.Context, vm string) error {
 	h.ev.note("delete")
 	h.gone <- vm
 	return nil
 }
 
-var _ source.CacheDetacher = (*cacheHost)(nil)
+var _ source.CacheDropper = (*cacheHost)(nil)
 
 type traceBuf struct{ bytes.Buffer }
 
 func (*traceBuf) IsStdout() bool { return false }
 
 // TestAFailedJobKeepsItsVM: a job that asked for a shell and failed is
-// told how to connect; Release keeps its VM for the hold, its cache disk
-// taken back before anyone is let through, then deletes it.
+// told how to connect; its cache disk stays on the VM, its layer marked to
+// be thrown away; Release keeps the VM for the hold, then deletes it.
 func TestAFailedJobKeepsItsVM(t *testing.T) {
 	srv := shellGitLab(t, 7)
 	ev := &events{}
@@ -179,6 +176,9 @@ func TestAFailedJobKeepsItsVM(t *testing.T) {
 		b.ExecutorData = ref
 		var out traceBuf
 		e := &executor{p: p, build: b, logger: buildlogger.New(&out, logrus.NewEntry(logrus.New()), buildlogger.Options{})}
+		if jobErr != nil { // as Finish does
+			e.dropCache()
+		}
 		e.offerShell(jobErr)
 		return out.String(), ref
 	}
@@ -186,15 +186,19 @@ func TestAFailedJobKeepsItsVM(t *testing.T) {
 	if out, ref := run(&common.BuildError{ExitCode: 1}); ref.shell != nil || out != "" {
 		t.Fatalf("a job that didn't ask got a shell: %q", out)
 	}
+	if got := ev.String(); got != "drop" {
+		t.Fatalf("a failed job's layer: events %q", got)
+	}
+	ev.list = nil
 	if out, ref := run(nil, sshVariable, "1"); ref.shell != nil || !strings.Contains(out, "didn't fail") {
 		t.Fatalf("a job that passed: %q", out)
 	}
 	out, ref := run(&common.BuildError{ExitCode: 1}, sshVariable, "1")
-	if ref.shell == nil || !strings.Contains(out, "fleetci ssh tc1.fake") || !strings.Contains(out, "@dev") || !strings.Contains(out, "Docker on the VM starts empty") {
+	if ref.shell == nil || !strings.Contains(out, "fleetci ssh tc1.fake") || !strings.Contains(out, "@dev") || !strings.Contains(out, "as it left them") || !strings.Contains(out, "isn't kept for the next job") {
 		t.Fatalf("a failed job: %q", out)
 	}
-	if ev.String() != "" {
-		t.Fatalf("the shell was opened before the job's end: %v", ev)
+	if got := ev.String(); got != "drop" {
+		t.Fatalf("before the job's end: events %q", got)
 	}
 
 	p.Release(nil, ref)
@@ -203,7 +207,7 @@ func TestAFailedJobKeepsItsVM(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the kept VM was never deleted")
 	}
-	if got := ev.String(); got != "detach open close delete" {
+	if got := ev.String(); got != "drop open close delete" {
 		t.Fatalf("events %q", got)
 	}
 }

@@ -232,11 +232,11 @@ anywhere, behind NAT on both ends, through
 [tailcat](https://github.com/tailscale/tailcat): no port to open, nothing
 to set up on the VM. Its free relays are rate limited, without an SLA;
 `derp_map_url` points at your own. The App or token needs nothing more.
-Nobody gets in until the job is over and the VM's cache disk is taken off,
-so what the job left there is gone, Docker's images and volumes included:
-Docker starts again, empty. Without a cache disk they stay; on GitLab the
-job's containers are gone either way. Not on fleets of machines yet, nor
-with the fleeting plugin.
+Nobody gets in until the job is over. The VM is as the job left it, its
+cache disk included, with Docker's images and volumes; on GitLab the job's
+containers are gone. A failed job's cache disk layer is never kept, so
+nothing done in the shell reaches the next job. Not on fleets of machines
+yet, nor with the fleeting plugin.
 
 ## Install
 
