@@ -4,7 +4,43 @@ Runs of the local kit ([hack/local](../hack/local)) on a 16-thread laptop,
 November 2026.
 Cloud Hypervisor v54, Firecracker 1.17, Ubuntu 26.04 guests.
 
-## VM start, fleetingd
+## What fleetci improves
+
+Each row is fleetci's change against the same job without it, from the
+sections below. Times are a job's own, once started, unless the row says
+otherwise.
+
+| Area | Without | With fleetci | Gain | Section |
+| --- | --- | --- | --- | --- |
+| A VM ready for a job | 16–23 s (upstream fleetingd, cold boot) | 0.3–0.6 s (restored from a snapshot) | over 25× | [VM start](#vm-start-fleetingd) |
+| From a waiting job to its VM | 6.0 s | 1.0 s | 6× | [From a waiting job to its VM](#from-a-waiting-job-to-its-vm) |
+| GitHub sees a new job | 8.8 s (polling every 10 s) | 1.8 s (webhook) | 7 s less | [Poll or webhook](#seeing-a-job-poll-or-webhook) |
+| fleetci's own CI (Go: vet, tests, GoReleaser) | 462–465 s | 52–74 s (cache disk, warm) | 84–89% | [A cache disk per VM](#a-cache-disk-per-vm) |
+| Ten languages as real jobs, GitHub | 14–268 s | 7.5–117 s (cache disk) | 22–89% | [Ten languages](#ten-languages-as-real-ci-jobs) |
+| Ten languages as real jobs, GitLab | 9–141 s | 5.8–115 s (cache disk) | 3–94% | [Ten languages](#ten-languages-as-real-ci-jobs) |
+| A merge train of 12 merge requests (fleetci) | about 60 min | 6 min | 10× | [A merge train](#a-merge-train) |
+| Merge train, Go and web jobs, GitHub | 3748 s of jobs | 2244 s (disk and bucket) | 40% | [Both forges](#a-merge-train-on-both-forges) |
+| Merge train, Go and web jobs, GitLab | 2197 s of jobs (S3) | 1543 s (disk and S3) | 30% | [Both forges](#a-merge-train-on-both-forges) |
+| Steady load, GitLab, Go job p50 | 222 s (no cache) | 53 s (cache disk) | 76% | [GitLab under load](#gitlab-under-steady-load) |
+| Steady load, GitHub, Go job p50 | 212 s (no cache) | 46 s (folders on the disk) | 78% | [Folders on the disk](#folders-on-the-disk-not-archives) |
+| Saving a 986 MB Go cache from a job container, GitHub | 74 s (gzip, one core) | 10 s (fleetci's zstd) | 7× | [Compressing](#compressing-the-caches) |
+| Checkout, kubernetes, depth 1 | 13 s | 2 s (kept checkout) | 6× | [Checkout in real jobs](#the-checkout-cache-in-real-jobs) |
+| Checkout, chromium, depth 1 | 2 min 15 s | 11 s | 12× | [Checkout in real jobs](#the-checkout-cache-in-real-jobs) |
+| Checkout, chromium, full history | 67 min | 25 s | 160× | [Checkout in real jobs](#the-checkout-cache-in-real-jobs) |
+| A class's plugin killed: its jobs fail | after 2 min 18 s, plugin never back | after 28 s, plugin back the same second | | [A plugin that dies](#a-plugin-that-dies) |
+
+Where it does little: steps that run the project's own code each time
+(linters, type checks, JavaScript test suites) take as long with a cache
+as without, so web jobs gain 3–28%. A repository that clones in a few
+seconds gains nothing from a kept checkout.
+
+Tried and not kept, at the end: copying caches between nodes, a per-file
+cache store, raw reflink disks, deduplication, a cache of action
+downloads.
+
+## Starting VMs
+
+### VM start, fleetingd
 
 From the VM's start to SSH and `docker version` answering.
 
@@ -26,7 +62,7 @@ What slowed cold boots:
 - `chrony-wait`, 6 s;
 - `systemd-networkd-wait-online`, 1.1–2.0 s.
 
-## Snapshot restore modes
+### Snapshot restore modes
 
 3 clones at once, 4 vCPU and 6 GB each.
 
@@ -35,7 +71,7 @@ What slowed cold boots:
 | `copyonwrite` | 0.34–0.37 s | 620–650 MB resident, 91–101 MB private |
 | `ondemand` (userfaultfd) | 0.80–0.88 s | 6.1 GB, all private |
 
-## Cloud Hypervisor and Firecracker
+### Cloud Hypervisor and Firecracker
 
 Same image and sizes.
 Firecracker uses Ubuntu's kernel, `quiet`, with disks on btrfs reflinks.
@@ -53,87 +89,7 @@ the two are alike. Its CI kernel lacks the iptables raw table, so Docker's
 bridge fails there. Cloud Hypervisor won: Ubuntu's own kernel and image,
 qcow2 overlays.
 
-## Real-sized jobs
-
-The playground's `heavy` workflow (GitHub) and `HEAVY=1` pipeline (GitLab),
-on restored VMs, with more 4vcpu-6gb jobs than the class allows at once (2).
-
-| Job | GitHub |
-| --- | --- |
-| valkey 8.1.9: build, list/hash/expire test suites | 1 min 35 s |
-| prometheus v3.5.5: `go build ./cmd/prometheus` | 1 min 59 s |
-| caddy v2.10.2: multi-stage `docker buildx` build, run, curl | 1 min 23 s |
-| postgres 17 service, `pgbench -s 50`, 8 clients for 30 s | 53 s |
-| 4 GB held in memory, 8 GB written and checked, 20 containers | 1 min 0 s |
-| cobra's tests, 1vcpu-2gb | 1 min 19 s |
-
-The GitLab pipeline passed the same jobs except the Docker build, which an
-unprivileged GitLab job can't run.
-
-## A plugin that dies
-
-`kill -9` on the 4vcpu-6gb plugin while both its VMs ran jobs:
-
-| | Before | Now |
-| --- | --- | --- |
-| class plugin running again | never, until fleetci restarted | same second |
-| the two jobs on its VMs fail | after 2 min 18 s (TCP gave up) | after 28 s (keepalive) |
-| new VMs for the queue | one at a time: reused IDs clashed | two, 31 s after the kill |
-
-## Chaos rounds
-
-With real jobs running on both forges.
-
-| Fault | What happened |
-| --- | --- |
-| a VM's hypervisor killed | its job failed after 19 s; the VM was replaced |
-| a VM frozen (`SIGSTOP`) | its job failed after 29 s; the frozen VM was killed and replaced |
-| the 4vcpu-6gb plugin killed | running again the same second; its two jobs failed after 28 s |
-| the fleetci plugin killed | its class plugins and VMs died with it; gitlab-runner never starts it again, so `fleetci watchdog` restarted gitlab-runner after 40 s |
-| no internet for 60 s | job listing failed every 30 s; the running job paused and passed; nothing else failed |
-| a job fills the disk | that job failed (`docker run`: exit 125); its runner still reported it |
-| a job asks for 8 GB on 6 GB | `MemoryError`; the VM and runner stayed up |
-| a job powers its VM off | dropped after about 30 s; GitHub reports "lost communication" |
-| the kit's container restarted | new VMs 6 s later; no taps, files or processes left over |
-
-With GitHub on `fleetci serve` (`FLEETCI_LOCAL_GITHUB=serve`) and GitLab on
-gitlab-runner's plugin, each on its own groups:
-
-| Fault | What happened |
-| --- | --- |
-| `fleetci serve` killed, both forges busy | back in 2 s (its restart loop); its VMs died with it; GitLab's kept running |
-| the gitlab-runner plugin killed, both busy | GitHub's run passed untouched; the GitLab job on the plugin failed; the watchdog had it back in 46 s |
-
-A job whose VM is lost stays "in progress" on GitHub until GitHub gives up
-on its runner, about 4 minutes later; GitHub never queues it again.
-
-The scripts behind the restore-mode and Firecracker runs were removed once
-done. They're in git history under `hack/m1/snap` (commit `3514838`).
-
-## Embedded GitLab runner against the plugin
-
-The same compatibility pipeline and GitHub workflow, started together, once
-on gitlab-runner with fleetci's plugin and once on `fleetci serve` running
-the same `config.toml` (`[gitlab] config_file`) with gitlab-runner v19.5.2
-inside it. Classes: 1vcpu-2gb (3) and 4vcpu-8gb (2) on microVMs; the S3
-cache on RustFS.
-
-| Job | Plugin | Embedded |
-| --- | --- | --- |
-| default class, 4vcpu-8gb class, a service | passed | passed |
-| artifacts, dotenv report, S3 cache between jobs | passed | passed |
-| image entrypoint, `GIT_STRATEGY: none`, `parallel: 2`, `after_script` | passed | passed |
-| `retry: 1` on exit 3 | failed twice, `script_failure` | the same |
-| cancelled while running | `canceled`, VM removed | the same |
-| a class the runner lacks | `runner_system_failure` after 10 s | `runner_configuration_error` after 1 s, no VM |
-| GitHub's 4 jobs at the same time | passed | passed |
-
-The embedded loop acquired and released 26 VMs and left none. gitlab-runner
-registers its cache adapters and secret resolvers in its own main package;
-until fleetci imported them, `[runners.cache]` was ignored ("No URL
-provided").
-
-## The small VM image
+### The small VM image
 
 The image now called [github](../images/github.json), then
 `images/small.json`, built locally with fleetingd's
@@ -150,7 +106,7 @@ org's `basic` workflow (two jobs, 1vcpu-2gb).
 | snapshot from the downloaded image | 14 s |
 | dispatch to both jobs done | 35 s; the runners started 23 s after dispatch and ran 11 s, no runner downloaded |
 
-## From a waiting job to its VM
+### From a waiting job to its VM
 
 The playground's `basic` workflow, two jobs at once on 1vcpu-2gb VMs
 restored from a snapshot, from fleetci asking for the VMs to each job
@@ -189,7 +145,22 @@ GitHub to hand it the job. Of the 3 s, 2 s is `run.sh` until it is
 connected, waiting on GitHub; reading the runner's files into the
 snapshot's page cache beforehand changed nothing.
 
-## A cache disk per VM
+### Seeing a job: poll or webhook
+
+How long a GitHub job waits before fleetci sees it, from GitHub creating it
+to fleetci's controller placing it, on the lab and the steady load above.
+Polling asks every 10 s; the webhook is GitHub's `workflow_job`, delivered
+to the controller by `gh webhook forward`, with polling at 5 minutes behind
+it. One run of each, November 2026.
+
+| | jobs | mean |
+|---|---|---|
+| poll, every 10 s | 69 | 8.8 s |
+| webhook | 24 | 1.8 s |
+
+## Caches
+
+### A cache disk per VM
 
 Each job's VM gets a second disk for caches: a qcow2 overlay on the cache
 the last job left, kept after the job as the next layer. Docker's and
@@ -323,74 +294,9 @@ where fleetci asks for a job while a VM can take it. The VM itself was
 ready in 1–2 s. Before fleetci stopped holding room for a GitLab request
 for a job, a GitHub job could wait 40 s more behind it.
 
-### Deduplication and compression
-
-How much a worker's cache disks would shrink on a filesystem that
-deduplicates or compresses, from the ten languages' layers (38 GB, all
-six layers of each), with
-[dedup.py](https://github.com/nesty92/fleetci/tree/ee0956a/hack/cachelab/dedup.py) (since removed):
-
-| Dedup block | Left | Saved | Of it, across projects |
-| --- | --- | --- | --- |
-| 4 KiB (btrfs with bees or duperemove) | 22.1 GB | 42% | 46% |
-| 64 KiB | 31.3 GB | 18% | 65% |
-| 128 KiB (ZFS's default record) | 34.3 GB | 11% | 67% |
-
-Compression (zlib level 1, a lower bound for zstd) takes 56% off what
-deduplication leaves. Half of what 4 KiB deduplication saves is between
-different projects: base images and packages they share. A worker with more
-projects on similar stacks would save more. The other half repeats within
-one project's chain of layers.
-
-Compression saves more than deduplication, and costs less: btrfs's
-`compress=zstd` needs no daemon and no memory for a block table. With both
-the 38 GB would be about 10 GB. ZFS deduplication finds little at its
-record size and keeps its table in memory. fleetci needs no change for
-either; `vm_cache_directory` goes on such a filesystem. Not measured yet:
-how jobs run with their layers on btrfs, where copy-on-write fragments
-files that VMs write to.
-
-### On a fleet of machines
-
-A controller and two workers in the cachelab container, each worker with
-6 CPUs, 7 GB and a 10 GB cache budget, and a class of 4 CPUs and 6 GB with
-`cache_disk`: one VM per worker. GitLab, the express repo of the language
-matrix, `FLEETCI_CACHE_KEY=matrix-node`:
-
-| Job | Worker | Why | Install | Total |
-| --- | --- | --- | --- | --- |
-| First, w1 drained | w2 | the only one Ready | 9.1 s | 12.8 s |
-| Next commit, both Ready | w2 | holds `matrix-node` | 2.4 s | 5.9 s |
-
-Without the cache, the second job would have gone to w1, which comes first
-when both are empty. GitHub, `cache.yml` on WireZone/fleetci-playground:
-its two jobs ran one on each worker, each writing `main` on its own worker.
-On the next run, `docker pull node:24-alpine` took 1.35 s instead of 7.1 s
-on the worker whose copy had it; `postgres:17-alpine`, pulled on the other
-worker, took 6.5 s again: workers didn't copy caches to each other yet.
-
-Copying between workers, the same fleet and `cache.yml`. Both workers are
-in one container, so their link is the host's memory: what it shows is
-what a copy costs on the wire, and the time without a network in the way.
-
-| Copy | Layers | On the wire | Took |
-| --- | --- | --- | --- |
-| w1's `main` to w2, which had another copy | 666 MB | 395 MB | 0.97 s |
-| w2's newer one back to w1 | 665 MB | 395 MB | 0.88 s |
-| The next two jobs' new layers, each | 2.4–3.9 MB | 0.1 MB | 16–25 ms |
-| The whole chain to an empty w2, uncompressed (twice) | 677 MB | 677 MB | 0.70 s |
-| The same, S2 on two cores (twice) | 677 MB | 396 MB | 0.89 s |
-
-With w1 drained, both jobs ran on w2 from the copied chain, and pulled
-their images in 1.1 s each, as on w1. At 1 Gbit, the whole chain would
-take about 5.8 s uncompressed and 3.4 s with S2; at 10 Gbit about the
-same either way, as S2 on two cores keeps up with about 760 MB/s.
-`qemu-img check` found the copied chain whole, its backing files at the
-receiving worker's paths.
-
 ### actions/cache through the disk
 
-The same fleet, GitHub, a throwaway workflow on WireZone/fleetci-playground
+A controller and two workers, GitHub, a throwaway workflow on WireZone/fleetci-playground
 with three jobs: `actions/cache` of 200 MB on the VM, of 100 MB in a
 `node:24-bookworm-slim` job container, and a BuildKit build of an 80 MB
 layer with `cache-to: type=gha,mode=max`. Each job on a disk of its own;
@@ -494,23 +400,6 @@ On a busier run the default zip took 3.4 s to save and 2.4 s to restore,
 `CACHE_COMPRESSION_LEVEL=fast`; the Go job's cache, 3.4 GB in 68,000
 files, is stored as 1015 MB of zstd zip entries (method 93), zipped in
 9 s on 4 CPUs.
-
-### Downloading actions
-
-A GitHub runner downloads every action a job uses in "Set up job", before
-the first step; on a fresh VM nothing is kept from the job before. From
-the logs of 110 jobs on the lab (November 2026, the playground's `go` and
-`web` jobs, each using `actions/checkout@v4` and `actions/cache@v4`):
-
-| job | resolving (GitHub's API) p50 | downloading p50 | p90 | max | per action | share of the job |
-|---|---|---|---|---|---|---|
-| go  | 0.51 s | 1.20 s | 1.59 s | 2.79 s | 0.60 s | 0.7% |
-| web | 0.51 s | 1.27 s | 2.61 s | 3.28 s | 0.64 s | 1.2% |
-
-The runner can take the archives from a folder instead
-(`ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE`, `<owner>_<repo>/<sha>.tar.gz`); it
-still asks GitHub to resolve each action, so a disk would save the
-download, about 0.6 s per action, not the 0.5 s of resolving.
 
 ### GitLab under steady load
 
@@ -618,62 +507,6 @@ into `node_modules`, and Linux doesn't link across mount points, so from
 a mounted store it copies each file. `next build` was 55 s against 67 s,
 with no packing on the CPUs the VMs share.
 
-### A store of files, not archives
-
-A prototype, since removed: it didn't make jobs faster (see GitLab's
-caches below), and fleetci keeps caches as the forges' own archives.
-`internal/filestore` kept each save in the bucket by its files, as
-restic's repository does: new files and the listings of changed folders,
-one zstd frame each, packed into objects of about 16 MB, an index object
-per save saying where each frame is, and a small snapshot object naming
-the root folder's listing. A restore fetches ranges of packs in parallel,
-through signed links only; one on a node that holds an older folder copies
-the files it already has from there. For a stock actions/cache client the
-store streams one tar.zst, its files' frames copied from the packs as
-stored and only the tar headers framed anew (as zstd:chunked frames
-headers and contents apart).
-
-A replay tool, since removed, replayed the 72 entries of the run below
-(`vm-trees-1`), in the order they were saved, against keeping whole
-archives: each entry unpacked, packed again with `tar` and `zstd -T0` and
-uploaded whole, saved into the store knowing the last save, restored from
-the store into an empty folder, next to the last entry's folder, and
-streamed into `tar -x --use-compress-program unzstd`. Every restore was
-checked file by file against the folder. The bucket is the lab's, on the
-same host, so a request costs little; on S3 each costs tens of ms, and a
-restore makes about 50 to 160 of them, in parallel.
-
-| | web: archives | web: store | go: archives | go: store |
-|---|---|---|---|---|
-| uploaded, 36 saves | 11.1 GB | 476 MB (4%), 119 objects | 18.7 GB | 1.13 GB (6%), 159 objects |
-| save p50 | 1.6 s | 0.4 s | 2.4 s | 0.5 s |
-| restore into an empty folder p50 | 3.4 s | 1.2 s | 4.0 s | 1.4 s |
-| restore next to the last folder p50 | | 0.6 s | | 1.2 s |
-| a stock client, from the stream, p50 | | 2.2 s | | 2.7 s |
-
-Go's largest entries (3.4 GB as a folder, 914 MB as saved) take 6.5 s
-to restore as an archive and 4.2 s to save; from the store 2.3 s, its
-save 0.5 s and 2 to 10 MB. A first save is slower than an archive (Go's
-3.3 GB one 5.9 s against 3.9 s), as it reads and hashes every file. The
-Go entries alternate between two folders, one of 1.7 GB and one of
-3.3 GB, from different branches of the train; replayed in the order saved,
-a save often starts from the other one's snapshot, so it hashes more and a
-restore next to the last folder fetches about 400 MB that a job,
-restoring its own branch's, would not.
-
-### Seeing a job: poll or webhook
-
-How long a GitHub job waits before fleetci sees it, from GitHub creating it
-to fleetci's controller placing it, on the lab and the steady load above.
-Polling asks every 10 s; the webhook is GitHub's `workflow_job`, delivered
-to the controller by `gh webhook forward`, with polling at 5 minutes behind
-it. One run of each, November 2026.
-
-| | jobs | mean |
-|---|---|---|
-| poll, every 10 s | 69 | 8.8 s |
-| webhook | 24 | 1.8 s |
-
 ### GitLab's caches: archives or file by file
 
 GitLab jobs on classes without a cache disk, their runner's cache in the
@@ -714,6 +547,158 @@ or an untar of 60k files, while on raw disks it wrote 2.3-2.7x faster.
 So fleetci keeps archives on both forges, and the bucket to put first is
 one next to the runners.
 
+## Checkout
+
+What keeping the checkout on the cache disk saves. On the host, no VM: the
+same git commands as actions/checkout (init, `fetch --no-tags --prune` of
+the commit to `refs/remotes/origin/<branch>`, `checkout --force -B`).
+Cold is an empty folder; warm is the folder at a commit a day or a week
+older, with junk left in it, cleaned (`clean -ffdx`, `reset --hard`) and
+fetched to the new commit. GitHub over a 400 Mbit/s link; the fetches are
+bound by GitHub's side, not the link. Seconds, two rounds where both are
+given.
+
+| Repository | Depth | .git | Tree | Cold | Warm, a day | Warm, a week |
+| --- | --- | --- | --- | --- | --- | --- |
+| nesty92/fleetci | 1 | 1 MB | 3 MB | 1.8–2.2 | 1.7–2.1 | 1.8–2.1 |
+| vercel/next.js | 1 | 54 MB | 340 MB | 7.6–8.0 | 2.0–2.3 | 3.0–4.1 |
+| kubernetes/kubernetes | 1 | 52 MB | 378 MB | 11–14 | 2–3 | 6 |
+| torvalds/linux | 1 | 300 MB | 1.8 GB | 29.5–33.5 | 2.3–3.3 | 7.9–9.6 |
+| chromium/chromium | 1 | 1.5 GB | 5.8 GB | 149–155 | 13.6 | 43.3 |
+| nesty92/fleetci | full | 2 MB | 3 MB | 2.0 | | 2.3 |
+| kubernetes/kubernetes | full | 1.3 GB | 378 MB | 114.5 | | 5.5 |
+| vercel/next.js | full | 2.4 GB | 340 MB | 195.2 | | 4.2 |
+| chromium/chromium | full | ~67 GB | 5.8 GB | failed¹ | | |
+
+A repository whose clone takes a few seconds gains nothing; one that takes
+tens of seconds or more gets most of it back. A week's commits cost more
+than a day's at depth 1: each fetch of a shallow clone sends whole trees
+for the commits it hasn't got. With full history the warm fetch sends only
+the new objects, and saves the most: 21 to 46 times faster. 
+
+¹ On the host the fetch ended partway (`early EOF`); on a VM it cloned in
+67 minutes, below.
+
+### The checkout cache in real jobs
+
+The cachelab, one 8 vCPU / 8 GB VM with a cache disk, `checkout = true`
+on both playgrounds. GitHub: actions/checkout of kubernetes at depth 1, a
+job on the VM and one in a job container (`buildpack-deps:noble-scm`), on a
+branch, each job its own disk. GitLab: the playground with
+`GIT_STRATEGY: fetch`, GitLab's default. The checkout step's seconds, as
+GitHub reports them.
+
+| Job | First run | Next runs |
+| --- | --- | --- |
+| GitHub, on the VM | 13 (cloned) | 2, 2 (the last job's there, fetched in 0.9 s) |
+| GitHub, in a container | 13 (cloned) | 3 |
+| GitLab | Initialized empty Git repository | Reinitialized existing Git repository |
+
+The workspace was the disk's in every job (`/dev/vdc[/checkout/...]` on
+GitHub, `/builds` on GitLab), and a job's container saw it at `/__w`. What
+the next job found had no credentials: no `extraheader`, no token in a URL.
+On GitLab, gitlab-runner's `clean_git_config`, on by default, already
+empties the repository's config after each job, so it adds the remote again
+("Created fresh repository"), but keeps the objects and the working copy.
+
+Chromium the same way, on one 8 vCPU / 10 GB VM, each job's cache disk
+100 GB. The second run came five minutes after the first. The checkout
+step's time, as GitHub reports it:
+
+| Chromium | First run | Second run |
+| --- | --- | --- |
+| Depth 1 | 2 min 15 s (about 3.4 GB) | 11 s |
+| Full history | 67 min 14 s | 25 s |
+
+The full history was one fetch of about 67 GB, at a steady 30 MB/s, after
+three and a half quiet minutes while GitHub made the pack, and then about
+twenty minutes of resolving deltas. The connection held throughout, so the
+early EOF on the host above was not GitHub's doing. The kept checkout took
+80 GB of the cache disk: a project like this needs a disk bigger than the
+100 GB default.
+
+## Reliability
+
+### A plugin that dies
+
+`kill -9` on the 4vcpu-6gb plugin while both its VMs ran jobs:
+
+| | Before | Now |
+| --- | --- | --- |
+| class plugin running again | never, until fleetci restarted | same second |
+| the two jobs on its VMs fail | after 2 min 18 s (TCP gave up) | after 28 s (keepalive) |
+| new VMs for the queue | one at a time: reused IDs clashed | two, 31 s after the kill |
+
+### Chaos rounds
+
+With real jobs running on both forges.
+
+| Fault | What happened |
+| --- | --- |
+| a VM's hypervisor killed | its job failed after 19 s; the VM was replaced |
+| a VM frozen (`SIGSTOP`) | its job failed after 29 s; the frozen VM was killed and replaced |
+| the 4vcpu-6gb plugin killed | running again the same second; its two jobs failed after 28 s |
+| the fleetci plugin killed | its class plugins and VMs died with it; gitlab-runner never starts it again, so `fleetci watchdog` restarted gitlab-runner after 40 s |
+| no internet for 60 s | job listing failed every 30 s; the running job paused and passed; nothing else failed |
+| a job fills the disk | that job failed (`docker run`: exit 125); its runner still reported it |
+| a job asks for 8 GB on 6 GB | `MemoryError`; the VM and runner stayed up |
+| a job powers its VM off | dropped after about 30 s; GitHub reports "lost communication" |
+| the kit's container restarted | new VMs 6 s later; no taps, files or processes left over |
+
+With GitHub on `fleetci serve` (`FLEETCI_LOCAL_GITHUB=serve`) and GitLab on
+gitlab-runner's plugin, each on its own groups:
+
+| Fault | What happened |
+| --- | --- |
+| `fleetci serve` killed, both forges busy | back in 2 s (its restart loop); its VMs died with it; GitLab's kept running |
+| the gitlab-runner plugin killed, both busy | GitHub's run passed untouched; the GitLab job on the plugin failed; the watchdog had it back in 46 s |
+
+A job whose VM is lost stays "in progress" on GitHub until GitHub gives up
+on its runner, about 4 minutes later; GitHub never queues it again.
+
+The scripts behind the restore-mode and Firecracker runs were removed once
+done. They're in git history under `hack/m1/snap` (commit `3514838`).
+
+### Embedded GitLab runner against the plugin
+
+The same compatibility pipeline and GitHub workflow, started together, once
+on gitlab-runner with fleetci's plugin and once on `fleetci serve` running
+the same `config.toml` (`[gitlab] config_file`) with gitlab-runner v19.5.2
+inside it. Classes: 1vcpu-2gb (3) and 4vcpu-8gb (2) on microVMs; the S3
+cache on RustFS.
+
+| Job | Plugin | Embedded |
+| --- | --- | --- |
+| default class, 4vcpu-8gb class, a service | passed | passed |
+| artifacts, dotenv report, S3 cache between jobs | passed | passed |
+| image entrypoint, `GIT_STRATEGY: none`, `parallel: 2`, `after_script` | passed | passed |
+| `retry: 1` on exit 3 | failed twice, `script_failure` | the same |
+| cancelled while running | `canceled`, VM removed | the same |
+| a class the runner lacks | `runner_system_failure` after 10 s | `runner_configuration_error` after 1 s, no VM |
+| GitHub's 4 jobs at the same time | passed | passed |
+
+The embedded loop acquired and released 26 VMs and left none. gitlab-runner
+registers its cache adapters and secret resolvers in its own main package;
+until fleetci imported them, `[runners.cache]` was ignored ("No URL
+provided").
+
+### Real-sized jobs
+
+The playground's `heavy` workflow (GitHub) and `HEAVY=1` pipeline (GitLab),
+on restored VMs, with more 4vcpu-6gb jobs than the class allows at once (2).
+
+| Job | GitHub |
+| --- | --- |
+| valkey 8.1.9: build, list/hash/expire test suites | 1 min 35 s |
+| prometheus v3.5.5: `go build ./cmd/prometheus` | 1 min 59 s |
+| caddy v2.10.2: multi-stage `docker buildx` build, run, curl | 1 min 23 s |
+| postgres 17 service, `pgbench -s 50`, 8 clients for 30 s | 53 s |
+| 4 GB held in memory, 8 GB written and checked, 20 containers | 1 min 0 s |
+| cobra's tests, 1vcpu-2gb | 1 min 19 s |
+
+The GitLab pipeline passed the same jobs except the Docker build, which an
+unprivileged GitLab job can't run.
+
 ## Job usage verdicts
 
 fleetci's job usage measurement ([job-usage.md](job-usage.md)) on a 2 vCPU /
@@ -721,7 +706,136 @@ fleetci's job usage measurement ([job-usage.md](job-usage.md)) on a 2 vCPU /
 mostly idle, right-sized and disk-bound. Each was judged as expected. The
 table is in [job-usage.md](job-usage.md#checked-on-a-real-vm).
 
-## Disks: qcow2, raw, reflink clones
+## Tried, not kept
+
+Kept for the record; none of these is in fleetci today.
+
+### On a fleet of machines
+
+A controller and two workers in the cachelab container, each worker with
+6 CPUs, 7 GB and a 10 GB cache budget, and a class of 4 CPUs and 6 GB with
+`cache_disk`: one VM per worker. GitLab, the express repo of the language
+matrix, `FLEETCI_CACHE_KEY=matrix-node`:
+
+| Job | Worker | Why | Install | Total |
+| --- | --- | --- | --- | --- |
+| First, w1 drained | w2 | the only one Ready | 9.1 s | 12.8 s |
+| Next commit, both Ready | w2 | holds `matrix-node` | 2.4 s | 5.9 s |
+
+Without the cache, the second job would have gone to w1, which comes first
+when both are empty. GitHub, `cache.yml` on WireZone/fleetci-playground:
+its two jobs ran one on each worker, each writing `main` on its own worker.
+On the next run, `docker pull node:24-alpine` took 1.35 s instead of 7.1 s
+on the worker whose copy had it; `postgres:17-alpine`, pulled on the other
+worker, took 6.5 s again: workers didn't copy caches to each other yet.
+
+Copying between workers, the same fleet and `cache.yml`. Both workers are
+in one container, so their link is the host's memory: what it shows is
+what a copy costs on the wire, and the time without a network in the way.
+
+| Copy | Layers | On the wire | Took |
+| --- | --- | --- | --- |
+| w1's `main` to w2, which had another copy | 666 MB | 395 MB | 0.97 s |
+| w2's newer one back to w1 | 665 MB | 395 MB | 0.88 s |
+| The next two jobs' new layers, each | 2.4–3.9 MB | 0.1 MB | 16–25 ms |
+| The whole chain to an empty w2, uncompressed (twice) | 677 MB | 677 MB | 0.70 s |
+| The same, S2 on two cores (twice) | 677 MB | 396 MB | 0.89 s |
+
+With w1 drained, both jobs ran on w2 from the copied chain, and pulled
+their images in 1.1 s each, as on w1. At 1 Gbit, the whole chain would
+take about 5.8 s uncompressed and 3.4 s with S2; at 10 Gbit about the
+same either way, as S2 on two cores keeps up with about 760 MB/s.
+`qemu-img check` found the copied chain whole, its backing files at the
+receiving worker's paths.
+
+### A store of files, not archives
+
+A prototype, since removed: it didn't make jobs faster (see GitLab's
+caches above), and fleetci keeps caches as the forges' own archives.
+`internal/filestore` kept each save in the bucket by its files, as
+restic's repository does: new files and the listings of changed folders,
+one zstd frame each, packed into objects of about 16 MB, an index object
+per save saying where each frame is, and a small snapshot object naming
+the root folder's listing. A restore fetches ranges of packs in parallel,
+through signed links only; one on a node that holds an older folder copies
+the files it already has from there. For a stock actions/cache client the
+store streams one tar.zst, its files' frames copied from the packs as
+stored and only the tar headers framed anew (as zstd:chunked frames
+headers and contents apart).
+
+A replay tool, since removed, replayed the 72 entries of the folders-on-the-disk run above
+(`vm-trees-1`), in the order they were saved, against keeping whole
+archives: each entry unpacked, packed again with `tar` and `zstd -T0` and
+uploaded whole, saved into the store knowing the last save, restored from
+the store into an empty folder, next to the last entry's folder, and
+streamed into `tar -x --use-compress-program unzstd`. Every restore was
+checked file by file against the folder. The bucket is the lab's, on the
+same host, so a request costs little; on S3 each costs tens of ms, and a
+restore makes about 50 to 160 of them, in parallel.
+
+| | web: archives | web: store | go: archives | go: store |
+|---|---|---|---|---|
+| uploaded, 36 saves | 11.1 GB | 476 MB (4%), 119 objects | 18.7 GB | 1.13 GB (6%), 159 objects |
+| save p50 | 1.6 s | 0.4 s | 2.4 s | 0.5 s |
+| restore into an empty folder p50 | 3.4 s | 1.2 s | 4.0 s | 1.4 s |
+| restore next to the last folder p50 | | 0.6 s | | 1.2 s |
+| a stock client, from the stream, p50 | | 2.2 s | | 2.7 s |
+
+Go's largest entries (3.4 GB as a folder, 914 MB as saved) take 6.5 s
+to restore as an archive and 4.2 s to save; from the store 2.3 s, its
+save 0.5 s and 2 to 10 MB. A first save is slower than an archive (Go's
+3.3 GB one 5.9 s against 3.9 s), as it reads and hashes every file. The
+Go entries alternate between two folders, one of 1.7 GB and one of
+3.3 GB, from different branches of the train; replayed in the order saved,
+a save often starts from the other one's snapshot, so it hashes more and a
+restore next to the last folder fetches about 400 MB that a job,
+restoring its own branch's, would not.
+
+### Deduplication and compression
+
+How much a worker's cache disks would shrink on a filesystem that
+deduplicates or compresses, from the ten languages' layers (38 GB, all
+six layers of each), with
+[dedup.py](https://github.com/nesty92/fleetci/tree/ee0956a/hack/cachelab/dedup.py) (since removed):
+
+| Dedup block | Left | Saved | Of it, across projects |
+| --- | --- | --- | --- |
+| 4 KiB (btrfs with bees or duperemove) | 22.1 GB | 42% | 46% |
+| 64 KiB | 31.3 GB | 18% | 65% |
+| 128 KiB (ZFS's default record) | 34.3 GB | 11% | 67% |
+
+Compression (zlib level 1, a lower bound for zstd) takes 56% off what
+deduplication leaves. Half of what 4 KiB deduplication saves is between
+different projects: base images and packages they share. A worker with more
+projects on similar stacks would save more. The other half repeats within
+one project's chain of layers.
+
+Compression saves more than deduplication, and costs less: btrfs's
+`compress=zstd` needs no daemon and no memory for a block table. With both
+the 38 GB would be about 10 GB. ZFS deduplication finds little at its
+record size and keeps its table in memory. fleetci needs no change for
+either; `vm_cache_directory` goes on such a filesystem. Not measured yet:
+how jobs run with their layers on btrfs, where copy-on-write fragments
+files that VMs write to.
+
+### Downloading actions
+
+A GitHub runner downloads every action a job uses in "Set up job", before
+the first step; on a fresh VM nothing is kept from the job before. From
+the logs of 110 jobs on the lab (November 2026, the playground's `go` and
+`web` jobs, each using `actions/checkout@v4` and `actions/cache@v4`):
+
+| job | resolving (GitHub's API) p50 | downloading p50 | p90 | max | per action | share of the job |
+|---|---|---|---|---|---|---|
+| go  | 0.51 s | 1.20 s | 1.59 s | 2.79 s | 0.60 s | 0.7% |
+| web | 0.51 s | 1.27 s | 2.61 s | 3.28 s | 0.64 s | 1.2% |
+
+The runner can take the archives from a folder instead
+(`ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE`, `<owner>_<repo>/<sha>.tar.gz`); it
+still asks GitHub to resolve each action, so a disk would save the
+download, about 0.6 s per action, not the 0.5 s of resolving.
+
+### Disks: qcow2, raw, reflink clones
 
 Same VM. fio direct I/O in the guest, and an untar of 60,823 files:
 
@@ -771,73 +885,3 @@ the host's page cache, but takes 0.7–1.6 s and the cache's whole size again
 per job. So the cache disk stays qcow2 layers, which need nothing of the
 host's filesystem. XFS on a real partition was not measured: this host has
 none.
-
-## Checkout
-
-What keeping the checkout on the cache disk saves. On the host, no VM: the
-same git commands as actions/checkout (init, `fetch --no-tags --prune` of
-the commit to `refs/remotes/origin/<branch>`, `checkout --force -B`).
-Cold is an empty folder; warm is the folder at a commit a day or a week
-older, with junk left in it, cleaned (`clean -ffdx`, `reset --hard`) and
-fetched to the new commit. GitHub over a 400 Mbit/s link; the fetches are
-bound by GitHub's side, not the link. Seconds, two rounds where both are
-given.
-
-| Repository | Depth | .git | Tree | Cold | Warm, a day | Warm, a week |
-| --- | --- | --- | --- | --- | --- | --- |
-| nesty92/fleetci | 1 | 1 MB | 3 MB | 1.8–2.2 | 1.7–2.1 | 1.8–2.1 |
-| vercel/next.js | 1 | 54 MB | 340 MB | 7.6–8.0 | 2.0–2.3 | 3.0–4.1 |
-| kubernetes/kubernetes | 1 | 52 MB | 378 MB | 11–14 | 2–3 | 6 |
-| torvalds/linux | 1 | 300 MB | 1.8 GB | 29.5–33.5 | 2.3–3.3 | 7.9–9.6 |
-| chromium/chromium | 1 | 1.5 GB | 5.8 GB | 149–155 | 13.6 | 43.3 |
-| nesty92/fleetci | full | 2 MB | 3 MB | 2.0 | | 2.3 |
-| kubernetes/kubernetes | full | 1.3 GB | 378 MB | 114.5 | | 5.5 |
-| vercel/next.js | full | 2.4 GB | 340 MB | 195.2 | | 4.2 |
-| chromium/chromium | full | ~65 GB | 5.8 GB | failed | | |
-
-A repository whose clone takes a few seconds gains nothing; one that takes
-tens of seconds or more gets most of it back. A week's commits cost more
-than a day's at depth 1: each fetch of a shallow clone sends whole trees
-for the commits it hasn't got. With full history the warm fetch sends only
-the new objects, and saves the most: 21 to 46 times faster. Chromium's
-full history did not clone at all: GitHub ended the 65 GB fetch partway
-(`early EOF`), so such a project can only run from a kept checkout.
-
-### The checkout cache in real jobs
-
-The cachelab, one 8 vCPU / 8 GB VM with a cache disk, `checkout = true`
-on both playgrounds. GitHub: actions/checkout of kubernetes at depth 1, a
-job on the VM and one in a job container (`buildpack-deps:noble-scm`), on a
-branch, each job its own disk. GitLab: the playground with
-`GIT_STRATEGY: fetch`, GitLab's default. The checkout step's seconds, as
-GitHub reports them.
-
-| Job | First run | Next runs |
-| --- | --- | --- |
-| GitHub, on the VM | 13 (cloned) | 2, 2 (the last job's there, fetched in 0.9 s) |
-| GitHub, in a container | 13 (cloned) | 3 |
-| GitLab | Initialized empty Git repository | Reinitialized existing Git repository |
-
-The workspace was the disk's in every job (`/dev/vdc[/checkout/...]` on
-GitHub, `/builds` on GitLab), and a job's container saw it at `/__w`. What
-the next job found had no credentials: no `extraheader`, no token in a URL.
-On GitLab, gitlab-runner's `clean_git_config`, on by default, already
-empties the repository's config after each job, so it adds the remote again
-("Created fresh repository"), but keeps the objects and the working copy.
-
-Chromium the same way, on one 8 vCPU / 10 GB VM, each job's cache disk
-100 GB. The second run came five minutes after the first. The checkout
-step's time, as GitHub reports it:
-
-| Chromium | First run | Second run |
-| --- | --- | --- |
-| Depth 1 | 2 min 15 s (about 3.4 GB) | 11 s |
-| Full history | 67 min 14 s | 25 s |
-
-The full history was one fetch of about 67 GB, at a steady 30 MB/s, after
-three and a half quiet minutes while GitHub made the pack, and then about
-twenty minutes of resolving deltas. The connection held throughout, so the
-early EOF on the host above was not GitHub's doing. The kept checkout took
-80 GB of the cache disk: a project like this needs a disk bigger than the
-100 GB default.
-
