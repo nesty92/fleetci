@@ -187,28 +187,34 @@ a VM without zstd misses what a VM with it saved.
 
 ### A shell into a failed job
 
-With `[github.shell]`, a job re-run with debug logging (*Re-run jobs* →
-*Enable debug logging*) ends its log with an address. If the job failed,
-its VM is kept for a while, and whoever started that re-run can get in with
-the SSH keys on their GitHub account:
+A failed job's VM can be kept for a while, for whoever ran the job to get
+in with the SSH keys on their GitHub or GitLab account. The job's log ends
+with an address:
 
 ```
 fleetci ssh <address>       # or: tailcat ssh <address>
 ```
 
+On GitHub, the job asks by being re-run with debug logging (*Re-run jobs*
+→ *Enable debug logging*), and only someone with write access to the repo
+is let in. On GitLab, the job sets `FLEETCI_SSH: "1"` in its `variables`,
+and whoever ran its pipeline is let in. The runner offers it only with:
+
 ```toml
-[github.shell]
+[github.shell]      # or [gitlab.shell]
 hold = "10m"        # how long a failed job's VM is kept; it counts against max_instances
 # derp_map_url      # tailcat's relays; default tailcat.dev's
 ```
 
-Only someone with write access to the repo is let in, and never into a job
-of a pull request from a fork. The address works from anywhere, behind NAT
-on both ends, through [tailcat](https://github.com/tailscale/tailcat): no
-port to open, nothing to set up on the VM. Its free relays are rate
-limited, without an SLA; `derp_map_url` points at your own. The App or
-token needs nothing more. The VM's cache disk is taken off before the
-hold, so what the job left there is gone. Not on fleets of machines yet.
+Never for a pull or merge request from a fork. The address works from
+anywhere, behind NAT on both ends, through
+[tailcat](https://github.com/tailscale/tailcat): no port to open, nothing
+to set up on the VM. Its free relays are rate limited, without an SLA;
+`derp_map_url` points at your own. The App or token needs nothing more.
+Nobody gets in until the job is over and the VM's cache disk is taken off,
+so what the job left there is gone; on GitLab the job's containers are
+gone too, its images and Docker volumes are not. Not on fleets of machines
+yet, nor with the fleeting plugin.
 
 ## Install
 
