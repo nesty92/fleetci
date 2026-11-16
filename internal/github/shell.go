@@ -57,9 +57,12 @@ fi
 `
 
 // shellWaitScript waits on the VM for the hook to ask, and prints what
-// it asked.
+// it asked; it gives up after 12 hours, should its VM outlive its job.
 const shellWaitScript = `d=$HOME/.fleetci/shell
-until [ -e "$d/ask" ]; do sleep 0.5; done
+i=0
+until [ -e "$d/ask" ]; do
+  i=$((i+1)); [ $i -lt 86400 ] || exit 1; sleep 0.5
+done
 cat "$d/ask"`
 
 // shellAnswerScript gives the hook its answer, from stdin.
@@ -103,9 +106,26 @@ func (d *Dispatcher) watchShell(ctx, held context.Context, vm VM, repo string, q
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
-		hint, err := onVM(ctx, vm.Conn, shellWaitScript, "")
-		if err != nil || ctx.Err() != nil {
+		// Closing the session doesn't end the wait on the VM, so it's
+		// left behind when ctx ends: it ends with the VM.
+		type asked struct {
+			hint string
+			err  error
+		}
+		got := make(chan asked, 1)
+		go func() {
+			hint, err := onVM(ctx, vm.Conn, shellWaitScript, "")
+			got <- asked{hint, err}
+		}()
+		var hint string
+		select {
+		case <-ctx.Done():
 			return
+		case r := <-got:
+			if r.err != nil || ctx.Err() != nil {
+				return
+			}
+			hint = r.hint
 		}
 		answer := func(msg string) {
 			if _, err := onVM(ctx, vm.Conn, shellAnswerScript, msg+"\n"); err != nil {

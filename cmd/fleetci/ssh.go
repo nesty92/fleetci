@@ -22,7 +22,7 @@ import (
 func sshCmd(args []string) error {
 	fs := flag.NewFlagSet("ssh", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "Usage: fleetci ssh [flags] [user@]<tailcat address> [command [args...]]")
+		fmt.Fprintln(fs.Output(), "Usage: fleetci ssh [flags] [user@]<tailcat address> [ssh options] [command [args...]]")
 		fs.PrintDefaults()
 	}
 	derp := fs.String("derp-map-url", os.Getenv("TAILCAT_DERPMAP_URL"), "where tailcat finds its relays; empty, tailcat.dev's")
@@ -88,7 +88,8 @@ func sshCmd(args []string) error {
 		"-o", "UpdateHostKeys no",
 		"-o", "LogLevel ERROR",
 		"-o", "ProxyCommand=" + strings.Join(pc, " "),
-		"--", dest}
+		// ssh's own options may follow the destination: -L, -t, -i.
+		dest}
 	argv = append(argv, fs.Args()[1:]...)
 	return syscall.Exec(sshExe, argv, os.Environ())
 }

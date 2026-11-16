@@ -2,12 +2,17 @@ package github
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/hashicorp/go-hclog"
+	"golang.org/x/crypto/ssh"
 )
 
 // shellGitHub answers the calls the shell makes, for repo o/r: job 2 of
@@ -98,6 +103,67 @@ func TestShellFor(t *testing.T) {
 	d := shellGitHub(t, "o/r", map[string]string{"actor": "write"}, keys, "failure")
 	if _, _, _, _, err := d.shellFor(ctx, "o/r", 1, "runner-a", "evil/r 70 2"); err == nil {
 		t.Fatal("a shell for a run fleetci doesn't serve")
+	}
+}
+
+// stuckVM is a VM whose commands never end, even when their session
+// closes, as a loop under sshd: the wait for a hook that never asks.
+func stuckVM(t *testing.T) string {
+	t.Helper()
+	_, key, _ := ed25519.GenerateKey(nil)
+	signer, _ := ssh.NewSignerFromKey(key)
+	cfg := &ssh.ServerConfig{NoClientAuth: true,
+		PublicKeyCallback: func(ssh.ConnMetadata, ssh.PublicKey) (*ssh.Permissions, error) { return nil, nil }}
+	cfg.AddHostKey(signer)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				_, chans, reqs, err := ssh.NewServerConn(c, cfg)
+				if err != nil {
+					return
+				}
+				go ssh.DiscardRequests(reqs)
+				for nc := range chans {
+					_, creqs, err := nc.Accept()
+					if err != nil {
+						continue
+					}
+					go func() {
+						for r := range creqs {
+							_ = r.Reply(r.Type == "exec", nil)
+						}
+					}()
+				}
+			}()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// TestWatchShellEndsWithItsJob: a job whose hook never asks for a shell
+// lets its VM go when the job ends.
+func TestWatchShellEndsWithItsJob(t *testing.T) {
+	d := shellGitHub(t, "o/r", nil, nil, "failure")
+	conn := vmConn(t, stuckVM(t))
+	ctx, cancel := context.WithCancel(context.Background())
+	a := d.watchShell(ctx, context.Background(), vmFor(conn), "o/r", 1, "runner-a", hclog.NewNullLogger())
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+	done := make(chan struct{})
+	go func() { a.close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the shell's watch outlived its job")
 	}
 }
 
