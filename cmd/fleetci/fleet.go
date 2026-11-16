@@ -97,7 +97,7 @@ func controllerCmd(args []string) error {
 		go held.FailAfter(ctx, gitlab.ResumeWithin)
 	}
 	// What each job uses of its VM, judged against its class.
-	rec := jobusage.NewRecorder(filepath.Join(cfg.Controller.StateDir, "usage.jsonl"), log.Named("usage"))
+	rec := jobusage.NewRecorder(filepath.Join(cfg.Controller.StateDir, "usage.db"), log.Named("usage"))
 	jobusage.SetDefault(rec)
 	c.RegisterMetrics(rec.Metrics())
 	exiting := func() bool { return ctx.Err() != nil }

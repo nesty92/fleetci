@@ -59,10 +59,10 @@ type Config struct {
 	// so a restart of fleetci keeps the GitHub jobs running on the VMs of
 	// classes not on this host, and follows them to their end.
 	StateDir string `json:"state_dir" toml:"state_dir"`
-	// UsageFile keeps what each job used of its VM, a line of JSON per
-	// job, so a job that outgrows its class shows across restarts (see
-	// "fleetci usage"). Default: usage.jsonl in state_dir; without
-	// state_dir, jobs are measured and logged, and kept only in memory.
+	// UsageFile is the SQLite database that keeps what each job used of
+	// its VM, so a job that outgrows its class shows across restarts (see
+	// "fleetci usage"). Default: usage.db in state_dir; without state_dir,
+	// jobs are measured and logged, and kept only in memory.
 	UsageFile string `json:"usage_file" toml:"usage_file"`
 	// MetricsListen is an address to serve Prometheus metrics on, plain
 	// HTTP at /metrics, e.g. "127.0.0.1:9483": what jobs used of their
@@ -321,11 +321,11 @@ func (g *InstanceGroup) Shutdown(ctx context.Context) error {
 }
 
 // UsageRecorder measures the jobs' use of their VMs and keeps it in
-// usage_file, or state_dir's usage.jsonl.
+// usage_file, or state_dir's usage.db.
 func (c *Config) UsageRecorder(log hclog.Logger) *usage.Recorder {
 	file := c.UsageFile
 	if file == "" && c.StateDir != "" {
-		file = filepath.Join(c.StateDir, "usage.jsonl")
+		file = filepath.Join(c.StateDir, "usage.db")
 	}
 	return usage.NewRecorder(file, log)
 }

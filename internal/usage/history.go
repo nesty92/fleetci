@@ -1,12 +1,8 @@
 package usage
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"slices"
 	"sync"
 	"time"
@@ -29,13 +25,14 @@ type Run struct {
 }
 
 // keepRuns is how many runs of each job the recorder keeps in memory for
-// trends; the file keeps all of them.
+// trends; the database keeps keepStored.
 const keepRuns = 50
 
-// Recorder measures jobs and keeps their runs: in memory, and in a file
-// when it has one, appended a line of JSON per run.
+// Recorder measures jobs and keeps their runs: in memory, and in a SQLite
+// database when it has one.
 type Recorder struct {
 	file string
+	db   *store // nil: memory only
 	log  hclog.Logger
 
 	mu   sync.Mutex
@@ -44,15 +41,22 @@ type Recorder struct {
 	metrics *metrics
 }
 
-// NewRecorder keeps runs in file ("" for memory only), reading the runs
-// already in it for trends.
+// NewRecorder keeps runs in the SQLite database at file ("" for memory
+// only), reading the runs already in it for trends. A database it can't
+// open leaves it measuring in memory only, with a warning.
 func NewRecorder(file string, log hclog.Logger) *Recorder {
 	r := &Recorder{file: file, log: log, runs: map[string][]Run{}, metrics: newMetrics()}
 	if file == "" {
 		return r
 	}
-	runs, err := ReadFile(file)
-	if err != nil && !os.IsNotExist(err) {
+	db, err := openStore(file)
+	if err != nil {
+		log.Warn("job usage is kept in memory only", "file", file, "err", err)
+		return r
+	}
+	r.db = db
+	runs, err := db.last(keepRuns)
+	if err != nil {
 		log.Warn("reading earlier job usage", "file", file, "err", err)
 	}
 	for _, run := range runs {
@@ -61,23 +65,12 @@ func NewRecorder(file string, log hclog.Logger) *Recorder {
 	return r
 }
 
-// ReadFile reads a recorder's file; lines that don't parse are skipped.
-func ReadFile(file string) ([]Run, error) {
-	f, err := os.Open(file)
-	if err != nil {
-		return nil, err
+// Close closes the recorder's database.
+func (r *Recorder) Close() error {
+	if r == nil || r.db == nil {
+		return nil
 	}
-	defer f.Close()
-	var out []Run
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 64*1024), 1024*1024)
-	for sc.Scan() {
-		var run Run
-		if json.Unmarshal(sc.Bytes(), &run) == nil && run.Job != "" {
-			out = append(out, run)
-		}
-	}
-	return out, sc.Err()
+	return r.db.close()
 }
 
 func key(forge, job string) string { return forge + " " + job }
@@ -153,23 +146,10 @@ func (r *Recorder) Record(run Run) Run {
 }
 
 func (r *Recorder) append(run Run) {
-	if r.file == "" {
+	if r.db == nil {
 		return
 	}
-	b, _ := json.Marshal(run)
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if err := os.MkdirAll(filepath.Dir(r.file), 0o755); err != nil {
-		r.log.Warn("keeping job usage", "file", r.file, "err", err)
-		return
-	}
-	f, err := os.OpenFile(r.file, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		r.log.Warn("keeping job usage", "file", r.file, "err", err)
-		return
-	}
-	defer f.Close()
-	if _, err := f.Write(append(b, '\n')); err != nil {
+	if err := r.db.add(run); err != nil {
 		r.log.Warn("keeping job usage", "file", r.file, "err", err)
 	}
 }

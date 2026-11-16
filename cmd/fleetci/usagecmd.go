@@ -12,13 +12,13 @@ import (
 	jobusage "github.com/nesty92/fleetci/internal/usage"
 )
 
-// usageCmd prints what each job used of its VM, from the recorder's file:
+// usageCmd prints what each job used of its VM, from the recorder's database:
 // the jobs whose class is too small first, then those outgrowing theirs,
 // then those whose class is too big.
 func usageCmd(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("usage", flag.ExitOnError)
 	path := configFlag(fs)
-	file := fs.String("file", "", "the usage file; default fleetci.toml's usage_file, or usage.jsonl in its state_dir, or "+defaultUsageFile)
+	file := fs.String("file", "", "the usage database; default fleetci.toml's usage_file, or usage.db in its state_dir, or "+defaultUsageFile)
 	job := fs.String("job", "", "only the jobs whose name holds this")
 	runs := fs.Bool("runs", false, "every run of the jobs, not a line per job")
 	_ = fs.Parse(args)
@@ -29,7 +29,7 @@ func usageCmd(args []string, out io.Writer) error {
 			if c.UsageFile != "" {
 				*file = c.UsageFile
 			} else if c.StateDir != "" {
-				*file = filepath.Join(c.StateDir, "usage.jsonl")
+				*file = filepath.Join(c.StateDir, "usage.db")
 			}
 		}
 	}
@@ -68,7 +68,7 @@ func usageCmd(args []string, out io.Writer) error {
 	return nil
 }
 
-const defaultUsageFile = "/var/lib/fleetci/usage.jsonl"
+const defaultUsageFile = "/var/lib/fleetci/usage.db"
 
 func advice(r jobusage.Run) string {
 	s := r.Verdict.Advice()

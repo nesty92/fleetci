@@ -148,13 +148,15 @@ func TestTrend(t *testing.T) {
 }
 
 func TestRecorderFile(t *testing.T) {
-	file := filepath.Join(t.TempDir(), "usage.jsonl")
+	file := filepath.Join(t.TempDir(), "usage.db")
 	rec := NewRecorder(file, hclog.NewNullLogger())
 	for range 3 {
 		rec.Record(Run{Forge: "gitlab", Job: "g/p build", Report: Report{Seconds: 100, CPUs: 2, MemoryMB: 4096, MemPeakMB: 2000, CPUPeak: 2}})
 	}
+	rec.Close()
 	// A new process reads the runs back, and the trend goes on.
 	rec = NewRecorder(file, hclog.NewNullLogger())
+	defer rec.Close()
 	if n := len(rec.Runs("gitlab", "g/p build")); n != 3 {
 		t.Fatalf("read back %d runs, want 3", n)
 	}
