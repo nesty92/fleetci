@@ -145,9 +145,22 @@ func (w *reclaimWatch) poll(ctx context.Context, id string, t tunnel, seen *bool
 	defer transport.CloseIdleConnections()
 	m := &imds{client: &http.Client{Transport: transport, Timeout: w.timeout}, base: w.base}
 
+	// A read in flight ends with the tunnel: a channel being opened as
+	// the connection drops may never hear of it, and would wait out
+	// w.timeout before the watch connects again.
+	reads, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		select {
+		case <-t.lost:
+			cancel()
+		case <-reads.Done():
+		}
+	}()
+
 	failures := 0
 	for {
-		action, rebalance, err := m.notices(ctx)
+		action, rebalance, err := m.notices(reads)
 		var refused *ssh.OpenChannelError
 		switch {
 		case err == nil:
