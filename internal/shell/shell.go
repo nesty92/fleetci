@@ -24,11 +24,15 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/hashicorp/go-hclog"
 	"github.com/tailscale/tailcat"
 	"golang.org/x/crypto/ssh"
 )
+
+// handshakeTimeout is how long a client has to get in.
+var handshakeTimeout = 30 * time.Second
 
 // Options are what Start serves.
 type Options struct {
@@ -176,7 +180,11 @@ func (s *Server) Close() error {
 // Forwards from the VM back to the client (ssh -R) are refused.
 func Proxy(ctx context.Context, c net.Conn, cfg *ssh.ServerConfig, vm func(context.Context) (*ssh.Client, error), log hclog.Logger) {
 	defer c.Close()
+	// A client that doesn't get in within handshakeTimeout is let go, so
+	// nobody holds connections open without a key.
+	_ = c.SetDeadline(time.Now().Add(handshakeTimeout))
 	sc, chans, reqs, err := ssh.NewServerConn(c, cfg)
+	_ = c.SetDeadline(time.Time{})
 	if err != nil {
 		log.Info("shell: refused a connection", "err", err)
 		return

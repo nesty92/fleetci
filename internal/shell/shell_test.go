@@ -230,6 +230,28 @@ func TestProxyRefusesOtherKeys(t *testing.T) {
 	}
 }
 
+// TestProxyLetsSilentClientsGo: a client that never gets in is let go.
+func TestProxyLetsSilentClientsGo(t *testing.T) {
+	handshakeTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { handshakeTimeout = 30 * time.Second })
+	cfg, err := ServerConfig([]ssh.PublicKey{newSigner(t).PublicKey()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, server := connPair(t)
+	done := make(chan struct{})
+	go func() {
+		Proxy(context.Background(), server, cfg, nil, hclog.NewNullLogger())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a silent client held its connection")
+	}
+	_ = client
+}
+
 func TestParseKeys(t *testing.T) {
 	k := string(ssh.MarshalAuthorizedKey(newSigner(t).PublicKey()))
 	keys, err := ParseKeys("# a comment\n\n" + k + k)
