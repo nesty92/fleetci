@@ -56,7 +56,7 @@ func TestRunScriptPicksTheRunner(t *testing.T) {
 			_ = os.WriteFile(filepath.Join(bin, "dnf"), []byte("#!/bin/sh\n"), 0o755)
 			_ = os.WriteFile(filepath.Join(bin, "sudo"), []byte("#!/bin/sh\nexec \"$@\"\n"), 0o755)
 
-			cmd := exec.Command("sh", "-c", vmScript(tc.asked, CacheStore{}))
+			cmd := exec.Command("sh", "-c", vmScript(tc.asked, CacheStore{}, false))
 			cmd.Env = []string{"HOME=" + home, "PATH=" + bin + ":" + os.Getenv("PATH")}
 			cmd.Stdin = strings.NewReader("the-jit\n")
 			out, err := cmd.CombinedOutput()
@@ -225,7 +225,7 @@ func TestRunScriptLendsZstd(t *testing.T) {
 			}
 			path = bin
 		}
-		cmd := exec.Command("sh", "-c", vmScript("", CacheStore{}))
+		cmd := exec.Command("sh", "-c", vmScript("", CacheStore{}, false))
 		cmd.Env = []string{"HOME=" + home, "PATH=" + path}
 		cmd.Stdin = strings.NewReader("the-jit\n")
 		out, err := cmd.CombinedOutput()
@@ -292,7 +292,7 @@ func TestRunScriptStartsTheActionsCache(t *testing.T) {
 		args := filepath.Join(home, "cache-args")
 		_ = os.MkdirAll(filepath.Join(home, ".fleetci"), 0o755)
 		_ = os.WriteFile(filepath.Join(home, actionsCachePath), []byte("#!/bin/sh\necho \"$*\" > "+args+"\n"), 0o755)
-		cmd := exec.Command("sh", "-c", vmScript("", bucket))
+		cmd := exec.Command("sh", "-c", vmScript("", bucket, false))
 		cmd.Env = []string{"HOME=" + home, "PATH=" + bin + ":/usr/bin:/bin"}
 		cmd.Stdin = strings.NewReader("the-jit\n" + c.hook + "\n")
 		if out, err := cmd.CombinedOutput(); err != nil {

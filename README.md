@@ -185,6 +185,31 @@ fleetci lends the VM's zstd to job containers (`container:`), so a job in
 a VM without zstd misses what a VM with it saved.
 `hack/cache/up.sh` runs the server on RustFS for [hack/local](hack/local).
 
+### A shell into a failed job
+
+With `[github.shell]`, a job re-run with debug logging (*Re-run jobs* →
+*Enable debug logging*) ends its log with an address. If the job failed,
+its VM is kept for a while, and whoever started that re-run can get in with
+the SSH keys on their GitHub account:
+
+```
+fleetci ssh <address>       # or: tailcat ssh <address>
+```
+
+```toml
+[github.shell]
+hold = "10m"        # how long a failed job's VM is kept; it counts against max_instances
+# derp_map_url      # tailcat's relays; default tailcat.dev's
+```
+
+Only someone with write access to the repo is let in, and never into a job
+of a pull request from a fork. The address works from anywhere, behind NAT
+on both ends, through [tailcat](https://github.com/tailscale/tailcat): no
+port to open, nothing to set up on the VM. Its free relays are rate
+limited, without an SLA; `derp_map_url` points at your own. The App or
+token needs nothing more. The VM's cache disk is taken off before the
+hold, so what the job left there is gone. Not on fleets of machines yet.
+
 ## Install
 
 On AWS, [terraform-aws-gitlab-runner-autoscaler](https://github.com/nesty92/terraform-aws-gitlab-runner-autoscaler)

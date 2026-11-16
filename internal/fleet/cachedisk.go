@@ -228,6 +228,14 @@ func (b *Backend) HasCache(id string) bool {
 	return ok && p.cache != nil
 }
 
+// DetachCache takes the cache disk back from a VM before it goes, as
+// Delete does: a VM kept after its job, for a shell, goes on without it,
+// so nothing done there reaches the cache.
+func (b *Backend) DetachCache(_ context.Context, id string) error {
+	b.detachCache(id)
+	return nil
+}
+
 // detachCache takes the cache disk back from a VM whose job is over. The
 // layer is kept only when the guest unmounted it cleanly and the plugin
 // took it out; otherwise it is thrown away and the cache stays as it was.

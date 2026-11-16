@@ -995,7 +995,9 @@ func (w *Worker) runGitHub(ctx context.Context, cancel context.CancelFunc, t *ta
 	if err != nil {
 		return err
 	}
-	start := github.SSHStart(req.RunnerVersion, cs, log)
+	// No shell on a node yet: the leader, which may let someone in, has
+	// no connection to its VMs.
+	start := github.SSHStart(req.RunnerVersion, cs, false, log)
 	var hook sync.WaitGroup
 	defer hook.Wait()
 	if req.Cache {

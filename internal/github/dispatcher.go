@@ -111,6 +111,9 @@ type Config struct {
 	// checks them with. Default https://token.actions.githubusercontent.com;
 	// GitHub Enterprise Server's is https://HOST/_services/token.
 	CacheTokenIssuer string `json:"cache_token_issuer" toml:"cache_token_issuer"`
+	// Shell, when set, lets whoever re-runs a job with debug logging into
+	// its VM over SSH if it fails (see ShellConfig).
+	Shell *ShellConfig `json:"shell,omitempty" toml:"shell,omitempty"`
 
 	// NameByJob, set by fleetci's controller and never by fleetci.toml,
 	// names each runner after the job it is started for and the try,
@@ -324,7 +327,7 @@ func New(ctx context.Context, cfg Config, capacity source.Capacity, start StartF
 	}
 	cfg.CacheURL = cs.URL
 	if start == nil {
-		start = SSHStart(cfg.RunnerVersion, cs, log)
+		start = SSHStart(cfg.RunnerVersion, cs, cfg.Shell != nil, log)
 	}
 	d := &Dispatcher{
 		cfg:          cfg,
@@ -1027,10 +1030,17 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 		}
 	}
 	var took atomic.Pointer[string]
+	// The job's shell, if its hook asks for one: its server outlives the
+	// runner, until the VM goes.
+	var ask atomic.Pointer[shellAsk]
+	defer func() { ask.Load().close() }()
 	err = d.start(rctx, vm, jit, func(job string) {
 		first := took.Load() == nil
 		took.Store(&job)
 		log.Info("runner took a job", "job", job)
+		if d.cfg.Shell != nil && first && conn != nil {
+			ask.Store(d.watchShell(rctx, ctx, vm, repo, j.ID, reg.name, log.With("job", job)))
+		}
 		if vm.Cache && first {
 			attaching.Add(1)
 			go func() {
@@ -1065,6 +1075,10 @@ func (d *Dispatcher) serve(ctx context.Context, repo string, j job, class string
 	default:
 		d.done(j.ID)
 		log.Info("runner done", "took", time.Since(start).Round(time.Second).String())
+		// A failed job whose run asked for a shell keeps its VM a while.
+		cancel()
+		attaching.Wait()
+		d.holdForShell(ctx, ask.Load(), vm, log)
 	}
 }
 

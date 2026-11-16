@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -184,6 +185,21 @@ func (c *capacity) AttachCache(ctx context.Context, id string, scope cachedisk.S
 		return nil, fmt.Errorf("no vm %q", id)
 	}
 	return cb.AttachCache(ctx, vm, scope)
+}
+
+// DetachCache takes the VM's cache disk back, before the VM goes.
+func (c *capacity) DetachCache(ctx context.Context, id string) error {
+	fb, ok := c.b.(fleetBackend)
+	if !ok {
+		return errors.New("no cache disks")
+	}
+	cd, ok := fb.Backend.(interface {
+		DetachCache(ctx context.Context, vm string) error
+	})
+	if !ok {
+		return errors.New("no cache disks")
+	}
+	return cd.DetachCache(ctx, id)
 }
 
 func (c *capacity) HandOver(_ context.Context, id string) bool {
