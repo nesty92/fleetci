@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.1](https://github.com/nesty92/fleetci/compare/v0.9.0...v0.9.1) (2026-11-16)
+
+
+### Bug Fixes
+
+* parallel restores of one cache entry, and a reclaim watch stuck on a dropped connection ([#48](https://github.com/nesty92/fleetci/issues/48)) ([64c05da](https://github.com/nesty92/fleetci/commit/64c05da4555af43eda5411616d13e2e9294f9b44))
+
 ## [0.9.0](https://github.com/nesty92/fleetci/compare/v0.8.0...v0.9.0) (2026-11-16)
 
 
