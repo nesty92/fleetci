@@ -278,11 +278,16 @@ func (s *Server) writeMeta(eid string, m meta) error {
 	if err != nil {
 		return err
 	}
-	tmp := s.metaPath(eid) + ".tmp"
+	// A name of its own: jobs restoring one entry at once each write it.
+	tmp := s.metaPath(eid) + "." + randHex(4) + ".tmp"
 	if err := os.WriteFile(tmp, b, 0o644); err != nil {
 		return err
 	}
-	return os.Rename(tmp, s.metaPath(eid))
+	if err := os.Rename(tmp, s.metaPath(eid)); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // srcOf is the cache server's entry a URL names, without its signature.
@@ -312,13 +317,18 @@ func (s *Server) commit(tmp, key, version, src, scope string) error {
 	}
 	m := meta{Key: key, Version: version, Size: st.Size(), Saved: float64(time.Now().UnixNano()) / 1e9, Src: src, Scope: scope}
 	b, _ := json.Marshal(m)
-	if err := os.WriteFile(s.metaPath(eid)+".tmp", b, 0o644); err != nil {
+	// Jobs restoring one entry at once each commit it: each with a
+	// metadata file of its own until the rename.
+	metaTmp := s.metaPath(eid) + "." + randHex(4) + ".tmp"
+	if err := os.WriteFile(metaTmp, b, 0o644); err != nil {
 		return err
 	}
 	if err := os.Rename(tmp, s.blobPath(eid)); err != nil {
+		_ = os.Remove(metaTmp)
 		return err
 	}
-	if err := os.Rename(s.metaPath(eid)+".tmp", s.metaPath(eid)); err != nil {
+	if err := os.Rename(metaTmp, s.metaPath(eid)); err != nil {
+		_ = os.Remove(metaTmp)
 		return err
 	}
 	s.logf("kept %s %d bytes", key, st.Size())
@@ -1066,6 +1076,10 @@ func (s *Server) fill(w *writer, r *http.Request, token string) error {
 		_ = os.Remove(tmp)
 	}
 	start := time.Now()
+	// The link is signed, as fetchRanges reads it: the job's own
+	// credentials are not the link's, and a bucket refuses them.
+	r = r.Clone(r.Context())
+	r.Header.Del("Authorization")
 	resp, err := s.upstream(r, http.MethodGet, l.url, nil, 0)
 	if err != nil {
 		return err

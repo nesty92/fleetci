@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/nesty92/fleetci/internal/actionscache"
 )
 
 // Cases falcondev's suite has no counterpart for: they come from fleetci's
@@ -134,6 +137,28 @@ func TestActionsCacheBucketRangedFirstRead(t *testing.T) {
 	key, all, url := restoreData(t, vm, tok, "layers")
 	if key != "layers" || !bytes.Equal(all, data) || !strings.Contains(url, "/fleetci/blob/") || b.gets != gets {
 		t.Fatalf("after a ranged read: %q, %d bytes, %s, %d more bucket reads", key, len(all), url, b.gets-gets)
+	}
+}
+
+// A restore the disk can't keep is still served, from the bucket, as when
+// another job's restore of the entry got there first.
+func TestActionsCacheBucketRestoreNotKept(t *testing.T) {
+	is := newTestIssuer(t, true)
+	b := newFakeBucket(t)
+	l2 := newFakeL2(t)
+	store := filepath.Join(t.TempDir(), "actions")
+	// The archive can't be moved into place.
+	if err := os.MkdirAll(filepath.Join(store, actionscache.EntryID("deps", "v1")+".blob", "x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	vm := startActionsCache(t, l2.srv.URL+"/", store, true, "remote=bucket", "node="+bucketNode(t, b, is.srv.URL))
+	tok := bareToken(is.token(t, nil))
+	data := bytes.Repeat([]byte("abcdefgh"), 1_000_000)
+	b.put(entryDir("1", "refs/heads/main", "v1")+"deps", data, time.Now())
+	_, m := call(t, vm, tok, "GetCacheEntryDownloadURL", map[string]any{"key": "deps", "version": "v1"})
+	code, got := do(t, http.MethodGet, m["signed_download_url"].(string), nil, nil)
+	if code != http.StatusOK || !bytes.Equal(got, data) {
+		t.Fatalf("a restore not kept: %d, %d bytes", code, len(got))
 	}
 }
 

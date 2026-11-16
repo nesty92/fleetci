@@ -349,6 +349,31 @@ func TestALostConnectionIsOpenedAgain(t *testing.T) {
 	eventually(t, "notice never seen on the new connection", func() bool { return w.notice("i-1") != "" })
 }
 
+// A read caught opening a channel as the connection drops may never hear
+// of it (x/crypto/ssh's mux drops only the channels it already has); the
+// lost connection ends the read, not the read's timeout.
+func TestALostConnectionEndsAHungRead(t *testing.T) {
+	var opened atomic.Int32
+	open := func(context.Context, string) (tunnel, error) {
+		opened.Add(1)
+		lost := make(chan struct{})
+		time.AfterFunc(50*time.Millisecond, func() { close(lost) })
+		return tunnel{
+			dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				<-ctx.Done()
+				return nil, ctx.Err()
+			},
+			lost:  lost,
+			close: func() {},
+		}, nil
+	}
+	w := fastWatch(open, false)
+	w.timeout = time.Minute
+	defer w.close()
+	w.start("i-1")
+	eventually(t, "never connected again", func() bool { return opened.Load() >= 2 })
+}
+
 func TestTheWatchAndTheConnectionEndWithTheVM(t *testing.T) {
 	_, addr := newFakeIMDS(t)
 	vm := newVMSSH(t, addr, 0)
