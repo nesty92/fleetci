@@ -111,6 +111,8 @@ type cacheVM struct {
 	class Class
 	inst  string
 	conn  *proxy.Conn
+	// drop throws the layer away when the VM goes (DropCache).
+	drop bool
 }
 
 // AttachCache gives the VM its scope's cache disk, mounted at /cache with
@@ -228,9 +230,22 @@ func (b *Backend) HasCache(id string) bool {
 	return ok && p.cache != nil
 }
 
+// DropCache has the VM's cache disk layer thrown away when the VM goes,
+// not kept: its job didn't succeed, and what it left on the disk may be
+// what broke it. The disk stays on the VM until then, so a shell on a
+// failed job's VM finds it as the job left it.
+func (b *Backend) DropCache(id string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if cv, ok := b.caches[id]; ok {
+		cv.drop = true
+	}
+}
+
 // detachCache takes the cache disk back from a VM whose job is over. The
-// layer is kept only when the guest unmounted it cleanly and the plugin
-// took it out; otherwise it is thrown away and the cache stays as it was.
+// layer is kept only when its job succeeded (DropCache), the guest
+// unmounted it cleanly and the plugin took it out; otherwise it is thrown
+// away and the cache stays as it was.
 func (b *Backend) detachCache(id string) {
 	b.mu.Lock()
 	cv, ok := b.caches[id]
@@ -241,6 +256,12 @@ func (b *Backend) detachCache(id string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
+	if cv.drop {
+		_ = pluginDisk(ctx, cv.class, "detach", cv.inst)
+		cv.store.Abort(cv.lease)
+		b.log.Info("cache layer dropped: the job didn't succeed", "vm", id)
+		return
+	}
 	start := time.Now()
 	if out, err := guest(ctx, cv.conn, unmountScript(cv.store.KeepUnder())); err != nil {
 		b.log.Warn("cache not unmounted; its layer is dropped", "vm", id, "err", err, "out", out)

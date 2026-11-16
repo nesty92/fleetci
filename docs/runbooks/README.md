@@ -5,6 +5,7 @@ what to watch and what to do when something breaks.
 
 | Runbook | For |
 | --- | --- |
+| [A fleet of servers](a-fleet-of-servers.md) | several servers, at one site or many, as one fleet: controllers place the jobs, workers run them, each joined with one command |
 | [Bare metal with cloud spikes](bare-metal-with-cloud-spikes.md) | your own servers (OVH, Hetzner, a rack) for the steady load, and AWS, Google Cloud or Azure for the spikes |
 | [GitLab and GitHub from one runner](gitlab-and-github.md) | both forges on the same classes, served from gitlab-runner's fleetci plugin, with no extra process |
 | [GitHub only](github-only.md) | GitHub Actions without GitLab: `fleetci serve` |

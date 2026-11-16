@@ -186,6 +186,17 @@ func (c *capacity) AttachCache(ctx context.Context, id string, scope cachedisk.S
 	return cb.AttachCache(ctx, vm, scope)
 }
 
+// DropCache has the VM's cache disk layer thrown away when the VM goes.
+func (c *capacity) DropCache(id string) {
+	fb, ok := c.b.(fleetBackend)
+	if !ok {
+		return
+	}
+	if cd, ok := fb.Backend.(CacheDropper); ok {
+		cd.DropCache(id)
+	}
+}
+
 func (c *capacity) HandOver(_ context.Context, id string) bool {
 	if !c.b.HandOver(id) {
 		return false

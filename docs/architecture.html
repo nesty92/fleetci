@@ -113,6 +113,7 @@ h1 small { display: block; font: 400 1rem/1.4 "Source Sans 3", system-ui, sans-s
     <div class="seg" role="group" aria-label="Mode">
       <button type="button" data-mode="serve" aria-pressed="true"><code>fleetci serve</code></button>
       <button type="button" data-mode="plugin" aria-pressed="false">Plugin in <code>gitlab-runner</code></button>
+      <button type="button" data-mode="fleet" aria-pressed="false">Fleet of servers</button>
     </div>
   </header>
 
@@ -232,6 +233,7 @@ h1 small { display: block; font: 400 1rem/1.4 "Source Sans 3", system-ui, sans-s
           { x: 520, y: 245, w: 220, t: "GitHub dispatcher", s: "optional [github]", c: "github", dash: 1, k: "github" },
           ...core,
           { x: 810, y: 240, w: 160, t: "watchdog", s: "fleetci watchdog", k: "watchdog" },
+          { x: 810, y: 335, w: 160, t: "cache disk", s: "per job · fleetingd", c: "core", k: "cachedisk" },
           ...bottom.nodes,
         ],
         edges: [
@@ -261,6 +263,8 @@ h1 small { display: block; font: 400 1rem/1.4 "Source Sans 3", system-ui, sans-s
           { x: 70, y: 335, w: 210, t: "Docker executor", s: "over the shared Conn", c: "gitlab", k: "executor" },
           ...core,
           { x: 810, y: 240, w: 160, t: "own classes", s: "never the plugin's", c: "accent", dash: 1, k: "isolation" },
+          { x: 810, y: 335, w: 160, t: "cache disk", s: "per job · fleetingd", c: "core", k: "cachedisk" },
+          { x: 810, y: 430, w: 160, t: "shell", s: "a failed job's VM", c: "accent", dash: 1, k: "shell" },
           ...bottom.nodes,
         ],
         edges: [
@@ -272,6 +276,39 @@ h1 small { display: block; font: 400 1rem/1.4 "Source Sans 3", system-ui, sans-s
           { p: [[280, 370], [298, 370], [298, 457], [325, 457]], c: "core", dash: true, l: "job", lp: [292, 415], rot: -90, la: "middle" },
           { p: [[630, 185], [630, 335]], c: "github", l: "Create · Conn · Delete", lp: [640, 262] },
           ...bottom.edges,
+        ],
+      },
+    },
+    fleet: {
+      cap: "Controllers take the jobs and place each on a worker with room; the workers run them in microVMs. Only the controllers hold the forges' credentials.",
+      d: {
+        w: 1000, h: 680, label: "Fleet mode: a leader controller takes GitLab and GitHub jobs and places each on a worker over mutual TLS; each worker runs microVMs and keeps its own cache disks",
+        nodes: [
+          { x: 60, y: 20, w: 220, t: "GitLab", s: "jobs API", c: "gitlab", k: "gitlab" },
+          { x: 520, y: 20, w: 220, t: "GitHub", s: "Actions API", c: "github", k: "github" },
+          { x: 30, y: 100, w: 750, h: 130, g: 1, t: "controllers · fleetci controller", c: "core" },
+          { x: 60, y: 140, w: 420, h: 60, t: "leader", s: "takes jobs · places each on a worker", c: "core", k: "fleetctl" },
+          { x: 540, y: 140, w: 220, h: 60, t: "standby", s: "takes over within 10 s", dash: 1, k: "fleetha" },
+          { x: 810, y: 140, w: 160, h: 60, t: "join", s: "one line per server", c: "accent", k: "join" },
+          ...[0, 1, 2].flatMap(i => {
+            const x = 30 + i * 322, name = ["worker eu-1", "worker eu-2", "worker us-1"][i];
+            return [
+              { x, y: 340, w: 296, h: 190, g: 1, t: name, c: "core" },
+              { x: x + 18, y: 375, w: 260, t: "fleetci worker", s: "systemd · checks before Ready", k: "worker" },
+              { x: x + 18, y: 445, w: 260, t: "cache disks", s: "this worker's own", c: "core", k: "cachedisk" },
+            ];
+          }),
+          { x: 30, y: 610, w: 940, h: 50, t: "single-use microVMs", s: "fleetingd · Cloud Hypervisor · one job each", k: "vms" },
+        ],
+        edges: [
+          { p: [[170, 70], [170, 140]], c: "gitlab", l: "requests a job", lp: [180, 88] },
+          { p: [[630, 70], [630, 112], [420, 112], [420, 140]], c: "github", l: "polls queued jobs · webhook", lp: [640, 92] },
+          { p: [[480, 170], [540, 170]], both: 1, dash: true, l: "lease", lp: [510, 162], la: "middle" },
+          { p: [[810, 170], [760, 170]], c: "accent" },
+          { p: [[270, 200], [270, 300]], c: "core", dash: true, l: "assignments · mTLS :9481", lp: [280, 262] },
+          { p: [[178, 300], [822, 300]], c: "core", dash: true, none: true },
+          ...[178, 500, 822].map(x => ({ p: [[x, 300], [x, 340]], c: "core", dash: true })),
+          ...[178, 500, 822].map((x, i) => ({ p: [[x, 530], [x, 610]], l: i === 0 ? "boots" : "", lp: [x + 8, 574] })),
         ],
       },
     },
@@ -557,6 +594,104 @@ h1 small { display: block; font: 400 1rem/1.4 "Source Sans 3", system-ui, sans-s
       ] },
     tags: ["separate groups per process"],
   };
+
+  (() => {
+    const r = row(20, [
+      { t: "last layer", s: "the job's, or main's", c: "core" },
+      { t: "new layer", s: "copy-on-write", c: "core" },
+      { t: "job runs", s: "Docker · caches", c: "gitlab" },
+      { t: "trim · unmount", s: "job over", c: "core" },
+      { t: "kept", s: "only if whole", c: "accent" },
+    ]);
+    const s3 = { x: 248, y: 130, w: 104, t: "bucket", s: "S3 · GCS · Azure" };
+    D.cachedisk = {
+      t: "cache disk", c: "core",
+      d: { w: 600, h: 200, label: "Each job's VM gets a copy-on-write layer on its last run's cache disk, in front of the runner's bucket; the layer is kept only when its job succeeded and the VM gives it back whole",
+        nodes: [...r, s3], edges: [...chain(r, "fg"), { p: [[300, 70], [300, 130]], dash: true, l: "misses go to", lp: [310, 104] }] },
+      tags: ["images · volumes · cache:", "writers: protected by default", "checkout = true, per project", "FLEETCI_CACHE: off"],
+    };
+  })();
+
+  (() => {
+    const r = row(20, [
+      { t: "job fails", s: "asked for a shell", c: "accent" },
+      { t: "VM kept", s: "hold, 10 min", c: "core" },
+      { t: "cache disk", s: "as the job left it", c: "core" },
+      { t: "shell opens", s: "job's keys only", c: "accent" },
+      { t: "VM deleted", s: "at the hold's end" },
+    ]);
+    const r2 = row(130, [
+      { t: "you", s: "fleetci ssh <addr>", c: "fg" },
+      { t: "tailcat relay", s: "no port to open" },
+      { t: "fleetci", s: "checks the key", c: "core" },
+      { t: "VM", s: "sshd" },
+    ], { w: 120, gap: 30 });
+    D.shell = {
+      t: "shell", c: "accent",
+      d: { w: 600, h: 200, label: "A failed job's VM is kept for a while, its cache disk as the job left it and never kept; the person who ran it connects through a tailcat relay with the SSH keys on their account",
+        nodes: [...r, ...r2], edges: [...chain(r, "fg"), ...chain(r2, "core")] },
+      tags: ["GitHub: re-run with debug logging", "GitLab: FLEETCI_SSH: \"1\"", "never for forks", "counts against max_instances"],
+    };
+  })();
+
+  (() => {
+    const r = row(20, [
+      { t: "job", s: "queued", c: "gitlab" },
+      { t: "leader", s: "finds a class", c: "core" },
+      { t: "worker", s: "room · its cache", c: "core" },
+      { t: "assignment", s: "over mTLS", c: "core" },
+      { t: "microVM", s: "boots · runs" },
+    ]);
+    const wait = { x: 248, y: 130, w: 104, t: "no room", s: "overflow or wait", c: "accent" };
+    D.fleetctl = {
+      t: "leader", c: "core",
+      d: { w: 600, h: 200, label: "The leader places each job on a worker with room, preferring one that holds the job's caches; with none, the job goes to its overflow class or waits",
+        nodes: [...r, wait], edges: [...chain(r, "fg"), vchain(r[2], wait, "accent", "none")] },
+      tags: ["placement: pack or spread", "on = { label }", "cache_wait 10 s", "max_instances across the fleet"],
+    };
+  })();
+
+  D.fleetha = {
+    t: "standby", c: "core",
+    d: { w: 600, h: 170, label: "The live controller with the lowest id leads; another takes over when it has heard nothing for ten seconds, and running jobs go on",
+      nodes: [
+        { x: 10, y: 20, w: 170, t: "ctl-1", s: "leads · lowest id", c: "core" },
+        { x: 215, y: 20, w: 170, t: "ctl-2", s: "stands by", dash: 1 },
+        { x: 420, y: 20, w: 170, t: "ctl-1 silent", s: "10 s", c: "accent" },
+        { x: 215, y: 110, w: 170, t: "ctl-2 leads", s: "jobs go on", c: "core" },
+      ],
+      edges: [{ p: [[180, 45], [215, 45]], both: 1, dash: true }, { p: [[505, 70], [505, 135], [385, 135]], c: "accent", l: "takes over", lp: [515, 104] }] },
+    tags: ["peers in controller.toml", "fleetci join -as-controller"],
+  };
+
+  (() => {
+    const r = row(20, [
+      { t: "token create", s: "one join · 1 h", c: "core" },
+      { t: "install.sh", s: "pinned key", c: "accent" },
+      { t: "fleetci join", s: "checks KVM", c: "core" },
+      { t: "certificate", s: "the fleet's CA", c: "core" },
+      { t: "worker", s: "systemd service" },
+    ]);
+    D.join = {
+      t: "join", c: "accent",
+      d: { w: 600, h: 110, label: "A new server joins with one line: it installs fleetci from a controller, checked by its sum, gets a certificate from the fleet's CA and starts the worker service", nodes: r, edges: chain(r, "fg") },
+      tags: ["curl -k with --pinnedpubkey", "drain · undrain · revoke", "worker_update: patch, minor, latest"],
+    };
+  })();
+
+  (() => {
+    const r = row(20, [
+      { t: "controllers", s: "outbound only", c: "core" },
+      { t: "fleetci worker", s: "budget: CPUs · memory", c: "core" },
+      { t: "fleetingd", s: "plugin" },
+      { t: "microVM", s: "one job" },
+    ], { w: 132, gap: 18 });
+    D.worker = {
+      t: "fleetci worker", c: "core",
+      d: { w: 600, h: 110, label: "A worker reaches the controllers over mutual TLS, never the forges with their tokens, and runs its assignments as microVMs through fleetingd", nodes: r, edges: chain(r, "fg", ["mTLS"]) },
+      tags: ["no forge credentials", "microVM checks before Ready", "updates one at a time"],
+    };
+  })();
 
   // ---- page wiring ----
   const main = document.getElementById("main"), cap = document.getElementById("cap"), panel = document.getElementById("panel");

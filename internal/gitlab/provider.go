@@ -32,6 +32,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hashicorp/go-hclog"
 	"github.com/sirupsen/logrus"
 
 	"gitlab.com/gitlab-org/fleeting/fleeting/connector"
@@ -43,6 +44,7 @@ import (
 
 	"github.com/nesty92/fleetci/internal/cachedisk"
 	"github.com/nesty92/fleetci/internal/proxy"
+	"github.com/nesty92/fleetci/internal/shell"
 	"github.com/nesty92/fleetci/internal/source"
 	"github.com/nesty92/fleetci/internal/usage"
 )
@@ -103,8 +105,18 @@ func (c capacityVMs) HasCache(vm string) bool {
 	return ok && a.HasCache(vm)
 }
 
+// DropCache has the VM's cache disk layer thrown away when it goes.
+func (c capacityVMs) DropCache(vm string) {
+	if d, ok := c.Capacity.(source.CacheDropper); ok {
+		d.DropCache(vm)
+	}
+}
+
 // capacityVMs passes cache disks through.
-var _ source.CacheAttacher = capacityVMs{}
+var (
+	_ source.CacheAttacher = capacityVMs{}
+	_ source.CacheDropper  = capacityVMs{}
+)
 
 // roomSeen is room a class had when the job was asked for, not held:
 // Acquire waits for a VM of the class with the other jobs. Used once.
@@ -135,6 +147,10 @@ type provider struct {
 	defaultClass string
 	// cacheDisk says which jobs write their project's shared caches.
 	cacheDisk *CacheDisk
+	// shell, set, offers a failed job's VM for a shell, when the job asks
+	// with FLEETCI_SSH.
+	shell *shell.Config
+	log   hclog.Logger
 	// attached is, on a fleet's worker, the cache disk the worker gave
 	// the VM before the job: the job only keeps its paths on it.
 	attached *attachedCache
@@ -216,6 +232,12 @@ func (p *provider) Release(_ *common.RunnerConfig, data common.ExecutorData) {
 
 	if acqRef.vm != nil {
 		acqRef.collect()
+		if h := acqRef.shell; h != nil {
+			acqRef.shell = nil
+			go p.keepForShell(acqRef.vm.ID, h)
+			acqRef.vm = nil
+			return
+		}
 		_ = p.vms.Delete(context.Background(), acqRef.vm.ID)
 		logrus.WithField("vm", acqRef.vm.ID).Trace("Released capacity...")
 
@@ -244,9 +266,25 @@ var (
 type executor struct {
 	common.Executor
 	p *provider
+	// build and logger are the job's, for its shell at its end.
+	build  *common.Build
+	logger buildlogger.Logger
+}
+
+// Finish offers the job's VM for a shell, if the job failed and asked for
+// one, while the job's log is still open. A job that didn't succeed has its
+// cache disk layer thrown away, as GitLab's cache: saves only on success by
+// default: what it left there may be what broke it.
+func (e *executor) Finish(err error) {
+	if err != nil {
+		e.dropCache()
+	}
+	e.offerShell(err)
+	e.Executor.Finish(err)
 }
 
 func (e *executor) Prepare(options common.ExecutorPrepareOptions) (err error) {
+	e.build, e.logger = options.Build, options.BuildLogger
 	options.Build.Log().Infoln("Preparing instance...")
 
 	acqRef, ok := options.Build.ExecutorData.(*acquisitionRef)
@@ -468,6 +506,8 @@ type acquisitionRef struct {
 	vm    *source.VM
 	// volumes keep the runner's cache directory on the cache disk.
 	volumes []string
+	// shell, set, is the failed job's shell: Release keeps the VM for it.
+	shell *heldShell
 
 	// conn returns the connection to a VM's machine.
 	conn func(vm string) (*proxy.Conn, error)

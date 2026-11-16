@@ -59,6 +59,13 @@ type CacheAttacher interface {
 	HasCache(vm string) bool
 }
 
+// CacheDropper is a CacheAttacher that can be told a VM's job didn't
+// succeed: its cache disk layer is then thrown away when the VM goes,
+// not kept.
+type CacheDropper interface {
+	DropCache(vm string)
+}
+
 // CacheRelay is a CacheAttacher whose VMs another machine runs, which a
 // source can't reach: that machine relays the VM's job-started hook (see
 // package github) and attaches the disk the source decides on.

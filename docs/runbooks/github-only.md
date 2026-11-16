@@ -119,6 +119,16 @@ runner took a job    …
 runner done          …
 ```
 
+## More
+
+| | |
+| --- | --- |
+| Jobs start sooner | `[github.webhook]`: jobs start on GitHub's delivery, not the next poll; [Webhooks](../../README.md#webhooks) |
+| Caches in your own bucket | `cache_store = "bucket"`: [Cache on your own storage](../../README.md#cache-on-your-own-storage) |
+| Images and caches kept between jobs | a fleetingd class's `cache_disk`: [A cache disk per job](../../README.md#a-cache-disk-per-job) |
+| A shell into a failed job | `[github.shell]`: [A shell into a failed job](../../README.md#a-shell-into-a-failed-job) |
+| A whole organization | `orgs` and a GitHub App: [A whole organization](../../README.md#a-whole-organization) |
+
 ## Operating it
 
 | What | How |

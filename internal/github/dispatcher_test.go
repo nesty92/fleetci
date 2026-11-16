@@ -18,6 +18,7 @@ import (
 
 	"github.com/hashicorp/go-hclog"
 
+	"github.com/nesty92/fleetci/internal/cachedisk"
 	"github.com/nesty92/fleetci/internal/fleet"
 	"github.com/nesty92/fleetci/internal/proxy"
 	"github.com/nesty92/fleetci/internal/source"
@@ -679,6 +680,93 @@ func TestStoppingHandsOverOnlyARunnerWithAJob(t *testing.T) {
 			}
 			if !tc.handed && (handed != 0 || deleted != 1 || removed != 1) {
 				t.Fatalf("handed %d, vms removed %d, runners removed %d; want both removed", handed, deleted, removed)
+			}
+		})
+	}
+}
+
+// cacheBackend is a fakeBackend whose VMs have cache disks.
+type cacheBackend struct {
+	fakeBackend
+	events []string // DropCache and Delete, in order
+}
+
+func (b *cacheBackend) HasCache(string) bool { return true }
+func (b *cacheBackend) AttachCache(context.Context, string, cachedisk.Scope) (*cachedisk.Start, error) {
+	return nil, nil
+}
+func (b *cacheBackend) DropCache(id string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.events = append(b.events, "drop "+id)
+}
+func (b *cacheBackend) Delete(ctx context.Context, id string) error {
+	b.mu.Lock()
+	b.events = append(b.events, "delete "+id)
+	b.mu.Unlock()
+	return b.fakeBackend.Delete(ctx, id)
+}
+
+// A job that didn't succeed has its VM's cache disk layer thrown away
+// before the VM goes, and is done all the same; one that succeeded keeps
+// its layer.
+func TestAFailedJobDropsItsCacheLayer(t *testing.T) {
+	for _, tc := range []struct {
+		result string // "" for no result line
+		drop   bool
+	}{
+		{"Succeeded", false},
+		{"SucceededWithIssues", false},
+		{"Failed", true},
+		{"Canceled", true},
+		{"", true},
+	} {
+		t.Run(tc.result, func(t *testing.T) {
+			gh := &fakeGitHub{t: t, jit: map[string][]string{}, jobsJSON: `{"jobs":[
+			  {"id":1,"name":"build","status":"queued","labels":["fleetci"]}
+			]}`}
+			srv := httptest.NewServer(gh)
+			defer srv.Close()
+			tokenFile := filepath.Join(t.TempDir(), "token")
+			_ = os.WriteFile(tokenFile, []byte("test-token"), 0o600)
+			start := func(_ context.Context, vm VM, _ string, _ func(string)) error {
+				if tc.result != "" && vm.Result != nil {
+					vm.Result(tc.result)
+				}
+				return nil
+			}
+			backend := &cacheBackend{fakeBackend: fakeBackend{defaultClass: "2vcpu-1gb"}}
+			d, err := New(t.Context(), Config{Repos: []string{"o/r"}, TokenFile: tokenFile, PollInterval: fleet.Duration(time.Hour), APIURL: srv.URL},
+				backend, start, hclog.NewNullLogger())
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			go func() { d.Run(ctx); close(done) }()
+			waitFor(t, func() bool { backend.mu.Lock(); defer backend.mu.Unlock(); return len(backend.deleted) == 1 })
+			d.mu.Lock()
+			tries := -1
+			if a, ok := d.taken[1]; ok {
+				tries = a.tries
+			}
+			d.mu.Unlock()
+			cancel()
+			<-done
+
+			backend.mu.Lock()
+			got := strings.Join(backend.events, ", ")
+			backend.mu.Unlock()
+			want := "delete fleetci-2vcpu-1gb-1"
+			if tc.drop {
+				want = "drop fleetci-2vcpu-1gb-1, " + want
+			}
+			if got != want {
+				t.Fatalf("got %q, want %q", got, want)
+			}
+			// done, not retried: the try doesn't count.
+			if tries != 0 {
+				t.Fatalf("tries %d after the job ended; want 0, done", tries)
 			}
 		})
 	}

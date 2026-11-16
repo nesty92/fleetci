@@ -4,6 +4,7 @@
 //	fleetci check           proves every class, the GitHub access and config.toml work
 //	fleetci watchdog        restarts gitlab-runner when its fleetci plugin is gone
 //	fleetci serve           runs GitHub Actions jobs on the classes, without gitlab-runner
+//	fleetci ssh             into a failed job's VM, at the address its log gave
 //	fleetci init, controller, token, join, worker, fleet: a fleet of machines
 package main
 
@@ -70,6 +71,8 @@ func main() {
 		err = fleetCmd(os.Args[2:], os.Stdout)
 	case "usage":
 		err = usageCmd(os.Args[2:], os.Stdout)
+	case "ssh":
+		err = sshCmd(os.Args[2:])
 	case "version", "--version":
 		fmt.Println("fleetci", version, revision)
 		return
@@ -94,6 +97,7 @@ func usage(w io.Writer) {
   fleetci watchdog [flags]        restart gitlab-runner when its fleetci plugin is gone
   fleetci serve [flags]           run GitHub Actions jobs on the classes, without gitlab-runner
   fleetci usage [flags]           what each job used of its VM: classes too small, too big, or outgrown
+  fleetci ssh <address>           into a failed job's VM, at the address its log gave
   fleetci version
 
 A fleet of machines, run from controllers:

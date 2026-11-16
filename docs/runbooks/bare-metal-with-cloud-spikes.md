@@ -252,6 +252,33 @@ template, so projects need nothing but the template; the cloud classes
 aren't, which only matters for jobs that ask for them by name
 (`fleetci ci-include -extra`).
 
+### Caches between jobs (optional)
+
+A microVM class can give each job a disk of its project's caches, kept on
+the server: the images it pulled, its Docker volumes, and the `cache:`
+archives of its last run, restored before S3. Nothing changes in the
+projects. Add to each fleetingd class:
+
+```toml
+[classes.4vcpu-8gb.plugin_config]
+vm_cache_directory = "/var/lib/fleetci/cache"   # with the rest
+
+[classes.4vcpu-8gb.cache_disk]
+budget = "200GB"         # all of the class's caches, on this server's disk
+```
+
+and, so pulls from Docker Hub don't count against its limit for the
+server's address, a pull-through mirror on the server or the network:
+
+```toml
+[classes.4vcpu-8gb]
+registry_mirrors = ["http://10.0.0.5:5000"]
+```
+
+The cloud classes have no cache disk; their jobs use the runner's S3 cache
+as before. [Cache disks](../cache-disk.md) has who writes the caches,
+keeping the checkout for big repos, and recipes per language.
+
 ## 4. gitlab-runner and the watchdog
 
 Register a runner in GitLab with the tag `fleetci` and "Run untagged jobs"
@@ -327,10 +354,15 @@ then the snapshot.
 
 ## Several servers
 
-fleetingd starts VMs on its own machine only, so each server runs its own
-gitlab-runner and fleetci, registered with the same tag `fleetci` and the
-same class names. GitLab hands each job to a server with room; if one
-server fails, the others keep working.
+For several servers, run them as one fleet: [A fleet of servers](a-fleet-of-servers.md).
+Controllers place each job on a server with room and hold the forges'
+credentials; each server joins with one command. A fleet has no cloud
+groups yet, nor the shell into a failed job.
+
+Without a fleet, each server runs its own gitlab-runner and fleetci,
+registered with the same tag `fleetci` and the same class names. GitLab
+hands each job to a server with room; if one server fails, the others keep
+working.
 
 - Give `overflow` to the last server only, with its own cloud groups. The
   others then take jobs up to their own capacity and leave the spikes to it.

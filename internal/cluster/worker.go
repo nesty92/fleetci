@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -836,10 +837,12 @@ func (w *Worker) run(ctx context.Context, t *task) {
 	w.poke()
 	log := w.log.With("vm", v.vm.ID, "assignment", t.a.ID)
 	var err error
+	// Whether the job succeeded: its cache disk layer is kept only then.
+	var succeeded atomic.Bool
 	switch {
 	case run.GitHub != nil:
 		w.setJob(v, "github")
-		err = w.runGitHub(rctx, cancel, t, v, *run.GitHub, log, func(job string) {
+		err = w.runGitHub(rctx, cancel, t, v, *run.GitHub, log, &succeeded, func(job string) {
 			w.mu.Lock()
 			v.took, t.status.Took = job, job
 			w.mu.Unlock()
@@ -856,6 +859,7 @@ func (w *Worker) run(ctx context.Context, t *task) {
 			w.mu.Unlock()
 		}
 		err = w.GitLab(rctx, v.vm, job)
+		succeeded.Store(err == nil)
 	case run.GitLab != nil:
 		err = errors.New("this worker can't run GitLab jobs")
 	default:
@@ -869,7 +873,15 @@ func (w *Worker) run(ctx context.Context, t *task) {
 		err = fmt.Errorf("cancelled by the controllers: %w", err)
 	}
 	w.mu.Unlock()
-	log.Info("job done; removing its vm", "err", err)
+	log.Info("job done; removing its vm", "err", err, "succeeded", succeeded.Load())
+	if !succeeded.Load() {
+		w.mu.Lock()
+		b := w.backend
+		w.mu.Unlock()
+		if b != nil {
+			b.DropCache(v.vm.ID)
+		}
+	}
 	_ = w.delete(context.WithoutCancel(ctx), v.vm.ID)
 	w.finish(t, "", err)
 }
@@ -990,12 +1002,14 @@ func (w *Worker) delete(ctx context.Context, id string) error {
 // runGitHub runs a just-in-time runner on a VM until it exits. A runner
 // that takes no job is stopped, as the leader's idle watch would; the
 // leader may be gone.
-func (w *Worker) runGitHub(ctx context.Context, cancel context.CancelFunc, t *task, v *workerVM, req GitHubRun, log hclog.Logger, took func(string)) error {
+func (w *Worker) runGitHub(ctx context.Context, cancel context.CancelFunc, t *task, v *workerVM, req GitHubRun, log hclog.Logger, succeeded *atomic.Bool, took func(string)) error {
 	cs, err := w.cacheStore(req, log)
 	if err != nil {
 		return err
 	}
-	start := github.SSHStart(req.RunnerVersion, cs, log)
+	// No shell on a node yet: the leader, which may let someone in, has
+	// no connection to its VMs.
+	start := github.SSHStart(req.RunnerVersion, cs, false, log)
 	var hook sync.WaitGroup
 	defer hook.Wait()
 	if req.Cache {
@@ -1020,7 +1034,8 @@ func (w *Worker) runGitHub(ctx context.Context, cancel context.CancelFunc, t *ta
 		}
 	}()
 	var once sync.Once
-	return start(ctx, github.VM{VM: source.VM{ID: v.vm.ID, Class: v.vm.Class, Instance: v.vm.Instance}, Conn: v.vm.Conn, Cache: req.Cache}, req.JITConfig, func(job string) {
+	result := func(r string) { succeeded.Store(github.SucceededResult(r)) }
+	return start(ctx, github.VM{VM: source.VM{ID: v.vm.ID, Class: v.vm.Class, Instance: v.vm.Instance}, Conn: v.vm.Conn, Cache: req.Cache, Result: result}, req.JITConfig, func(job string) {
 		once.Do(func() { close(tookc) })
 		took(job)
 	})

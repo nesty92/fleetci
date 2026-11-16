@@ -155,7 +155,7 @@ func adminFlags(fs *flag.FlagSet) (pki, addr *string) {
 
 func tokenCmd(args []string, out io.Writer) error {
 	if len(args) == 0 || args[0] != "create" {
-		return errors.New("usage: fleetci token create [-controller-role] [-ttl 1h]")
+		return errors.New("usage: fleetci token create [-for-controller] [-ttl 1h]")
 	}
 	fs := flag.NewFlagSet("token create", flag.ExitOnError)
 	pki, addr := adminFlags(fs)

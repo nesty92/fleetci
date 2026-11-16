@@ -26,11 +26,15 @@ type client struct {
 }
 
 type job struct {
-	ID     int64    `json:"id"`
-	RunID  int64    `json:"run_id"`
-	Name   string   `json:"name"`
-	Status string   `json:"status"`
-	Labels []string `json:"labels"`
+	ID     int64  `json:"id"`
+	RunID  int64  `json:"run_id"`
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	// Conclusion is how it ended, once Status is "completed": "failure"
+	// for a job that failed.
+	Conclusion string   `json:"conclusion"`
+	RunAttempt int64    `json:"run_attempt"`
+	Labels     []string `json:"labels"`
 	// RunnerName is the runner that took it, once one has.
 	RunnerName string `json:"runner_name"`
 	// CreatedAt is when GitHub queued it.
@@ -115,6 +119,12 @@ func rateLimit(resp *http.Response, msg string, now time.Time) (time.Time, bool)
 }
 
 func (c *client) do(ctx context.Context, method, path string, body, out any) error {
+	return c.doAs(ctx, ownerOf(path), method, path, body, out)
+}
+
+// doAs is do with the token for owner's repos, for a path that names no
+// owner: a user's keys.
+func (c *client) doAs(ctx context.Context, owner, method, path string, body, out any) error {
 	var rd io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -127,7 +137,7 @@ func (c *client) do(ctx context.Context, method, path string, body, out any) err
 	if err != nil {
 		return err
 	}
-	tok, key, err := c.tokens.token(ctx, ownerOf(path))
+	tok, key, err := c.tokens.token(ctx, owner)
 	if err != nil {
 		return err
 	}
