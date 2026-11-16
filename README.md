@@ -7,7 +7,7 @@ needs; it gets a fresh VM of that size, used once.
 <!-- x-release-please-start-version -->
 ```yaml
 include:
-  - remote: https://raw.githubusercontent.com/nesty92/fleetci/v0.8.0/templates/gitlab-ci.yml
+  - remote: https://raw.githubusercontent.com/nesty92/fleetci/v0.9.0/templates/gitlab-ci.yml
 
 build:
   extends: .fleetci-4vcpu-8gb    # the one line; drop it to go back
@@ -46,7 +46,7 @@ lacks:
 <!-- x-release-please-start-version -->
 ```yaml
 include:
-  - remote: https://raw.githubusercontent.com/nesty92/fleetci/v0.8.0/templates/gitlab-ci.yml
+  - remote: https://raw.githubusercontent.com/nesty92/fleetci/v0.9.0/templates/gitlab-ci.yml
   - local: .gitlab/fleetci.yml   # fleetci ci-include -extra > .gitlab/fleetci.yml
 ```
 <!-- x-release-please-end -->
@@ -261,7 +261,7 @@ a fleet of servers, GitLab and GitHub from one runner, and GitHub only. By hand,
 has plain binaries for Linux and macOS (amd64, arm64) and a `checksums.txt`:
 
 ```sh
-v=0.8.0 arch=linux-amd64 # x-release-please-version
+v=0.9.0 arch=linux-amd64 # x-release-please-version
 base=https://github.com/nesty92/fleetci/releases/download/v$v
 curl -fsSLO "$base/fleetci-$arch" -fsSLO "$base/fleeting-plugin-fleetci-$arch" -fsSLO "$base/checksums.txt"
 sha256sum --ignore-missing -c checksums.txt
