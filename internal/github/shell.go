@@ -12,7 +12,6 @@ import (
 	"github.com/hashicorp/go-hclog"
 	"golang.org/x/crypto/ssh"
 
-	"github.com/nesty92/fleetci/internal/fleet"
 	"github.com/nesty92/fleetci/internal/shell"
 	"github.com/nesty92/fleetci/internal/source"
 )
@@ -23,24 +22,7 @@ import (
 // if the job then fails, its VM is kept for Hold. Only someone with write
 // access to the repo is let in, with the SSH keys on their GitHub account,
 // and never into a pull request from a fork's job.
-type ShellConfig struct {
-	// Hold is how long a failed job's VM is kept. Default 10m. A held VM
-	// counts against its class's max_instances.
-	Hold fleet.Duration `json:"hold" toml:"hold"`
-	// DERPMapURL is where tailcat finds the relays it connects through
-	// when no direct path works. Default tailcat.dev's.
-	DERPMapURL string `json:"derp_map_url" toml:"derp_map_url"`
-}
-
-// defaultHold is how long a failed job's VM is kept by default.
-const defaultHold = 10 * time.Minute
-
-func (c *ShellConfig) hold() time.Duration {
-	if c.Hold > 0 {
-		return time.Duration(c.Hold)
-	}
-	return defaultHold
-}
+type ShellConfig = shell.Config
 
 // shellHook ends the job, in the job-completed hook, when the job was run
 // with debug logging: it asks fleetci for a shell, and prints the answer,
@@ -158,7 +140,7 @@ func (d *Dispatcher) watchShell(ctx, held context.Context, vm VM, repo string, q
   tailcat ssh %[3]s
 or
   fleetci ssh %[3]s
-(tailcat: https://github.com/tailscale/tailcat)`, d.cfg.Shell.hold(), actor, srv.Addr()))
+(tailcat: https://github.com/tailscale/tailcat)`, d.cfg.Shell.HoldFor(), actor, srv.Addr()))
 	}()
 	return a
 }
@@ -244,7 +226,8 @@ func (d *Dispatcher) holdForShell(ctx context.Context, a *shellAsk, vm VM, log h
 			return
 		}
 	}
-	hold := d.cfg.Shell.hold()
+	hold := d.cfg.Shell.HoldFor()
+	srv.Open()
 	log.Info("shell: the failed job's VM is kept", "actor", actor, "for", hold.String())
 	select {
 	case <-ctx.Done():

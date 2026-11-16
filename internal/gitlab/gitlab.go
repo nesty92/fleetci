@@ -34,6 +34,7 @@ import (
 	"gitlab.com/gitlab-org/gitlab-runner/router"
 
 	"github.com/nesty92/fleetci/internal/fleet"
+	"github.com/nesty92/fleetci/internal/shell"
 	"github.com/nesty92/fleetci/internal/source"
 )
 
@@ -64,6 +65,10 @@ type Config struct {
 	// CacheDisk says which jobs write their project's shared caches, on
 	// classes with a cache disk; by default, protected branches' and tags'.
 	CacheDisk *CacheDisk `json:"cache_disk" toml:"cache_disk"`
+	// Shell, set, lets a job that sets FLEETCI_SSH=1 and fails be debugged
+	// over SSH: its VM is kept for Shell's hold, for whoever ran the job,
+	// with the SSH keys on their GitLab account (see package shell).
+	Shell *shell.Config `json:"shell,omitempty" toml:"shell,omitempty"`
 
 	// HeldDir, set by fleetci's controller, keeps a note of each job taken
 	// and not yet on a worker, for the next start to place after a restart.
@@ -247,6 +252,7 @@ func New(ctx context.Context, c Config, capacity source.Capacity, log hclog.Logg
 
 	p := newProvider(docker.NewProvider(), capacityVMs{capacity}, func(rc *common.RunnerConfig) string { return classOf[rc] }, names, defaultClass)
 	p.cacheDisk = c.CacheDisk
+	p.shell, p.log = c.Shell, log
 	providers := executors.NewProviderRegistry(map[string]common.ExecutorProvider{executorName: p})
 
 	// As gitlab-runner's main.go newClient, without a certificate

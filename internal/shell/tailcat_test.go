@@ -48,7 +48,21 @@ func TestTailcat(t *testing.T) {
 	}
 	c := ssh.NewClient(cc, chans, reqs)
 	defer c.Close()
-	s, err := c.NewSession()
+	// A session waits for Open: the VM is let out only once kept.
+	type opened struct {
+		s   *ssh.Session
+		err error
+	}
+	got := make(chan opened, 1)
+	go func() { s, err := c.NewSession(); got <- opened{s, err} }()
+	select {
+	case <-got:
+		t.Fatal("a session opened before Open")
+	case <-time.After(500 * time.Millisecond):
+	}
+	srv.Open()
+	o := <-got
+	s, err := o.s, o.err
 	if err != nil {
 		t.Fatal(err)
 	}

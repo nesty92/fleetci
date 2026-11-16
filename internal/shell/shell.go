@@ -57,6 +57,9 @@ type Server struct {
 	wg     sync.WaitGroup
 	once   sync.Once
 	err    error
+	// opened is closed by Open: sessions wait for it.
+	opened   chan struct{}
+	openOnce sync.Once
 }
 
 // ParseKeys reads authorized_keys lines, skipping blanks and comments.
@@ -113,6 +116,8 @@ func ServerConfig(keys []ssh.PublicKey) (*ssh.ServerConfig, error) {
 }
 
 // Start serves the VM at a new tailcat address, until ctx ends or Close.
+// A client may log in at once, but its sessions and forwards wait for
+// Open: the VM is let out only once its job is over and it is kept.
 func Start(ctx context.Context, o Options) (*Server, error) {
 	keys, err := ParseKeys(o.Keys)
 	if err != nil {
@@ -137,7 +142,15 @@ func Start(ctx context.Context, o Options) (*Server, error) {
 		return nil, fmt.Errorf("tailcat: %w", err)
 	}
 	sctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-	s := &Server{ts: ts, ln: ln, addr: string(ts.TailcatAddr()), cancel: cancel}
+	s := &Server{ts: ts, ln: ln, addr: string(ts.TailcatAddr()), cancel: cancel, opened: make(chan struct{})}
+	vm := func(ctx context.Context) (*ssh.Client, error) {
+		select {
+		case <-s.opened:
+			return o.VM(ctx)
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
@@ -149,7 +162,7 @@ func Start(ctx context.Context, o Options) (*Server, error) {
 			s.wg.Add(1)
 			go func() {
 				defer s.wg.Done()
-				Proxy(sctx, c, cfg, o.VM, log.With("for", o.Who))
+				Proxy(sctx, c, cfg, vm, log.With("for", o.Who))
 			}()
 		}
 	}()
@@ -159,6 +172,9 @@ func Start(ctx context.Context, o Options) (*Server, error) {
 	}()
 	return s, nil
 }
+
+// Open lets the clients' sessions and forwards through to the VM.
+func (s *Server) Open() { s.openOnce.Do(func() { close(s.opened) }) }
 
 // Addr is the server's tailcat address.
 func (s *Server) Addr() string { return s.addr }
