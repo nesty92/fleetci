@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.8.0](https://github.com/nesty92/fleetci/compare/v0.7.0...v0.8.0) (2026-11-16)
+
+
+### Features
+
+* a cache disk for each job, in front of GitLab's cache and actions/cache ([#40](https://github.com/nesty92/fleetci/issues/40)) ([7f3a435](https://github.com/nesty92/fleetci/commit/7f3a43540bc091a892ed91d8575fb1d9be4a7de1))
+* **cache:** keep a big project's checkout on its cache disk ([#42](https://github.com/nesty92/fleetci/issues/42)) ([e5b6959](https://github.com/nesty92/fleetci/commit/e5b69593400209ab2f91a842cc3640f9f22f5bd6))
+* **usage:** say whether each job's class is too small, too big or outgrown ([#39](https://github.com/nesty92/fleetci/issues/39)) ([4c3ee9b](https://github.com/nesty92/fleetci/commit/4c3ee9b6dd18d9b9669e23c8691040ffb4029f31))
+
+
+### Bug Fixes
+
+* **release:** find the binaries through GoReleaser's artifacts.json ([#33](https://github.com/nesty92/fleetci/issues/33)) ([fcff245](https://github.com/nesty92/fleetci/commit/fcff24533aff4a3d3a303819fff1cacb9450415c))
+
 ## [0.7.0](https://github.com/nesty92/fleetci/compare/v0.6.0...v0.7.0) (2026-11-10)
 
 
