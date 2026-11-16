@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.9.0](https://github.com/nesty92/fleetci/compare/v0.8.0...v0.9.0) (2026-11-16)
+
+
+### Features
+
+* shell into a failed job's VM ([#44](https://github.com/nesty92/fleetci/issues/44)) ([bbb13ae](https://github.com/nesty92/fleetci/commit/bbb13aeb1ee6d62dcad9cb07c74468f5eb6026bb))
+* **usage:** keep job usage in SQLite ([#47](https://github.com/nesty92/fleetci/issues/47)) ([9aa05cf](https://github.com/nesty92/fleetci/commit/9aa05cf0c19021d565c3f9ecc72550e67031ce66))
+
+
+### Bug Fixes
+
+* **fleet:** ask a silent metadata service less often instead of giving up on it ([#46](https://github.com/nesty92/fleetci/issues/46)) ([c6b4725](https://github.com/nesty92/fleetci/commit/c6b4725de172b5aa7026396ed792aab55148fde1))
+
 ## [0.8.0](https://github.com/nesty92/fleetci/compare/v0.7.0...v0.8.0) (2026-11-16)
 
 
