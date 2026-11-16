@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -228,6 +229,53 @@ func TestProxyRefusesOtherKeys(t *testing.T) {
 	if _, err := proxied(t, vm, []ssh.PublicKey{allowed.PublicKey()}, newSigner(t)); err == nil {
 		t.Fatal("a key not given logged in")
 	}
+}
+
+// TestProxyLogsRefusedKeys: a refused connection's log line names the
+// keys the client offered, so a wrong key isn't a bare timeout.
+func TestProxyLogsRefusedKeys(t *testing.T) {
+	cfg, err := ServerConfig([]ssh.PublicKey{newSigner(t).PublicKey()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	var mu sync.Mutex
+	log := hclog.New(&hclog.LoggerOptions{Output: &lockedWriter{w: &out, mu: &mu}})
+	client, server := connPair(t)
+	done := make(chan struct{})
+	go func() {
+		Proxy(context.Background(), server, cfg, nil, log)
+		close(done)
+	}()
+	wrong := newSigner(t)
+	_, _, _, err = ssh.NewClientConn(client, "tailcat", &ssh.ClientConfig{
+		User:            "anyone",
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(wrong)},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         5 * time.Second,
+	})
+	if err == nil {
+		t.Fatal("a key not given logged in")
+	}
+	client.Close()
+	<-done
+	mu.Lock()
+	got := out.String()
+	mu.Unlock()
+	if !strings.Contains(got, ssh.FingerprintSHA256(wrong.PublicKey())) {
+		t.Fatalf("log %q doesn't name the refused key", got)
+	}
+}
+
+type lockedWriter struct {
+	w  io.Writer
+	mu *sync.Mutex
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
 }
 
 // TestProxyLetsSilentClientsGo: a client that never gets in is let go.

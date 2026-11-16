@@ -213,8 +213,20 @@ in with the SSH keys on their GitHub or GitLab account. The job's log ends
 with an address:
 
 ```
-fleetci ssh <address>       # or: tailcat ssh <address>
+fleetci ssh <address> [ssh options]   # e.g. -i ~/.ssh/id_ed25519
+tailcat ssh <address>                 # keys from your agent or ~/.ssh/config only
 ```
+
+You need an SSH key on your account (GitHub: *Settings → SSH and GPG
+keys*; GitLab: *User settings → SSH Keys*, not a signing-only key). The keys
+are read when the job starts on GitHub, when it fails on GitLab; without
+one, the log says `fleetci: no shell: @you has no SSH keys on …` and the VM
+goes as usual: add a key, then re-run the job. `tailcat ssh` takes no ssh
+options: anything after the address is the command to run, so it offers
+the keys ssh finds itself, and an `IdentityFile` under `Host *` in
+`~/.ssh/config` leaves out the rest. Load the key with `ssh-add`, or add
+`Host tailcat-*` with its `IdentityFile`, or use `fleetci ssh <address> -i <key>`. A key
+fleetci refuses is in its log, by fingerprint.
 
 On GitHub, the job asks by being re-run with debug logging (*Re-run jobs*
 → *Enable debug logging*), and only someone with write access to the repo

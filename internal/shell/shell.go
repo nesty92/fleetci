@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -196,13 +197,39 @@ func (s *Server) Close() error {
 // Forwards from the VM back to the client (ssh -R) are refused.
 func Proxy(ctx context.Context, c net.Conn, cfg *ssh.ServerConfig, vm func(context.Context) (*ssh.Client, error), log hclog.Logger) {
 	defer c.Close()
+	// The keys the client offered that aren't let in, for the log: a
+	// client that gives up shows only as a timeout otherwise.
+	var (
+		mu      sync.Mutex
+		refused []string
+	)
+	own := *cfg
+	if check := cfg.PublicKeyCallback; check != nil {
+		own.PublicKeyCallback = func(m ssh.ConnMetadata, k ssh.PublicKey) (*ssh.Permissions, error) {
+			p, err := check(m, k)
+			if err != nil {
+				mu.Lock()
+				if fp := ssh.FingerprintSHA256(k); !slices.Contains(refused, fp) {
+					refused = append(refused, fp)
+				}
+				mu.Unlock()
+			}
+			return p, err
+		}
+	}
 	// A client that doesn't get in within handshakeTimeout is let go, so
 	// nobody holds connections open without a key.
 	_ = c.SetDeadline(time.Now().Add(handshakeTimeout))
-	sc, chans, reqs, err := ssh.NewServerConn(c, cfg)
+	sc, chans, reqs, err := ssh.NewServerConn(c, &own)
 	_ = c.SetDeadline(time.Time{})
 	if err != nil {
-		log.Info("shell: refused a connection", "err", err)
+		mu.Lock()
+		keys := strings.Join(refused, " ")
+		mu.Unlock()
+		if keys == "" {
+			keys = "none"
+		}
+		log.Info("shell: refused a connection", "err", err, "keys_offered_not_allowed", keys)
 		return
 	}
 	defer sc.Close()
