@@ -170,12 +170,33 @@ and only `serve`'s has `[github]`. When `serve` stops it removes its VMs.
 
 By default `actions/cache`, the caches built into `setup-node`, `setup-go`
 and the like, and buildx's `type=gha` upload to GitHub, through your NAT, with
-10 GB per repo. With `[github] cache_url` they go to a
+10 GB per repo. With `cache_store = "bucket"` they go to a bucket of your
+own instead, S3, Google Cloud Storage or Azure, set as gitlab-runner's
+`[runners.cache]` is, so one bucket can serve both forges. No workflow
+changes, and no server to run: fleetci's machine keeps the credentials and
+gives each VM links to the objects its job may read or write. A bucket in
+the VMs' region is the bigger win.
+
+```toml
+[github]
+cache_store = "bucket"
+
+[github.cache_bucket]
+Type = "s3"
+Path = "fleetci"
+
+[github.cache_bucket.s3]
+BucketName = "my-ci-caches"
+BucketLocation = "eu-north-1"   # AccessKey and SecretKey, or the machine's role
+```
+
+With a [cache disk](#a-cache-disk-per-job), the disk is in front of the
+bucket: saves stay on it and are uploaded after the job, which doesn't wait.
+[docs/cache-disk.md](docs/cache-disk.md#where-the-caches-are-kept) has the
+rest. `[github] cache_url` instead sends them to a
 [github-actions-cache-server](https://github.com/falcondev-oss/github-actions-cache-server)
-instead, for example one on S3 in the VMs' region. No workflow changes. On
-each VM fleetci patches the runner so it keeps the `ACTIONS_RESULTS_URL` it is
-given, and points it at the server; the server passes everything that isn't
-cache (artifacts) to GitHub. It speaks the v2 cache protocol, which
+you run. On each VM fleetci patches the runner so it keeps the
+`ACTIONS_RESULTS_URL` it is given; both speak the v2 cache protocol, which
 `actions/cache` v4 and later use.
 
 Install `zstd` on every VM image. `actions/cache` compresses with zstd on
@@ -222,7 +243,7 @@ with the fleeting plugin.
 On AWS, [terraform-aws-gitlab-runner-autoscaler](https://github.com/nesty92/terraform-aws-gitlab-runner-autoscaler)
 does all of this when fleetci is turned on for one of its runners. [docs/runbooks](docs/runbooks)
 has whole setups: AWS with that module, your own servers with cloud spikes,
-GitLab and GitHub from one runner, and GitHub only. By hand, from nothing to a first job:
+a fleet of servers, GitLab and GitHub from one runner, and GitHub only. By hand, from nothing to a first job:
 
 **1. Binaries.** Each [release](https://github.com/nesty92/fleetci/releases)
 has plain binaries for Linux and macOS (amd64, arm64) and a `checksums.txt`:
@@ -501,6 +522,11 @@ match = "group/services/**"      # main deploys to one place, tags elsewhere
 writers = ["default", "tag:staging-*", "tag:v*"]
 ```
 
+A big repository can also keep its checkout on the disk, set per project
+with `checkout = true`: the next job fetches only what is new, 2 to 6 s
+for kubernetes where a clone takes 12 s, 14 to 43 s for chromium where it
+takes two and a half minutes. See [Keeping the checkout](docs/cache-disk.md#keeping-the-checkout).
+
 `all` lets anyone who can push a branch change what the default branch's
 and the tags' jobs run with: a poisoned `node_modules` or Docker image would
 ship. It is there for projects where every branch is trusted; don't use it
@@ -618,8 +644,27 @@ finds no room goes to its `overflow`, if it has one, instead of waiting.
 When a class runs on more than one host with room, `placement` picks the
 host: `pack` (the default) the busiest, so whole hosts stay free for large
 jobs, or `spread` the idlest, so jobs have quieter neighbours. They are the
-Kubernetes scheduler's MostAllocated and LeastAllocated scoring. Today
-fleetci has one host, the machine it runs on, so this only matters once
-classes run on more. Warm VMs (`idle_count`, or a policy's) and the VMs of a class that
+Kubernetes scheduler's MostAllocated and LeastAllocated scoring. On one
+machine there is one host; on a fleet, `placement` in `controller.toml`
+picks among the workers. Warm VMs (`idle_count`, or a policy's) and the VMs of a class that
 reuses them hold their share all the time; fleetci refuses a budget they
 don't fit, or one with no room left for a class's VM.
+
+### Several servers as one fleet
+
+Several servers, at one site or many, can run jobs as one fleet.
+Controllers, one or a few for when one goes, take the jobs from GitHub and
+GitLab and place each on a worker with room; only they hold the forges'
+credentials. The classes are defined once, in `controller.toml`. A new
+server joins with one line, which installs fleetci from a controller and
+starts it as a worker:
+
+```sh
+fleetci token create        # on a controller; prints the line below
+curl -fsSk --pinnedpubkey sha256//… https://ctl-1:9481/v1/install.sh | sh -s -- ctl-1 <token>
+```
+
+Workers talk to the controllers over mutual TLS with the fleet's own CA,
+can update themselves one at a time, and keep their cache disks; jobs go
+to the worker that holds their caches. [A fleet of servers](docs/runbooks/a-fleet-of-servers.md)
+has the setup, from the first controller to operating it.

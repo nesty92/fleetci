@@ -172,6 +172,11 @@ tofu output -json fleetci | jq -r .amd64.ci_include > .gitlab/fleetci.yml
 `tofu output fleetci` also lists each class's Auto Scaling group and GitHub
 label.
 
+Not on this setup yet: cache disks, which need fleetingd classes
+([Bare metal with cloud spikes](bare-metal-with-cloud-spikes.md#caches-between-jobs-optional)),
+and the shell into a failed job, which needs `fleetci serve`. GitLab jobs
+keep the runner's S3 cache.
+
 ## 6. Check it
 
 On the Manager (SSH, or Session Manager with `runner_manager.enable_ssm_agent = true`):

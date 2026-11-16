@@ -50,7 +50,7 @@ default_class = "2vcpu-4gb"
 [github]
 repos = ["owner/api", "owner/web"]
 token_file = "/etc/fleetci/github.token"
-# cache_url = "http://10.0.1.5:3000/"   # optional: Actions cache on your storage
+# cache_store = "bucket"                # optional: Actions caches in your bucket, see the README
 ```
 
 | Key | Default | |
@@ -67,7 +67,9 @@ token_file = "/etc/fleetci/github.token"
 | `idle_timeout` | `10m` | how long a runner may wait for a job (say its job was cancelled while the VM booted) before its VM is given back |
 | `runner_version` | the image's newest, else `2.338.2` | the actions/runner release to run; images with it in `~/actions-runner-<version>` skip the download |
 | `runner_group_id` | `1` | the runner group to register in; for `orgs`, the group must allow the repos |
-| `cache_url` | | an Actions cache server, see the README |
+| `cache_store` | `github` | where Actions caches go: `github`, `bucket` (in `cache_bucket`, gitlab-runner's `[runners.cache]` keys) or `off` (the cache disk alone); see [Cache on your own storage](../../README.md#cache-on-your-own-storage) |
+| `cache_url` | | an Actions cache server you run, in place of a bucket |
+| `cache_disk.writers` | `["protected"]` | which jobs write the shared cache disks, with a class's `cache_disk`; see [Cache disks](../cache-disk.md#who-writes-the-shared-caches) |
 | `api_url` | `https://api.github.com` | GitHub Enterprise Server's API |
 
 Then:
@@ -88,6 +90,11 @@ job could read or change another job's VM, and `fleetci check` fails on a
 class that reuses VMs. To reuse VMs for GitLab, keep `[github]` out of that
 file and serve GitHub from another (a second plugin config, or
 `fleetci serve`) with single-use classes and groups of their own.
+
+A fleetingd class's `cache_disk` serves both forges' jobs: the images,
+volumes and caches of the job's last run, on a disk of its own; see the
+README's [A cache disk per job](../../README.md#a-cache-disk-per-job). The
+shell into a failed job needs `fleetci serve`; it isn't offered here.
 
 Run fleetci's watchdog beside gitlab-runner, as in
 [Bare metal with cloud spikes](bare-metal-with-cloud-spikes.md#4-gitlab-runner-and-the-watchdog):
