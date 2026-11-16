@@ -53,7 +53,11 @@ func (e *executor) offerShell(jobErr error) {
 		return
 	}
 	cfg := e.p.shell
-	if cfg == nil {
+	switch {
+	case e.p.attached != nil:
+		log.Warningln("fleetci: no shell: not on a fleet of machines yet")
+		return
+	case cfg == nil:
 		log.Warningln("fleetci: no shell: this runner doesn't offer one")
 		return
 	}
@@ -88,7 +92,16 @@ func (e *executor) offerShell(jobErr error) {
   tailcat ssh %[3]s
 or
   fleetci ssh %[3]s
-(tailcat: https://github.com/tailscale/tailcat). The job's containers are gone; its images and Docker volumes are on the VM.`, cfg.HoldFor(), user, srv.Addr()))
+(tailcat: https://github.com/tailscale/tailcat). The job's containers are gone; %[4]s`, cfg.HoldFor(), user, srv.Addr(), leftOnVM(e.p.vms, vm.ID)))
+}
+
+// leftOnVM says what of the job a shell finds: with a cache disk, the
+// job's images and volumes leave with it.
+func leftOnVM(vms any, vm string) string {
+	if c, ok := vms.(interface{ HasCache(string) bool }); ok && c.HasCache(vm) {
+		return "its images and Docker volumes were on the cache disk, which is taken back first: Docker on the VM starts empty."
+	}
+	return "its images and Docker volumes are on the VM."
 }
 
 // startShell is shell.Start, which tests replace.

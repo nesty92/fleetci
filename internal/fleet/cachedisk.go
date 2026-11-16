@@ -230,11 +230,25 @@ func (b *Backend) HasCache(id string) bool {
 
 // DetachCache takes the cache disk back from a VM before it goes, as
 // Delete does: a VM kept after its job, for a shell, goes on without it,
-// so nothing done there reaches the cache.
-func (b *Backend) DetachCache(_ context.Context, id string) error {
+// so nothing done there reaches the cache. Docker starts again on the VM's
+// own disk, empty: the job's images and volumes were on the cache disk.
+func (b *Backend) DetachCache(ctx context.Context, id string) error {
+	b.mu.Lock()
+	cv, ok := b.caches[id]
+	b.mu.Unlock()
 	b.detachCache(id)
+	if !ok {
+		return nil
+	}
+	if out, err := guest(ctx, cv.conn, restartDockerScript); err != nil {
+		return fmt.Errorf("docker didn't start again: %w: %s", err, out)
+	}
 	return nil
 }
+
+// restartDockerScript starts Docker again after unmountScript, on what is
+// left at /var/lib/docker once the cache disk is out.
+const restartDockerScript = `systemctl start containerd.service docker.service`
 
 // detachCache takes the cache disk back from a VM whose job is over. The
 // layer is kept only when the guest unmounted it cleanly and the plugin

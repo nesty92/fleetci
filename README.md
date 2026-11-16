@@ -212,9 +212,10 @@ anywhere, behind NAT on both ends, through
 to set up on the VM. Its free relays are rate limited, without an SLA;
 `derp_map_url` points at your own. The App or token needs nothing more.
 Nobody gets in until the job is over and the VM's cache disk is taken off,
-so what the job left there is gone; on GitLab the job's containers are
-gone too, its images and Docker volumes are not. Not on fleets of machines
-yet, nor with the fleeting plugin.
+so what the job left there is gone, Docker's images and volumes included:
+Docker starts again, empty. Without a cache disk they stay; on GitLab the
+job's containers are gone either way. Not on fleets of machines yet, nor
+with the fleeting plugin.
 
 ## Install
 

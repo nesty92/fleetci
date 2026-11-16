@@ -190,7 +190,7 @@ func TestAFailedJobKeepsItsVM(t *testing.T) {
 		t.Fatalf("a job that passed: %q", out)
 	}
 	out, ref := run(&common.BuildError{ExitCode: 1}, sshVariable, "1")
-	if ref.shell == nil || !strings.Contains(out, "fleetci ssh tc1.fake") || !strings.Contains(out, "@dev") {
+	if ref.shell == nil || !strings.Contains(out, "fleetci ssh tc1.fake") || !strings.Contains(out, "@dev") || !strings.Contains(out, "Docker on the VM starts empty") {
 		t.Fatalf("a failed job: %q", out)
 	}
 	if ev.String() != "" {
