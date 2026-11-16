@@ -31,6 +31,11 @@ const (
 // handler does in its IMDS mode.
 const imdsEvery = 2 * time.Second
 
+// imdsQuiet is how often it is read while it has never answered: a
+// metadata service turned off, or one slow to start. AWS gives two
+// minutes' notice of a reclaim.
+const imdsQuiet = 30 * time.Second
+
 // A tunnel reaches addresses from inside one VM: fleetci's own HTTP
 // requests to the metadata service go through the VM's SSH server, on the
 // instance's shared connection, so nothing runs on the VM and its image
@@ -68,6 +73,7 @@ type reclaimWatch struct {
 	log       hclog.Logger
 	base      string        // imdsBase; tests point it elsewhere
 	every     time.Duration // imdsEvery
+	quiet     time.Duration // imdsQuiet
 	retry     time.Duration // first wait after a lost connection
 	timeout   time.Duration // for one metadata request
 
@@ -80,7 +86,7 @@ type reclaimWatch struct {
 
 func newReclaimWatch(open opener, rebalance bool, log hclog.Logger) *reclaimWatch {
 	return &reclaimWatch{open: open, rebalance: rebalance, log: log,
-		base: imdsBase, every: imdsEvery, retry: time.Second, timeout: 5 * time.Second,
+		base: imdsBase, every: imdsEvery, quiet: imdsQuiet, retry: time.Second, timeout: 5 * time.Second,
 		notices: map[string]string{}, stops: map[string]context.CancelFunc{}}
 }
 
@@ -132,7 +138,8 @@ func (w *reclaimWatch) watch(ctx context.Context, id string) {
 	}
 }
 
-// poll reads the notices every w.every until the tunnel is lost.
+// poll reads the notices every w.every until the tunnel is lost; every
+// w.quiet while the service has never answered and keeps not answering.
 func (w *reclaimWatch) poll(ctx context.Context, id string, t tunnel, seen *bool, log hclog.Logger) error {
 	transport := &http.Transport{DialContext: t.dial, MaxIdleConnsPerHost: 1}
 	defer transport.CloseIdleConnections()
@@ -162,19 +169,27 @@ func (w *reclaimWatch) poll(ctx context.Context, id string, t tunnel, seen *bool
 			// a VM without a metadata service.
 			log.Debug("reading instance metadata", "err", err)
 		default:
+			// No answer in time: a service turned off, or one slow to
+			// start, or a slow way to it. Only the first is for good, and
+			// they look alike, so it is asked less often, not given up on.
 			failures++
-			if !*seen && failures >= 3 {
-				return fmt.Errorf("%w: %w", errNoMetadata, err)
+			if failures == 3 && !*seen {
+				log.Info("the metadata service doesn't answer; asking less often", "every", w.quiet, "err", err)
+			} else {
+				log.Debug("reading instance metadata", "err", err)
 			}
-			log.Debug("reading instance metadata", "err", err)
 		}
 
+		every := w.every
+		if !*seen && failures >= 3 {
+			every = w.quiet
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-t.lost:
 			return errTunnelLost
-		case <-time.After(w.every):
+		case <-time.After(every):
 		}
 	}
 }

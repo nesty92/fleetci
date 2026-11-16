@@ -42,6 +42,12 @@ func (f *fakeIMDS) count() int {
 	return f.requests
 }
 
+func (f *fakeIMDS) setHang(v bool) {
+	f.mu.Lock()
+	f.hang = v
+	f.mu.Unlock()
+}
+
 func (f *fakeIMDS) setFailing(v bool) {
 	f.mu.Lock()
 	f.failing = v
@@ -223,7 +229,7 @@ func (v *vmSSH) open(_ context.Context, _ string) (tunnel, error) {
 
 func fastWatch(open opener, rebalance bool) *reclaimWatch {
 	w := newReclaimWatch(open, rebalance, hclog.NewNullLogger())
-	w.every, w.retry = 20*time.Millisecond, 10*time.Millisecond
+	w.every, w.quiet, w.retry = 20*time.Millisecond, 200*time.Millisecond, 10*time.Millisecond
 	return w
 }
 
@@ -440,22 +446,30 @@ func TestReclaimIsWatchedForTheAWSPluginByDefault(t *testing.T) {
 	}
 }
 
-func TestAVMWhoseMetadataNeverAnswersIsLeftAlone(t *testing.T) {
+// A metadata service that never answers is asked less often, not given up
+// on: one slow to start is watched once it answers.
+func TestAVMWhoseMetadataNeverAnswersIsAskedLessOften(t *testing.T) {
 	imds, addr := newFakeIMDS(t)
-	imds.hang = true
+	imds.setHang(true)
 	vm := newVMSSH(t, addr, 0)
 	w := fastWatch(vm.open, false)
 	w.timeout = 20 * time.Millisecond
+	w.quiet = time.Second
 	defer w.close()
 
 	w.start("i-1")
 	eventually(t, "never asked", func() bool { return imds.count() >= 3 })
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	before := imds.count()
-	time.Sleep(200 * time.Millisecond)
-	if after := imds.count(); after != before {
-		t.Fatalf("still asking (%d, then %d requests); want the watch to end", before, after)
+	time.Sleep(400 * time.Millisecond)
+	if after := imds.count(); after-before > 1 {
+		t.Fatalf("%d requests in 400ms after 3 without an answer; want it asked about once a second", after-before)
 	}
+
+	// It answers at last, with a notice: the watch sees it.
+	imds.set("spot/instance-action", `{"action": "terminate"}`)
+	imds.setHang(false)
+	eventually(t, "the notice was never seen once the service answered", func() bool { return w.notice("i-1") != "" })
 	if n := vm.opened.Load(); n != 1 {
 		t.Fatalf("opened %d times, want once", n)
 	}
