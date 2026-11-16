@@ -213,6 +213,22 @@ if mountpoint -q /cache 2>/dev/null; then
   sudo -n mkdir -p /cache/actions && sudo -n chown "$(id -u):$(id -g)" /cache/actions
 fi
 cat "$d/done"
+# The project keeps its checkout: the runner's folder for the repo, which
+# holds the workspace, is the disk's, so actions/checkout finds the last
+# job's repository there, cleans it and fetches only what is new. Docker
+# binds the runner's work folder with what is mounted in it, for a job's
+# container.
+if [ -e "$d/checkout" ] && [ -n "${GITHUB_WORKSPACE:-}" ] && mountpoint -q /cache 2>/dev/null; then
+  ws=$(realpath -m "$GITHUB_WORKSPACE"); repo=$(dirname "$ws")
+  c=/cache/checkout/$(basename "$repo")
+  if sudo -n mkdir -p "$c/$(basename "$ws")" && sudo -n chown "$(id -u):$(id -g)" "$c" "$c/$(basename "$ws")" &&
+    mkdir -p "$repo" && sudo -n mount --bind "$c" "$repo"; then
+    if [ -d "$ws/.git" ]; then echo "The checkout is kept on the cache disk: the last job's is there"
+    else echo "The checkout is kept on the cache disk: this is its first"; fi
+  else
+    echo "::warning::fleetci: could not keep the checkout on the cache disk"
+  fi
+fi
 `
 
 // SSHStart runs the runner on the VM over SSH and logs its output. An

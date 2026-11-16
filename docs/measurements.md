@@ -771,3 +771,73 @@ the host's page cache, but takes 0.7–1.6 s and the cache's whole size again
 per job. So the cache disk stays qcow2 layers, which need nothing of the
 host's filesystem. XFS on a real partition was not measured: this host has
 none.
+
+## Checkout
+
+What keeping the checkout on the cache disk saves. On the host, no VM: the
+same git commands as actions/checkout (init, `fetch --no-tags --prune` of
+the commit to `refs/remotes/origin/<branch>`, `checkout --force -B`).
+Cold is an empty folder; warm is the folder at a commit a day or a week
+older, with junk left in it, cleaned (`clean -ffdx`, `reset --hard`) and
+fetched to the new commit. GitHub over a 400 Mbit/s link; the fetches are
+bound by GitHub's side, not the link. Seconds, two rounds where both are
+given.
+
+| Repository | Depth | .git | Tree | Cold | Warm, a day | Warm, a week |
+| --- | --- | --- | --- | --- | --- | --- |
+| nesty92/fleetci | 1 | 1 MB | 3 MB | 1.8–2.2 | 1.7–2.1 | 1.8–2.1 |
+| vercel/next.js | 1 | 54 MB | 340 MB | 7.6–8.0 | 2.0–2.3 | 3.0–4.1 |
+| kubernetes/kubernetes | 1 | 52 MB | 378 MB | 11–14 | 2–3 | 6 |
+| torvalds/linux | 1 | 300 MB | 1.8 GB | 29.5–33.5 | 2.3–3.3 | 7.9–9.6 |
+| chromium/chromium | 1 | 1.5 GB | 5.8 GB | 149–155 | 13.6 | 43.3 |
+| nesty92/fleetci | full | 2 MB | 3 MB | 2.0 | | 2.3 |
+| kubernetes/kubernetes | full | 1.3 GB | 378 MB | 114.5 | | 5.5 |
+| vercel/next.js | full | 2.4 GB | 340 MB | 195.2 | | 4.2 |
+| chromium/chromium | full | ~65 GB | 5.8 GB | failed | | |
+
+A repository whose clone takes a few seconds gains nothing; one that takes
+tens of seconds or more gets most of it back. A week's commits cost more
+than a day's at depth 1: each fetch of a shallow clone sends whole trees
+for the commits it hasn't got. With full history the warm fetch sends only
+the new objects, and saves the most: 21 to 46 times faster. Chromium's
+full history did not clone at all: GitHub ended the 65 GB fetch partway
+(`early EOF`), so such a project can only run from a kept checkout.
+
+### The checkout cache in real jobs
+
+The cachelab, one 8 vCPU / 8 GB VM with a cache disk, `checkout = true`
+on both playgrounds. GitHub: actions/checkout of kubernetes at depth 1, a
+job on the VM and one in a job container (`buildpack-deps:noble-scm`), on a
+branch, each job its own disk. GitLab: the playground with
+`GIT_STRATEGY: fetch`, GitLab's default. The checkout step's seconds, as
+GitHub reports them.
+
+| Job | First run | Next runs |
+| --- | --- | --- |
+| GitHub, on the VM | 13 (cloned) | 2, 2 (the last job's there, fetched in 0.9 s) |
+| GitHub, in a container | 13 (cloned) | 3 |
+| GitLab | Initialized empty Git repository | Reinitialized existing Git repository |
+
+The workspace was the disk's in every job (`/dev/vdc[/checkout/...]` on
+GitHub, `/builds` on GitLab), and a job's container saw it at `/__w`. What
+the next job found had no credentials: no `extraheader`, no token in a URL.
+On GitLab, gitlab-runner's `clean_git_config`, on by default, already
+empties the repository's config after each job, so it adds the remote again
+("Created fresh repository"), but keeps the objects and the working copy.
+
+Chromium the same way, on one 8 vCPU / 10 GB VM, each job's cache disk
+100 GB. The second run came five minutes after the first. The checkout
+step's time, as GitHub reports it:
+
+| Chromium | First run | Second run |
+| --- | --- | --- |
+| Depth 1 | 2 min 15 s (about 3.4 GB) | 11 s |
+| Full history | 67 min 14 s | 25 s |
+
+The full history was one fetch of about 67 GB, at a steady 30 MB/s, after
+three and a half quiet minutes while GitHub made the pack, and then about
+twenty minutes of resolving deltas. The connection held throughout, so the
+early EOF on the host above was not GitHub's doing. The kept checkout took
+80 GB of the cache disk: a project like this needs a disk bigger than the
+100 GB default.
+

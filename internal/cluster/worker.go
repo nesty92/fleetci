@@ -1061,7 +1061,7 @@ func (w *Worker) relayCache(ctx context.Context, t *task, v *workerVM, log hclog
 			return
 		case <-time.After(3 * time.Minute):
 			log.Warn("no cache disk: the leader did not say which")
-			_ = github.AnswerJobHook(context.WithoutCancel(ctx), v.vm.Conn, "No cache disk: fleetci did not say which")
+			_ = github.AnswerJobHook(context.WithoutCancel(ctx), v.vm.Conn, "No cache disk: fleetci did not say which", false)
 			set("", "No cache disk: the leader did not say which")
 			return
 		}
@@ -1075,7 +1075,7 @@ func (w *Worker) relayCache(ctx context.Context, t *task, v *workerVM, log hclog
 			note, from = n, f
 		}
 	}
-	if err := github.AnswerJobHook(context.WithoutCancel(ctx), v.vm.Conn, note); err != nil {
+	if err := github.AnswerJobHook(context.WithoutCancel(ctx), v.vm.Conn, note, grant.Scope != nil && grant.Scope.Checkout); err != nil {
 		log.Warn("the job's hook got no answer; it goes on after ten minutes", "err", err)
 	}
 	set("", note)

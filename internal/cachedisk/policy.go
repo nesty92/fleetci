@@ -29,17 +29,24 @@ type Policy struct {
 	// where every pushed branch is trusted. Writers = [] makes no job a
 	// writer.
 	Writers *[]string `json:"writers" toml:"writers"`
-	// Projects set Writers for some projects: the first whose Match fits
-	// the project's path applies.
+	// Projects set Writers and Checkout for some projects: the first whose
+	// Match fits the project's path applies.
 	Projects []ProjectPolicy `json:"projects" toml:"projects"`
 }
 
-// ProjectPolicy is the Writers of the projects Match fits.
+// ProjectPolicy is the settings of the projects Match fits.
 type ProjectPolicy struct {
 	// Match is a project's path, "group/app", a glob, "group/*", or a
 	// group and everything under it, "group/**".
-	Match   string   `json:"match" toml:"match"`
+	Match string `json:"match" toml:"match"`
+	// Writers are the project's; left out, Policy's. [] makes no job a
+	// writer.
 	Writers []string `json:"writers" toml:"writers"`
+	// Checkout keeps the job's working copy of the repository on its
+	// cache disk, so the next job fetches only what is new. Off by
+	// default: it pays on big repositories, and costs a small one disk
+	// for nothing.
+	Checkout bool `json:"checkout" toml:"checkout"`
 }
 
 // Job is what the forge says of a job, which its own config can't change.
@@ -88,9 +95,6 @@ func (p *Policy) Validate() error {
 		if _, err := path.Match(strings.TrimSuffix(pp.Match, "/**"), ""); err != nil {
 			return fmt.Errorf("%s: match %q: %w", where, pp.Match, err)
 		}
-		if pp.Writers == nil {
-			return errors.New(where + ": writers is required; [] makes no job a writer")
-		}
 		if err := check(where, pp.Writers); err != nil {
 			return err
 		}
@@ -115,17 +119,36 @@ func checkRule(r string) error {
 
 // Rules are the writers' rules for a project.
 func (p *Policy) Rules(project string) []string {
-	if p != nil {
-		for _, pp := range p.Projects {
-			if matchProject(pp.Match, project) {
-				return pp.Writers
-			}
-		}
-		if p.Writers != nil {
-			return *p.Writers
-		}
+	if p == nil {
+		return DefaultWriters
+	}
+	if pp := p.project(project); pp != nil && pp.Writers != nil {
+		return pp.Writers
+	}
+	if p.Writers != nil {
+		return *p.Writers
 	}
 	return DefaultWriters
+}
+
+// Checkout says whether the project's jobs keep their checkout on the
+// cache disk.
+func (p *Policy) Checkout(project string) bool {
+	pp := p.project(project)
+	return pp != nil && pp.Checkout
+}
+
+// project is the first of Projects that matches, or nil.
+func (p *Policy) project(project string) *ProjectPolicy {
+	if p == nil {
+		return nil
+	}
+	for i := range p.Projects {
+		if matchProject(p.Projects[i].Match, project) {
+			return &p.Projects[i]
+		}
+	}
+	return nil
 }
 
 // Writer says whether the project's job writes its shared caches.
@@ -154,6 +177,8 @@ func IsWriter(rules []string, j Job) bool {
 }
 
 func matchProject(pattern, project string) bool {
+	// GitHub's and GitLab's paths are the same project in any case.
+	pattern, project = strings.ToLower(pattern), strings.ToLower(project)
 	if group, ok := strings.CutSuffix(pattern, "/**"); ok {
 		return strings.HasPrefix(project, group+"/")
 	}
@@ -216,5 +241,6 @@ func (p *Policy) Scope(r Request) Scope {
 		Job:      r.Name,
 		Writer:   r.Fork == "" && p.Writer(r.Path, r.Job),
 		From:     r.From,
+		Checkout: p.Checkout(r.Path),
 	}
 }

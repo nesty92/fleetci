@@ -298,14 +298,19 @@ func guest(ctx context.Context, conn *proxy.Conn, script string) (string, error)
 		case <-done:
 		}
 	}()
-	out, err := s.CombinedOutput(`s=; [ "$(id -u)" = 0 ] || s="sudo -n"; exec $s sh -euc '` + script + `'`)
+	out, err := s.CombinedOutput(guestCommand(script))
 	return strings.TrimSpace(string(out)), err
+}
+
+// guestCommand runs script as root on the VM: the script whole, single
+// quotes and all.
+func guestCommand(script string) string {
+	return `s=; [ "$(id -u)" = 0 ] || s="sudo -n"; exec $s sh -euc '` + strings.ReplaceAll(script, `'`, `'\''`) + `'`
 }
 
 // mountScript waits for the disk, formats it the first time, and puts
 // Docker's and containerd's data on it. The disk's serial names it.
 // /run/fleetci-cache-mounted marks when, for unmountScript.
-// No single quotes: guest wraps it in them.
 const mountScript = `
 dev=/dev/disk/by-id/virtio-cache
 i=0
@@ -350,8 +355,9 @@ func unmountScript(keep int64) string {
 
 const unmountTmpl = `
 keep=@KEEP@
-# actions/cache's folders mounted from the disk's trees.
-awk '$4 ~ "^/trees/" {print $5}' /proc/self/mountinfo | sort -r | while read -r m; do
+# actions/cache's folders mounted from the disk's trees, and a GitHub
+# job's checkout.
+awk '$4 ~ "^/(trees|checkout)/" {print $5}' /proc/self/mountinfo | sort -r | while read -r m; do
   umount "$m" 2>/dev/null || umount -l "$m" || true
 done
 over() { [ "$(df -B1 --output=used /cache | tail -1)" -gt $keep ]; }
@@ -369,6 +375,13 @@ if over && [ -d /cache/trees ]; then
 fi
 if over; then docker builder prune -f --keep-storage $((keep / 4)) >/dev/null 2>&1 || true; fi
 if over; then docker image prune -af --filter until=168h >/dev/null 2>&1 || true; fi
+# A kept checkout keeps no job's credentials, should the job have ended
+# before its own cleanup: actions/checkout's header, and a token in a URL,
+# as gitlab-runner writes them.
+if [ -d /cache/checkout ]; then
+  find /cache/checkout -maxdepth 8 -path "*/.git/config" -type f -exec \
+    sed -i -E -e "/^[[:space:]]*extraheader[[:space:]]*=/d" -e "s#(https?://)[^/@\"[:space:]]*@#\1#g" {} + 2>/dev/null || true
+fi
 if [ -f /run/fleetci-cache-mounted ] && [ -d /cache/docker/volumes ]; then
   find /cache/docker/volumes -name cache.zip -cnewer /run/fleetci-cache-mounted -exec touch -c {} + 2>/dev/null || true
 fi
