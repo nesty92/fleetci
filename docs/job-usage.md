@@ -83,9 +83,17 @@ gitlab  g/app lint      4vcpu-8gb  31    0.9/4     0.6/8 GB    oversized: at mos
 
 `-runs` prints every run with its waits, and `-job` picks jobs by name.
 
-Runs are kept a line of JSON each in `usage_file` in fleetci.toml, by
-default `usage.jsonl` in `state_dir` (`fleetci serve`) or the controller's
-`state_dir` (a fleet). Without either, as under gitlab-runner's plugin
+Runs are kept in a SQLite database, `usage_file` in fleetci.toml, by
+default `usage.db` in `state_dir` (`fleetci serve`) or the controller's
+`state_dir` (a fleet): the last 1000 runs of each job, older ones deleted
+as new ones come. Several processes can share it, as gitlab-runner's
+plugin processes sharing a `state_dir` do. A `usage.jsonl` from an older
+fleetci is read into it on start and renamed `usage.jsonl.imported`. The
+table is `runs`, each run as JSON in its `run` column:
+
+```console
+$ sqlite3 usage.db "SELECT time, job, json_extract(run, '$.report.mem_peak_mb') FROM runs ORDER BY id DESC LIMIT 5"
+``` Without either, as under gitlab-runner's plugin
 without `usage_file`, jobs are measured and logged, and their history lasts
 until fleetci restarts.
 

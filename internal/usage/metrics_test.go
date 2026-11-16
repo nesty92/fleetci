@@ -10,8 +10,9 @@ import (
 )
 
 func TestMetrics(t *testing.T) {
-	file := filepath.Join(t.TempDir(), "usage.jsonl")
+	file := filepath.Join(t.TempDir(), "usage.db")
 	rec := NewRecorder(file, hclog.NewNullLogger())
+	defer rec.Close()
 	starved := Report{Seconds: 100, CPUs: 2, MemoryMB: 4096, MemPeakMB: 1000, CPUPeak: 2, HasPSI: true, CPUSome: 60}
 	rec.Record(Run{Forge: "github", Job: "a/b build", Class: "small", Report: starved})
 	rec.Record(Run{Forge: "github", Job: "a/b build", Class: "small", Report: Report{Seconds: 5, CPUs: 2, MemoryMB: 4096}})
@@ -45,6 +46,7 @@ fleetci_job_cpu_wait_ratio_count{class="small",forge="github"} 1
 
 	// Runs read back from the file are history, not this process's jobs.
 	again := NewRecorder(file, hclog.NewNullLogger())
+	defer again.Close()
 	if n := testutil.CollectAndCount(again.Metrics(), "fleetci_job_fit_total"); n != 0 {
 		t.Errorf("a new recorder counts %d series from its file, want 0", n)
 	}

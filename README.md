@@ -451,7 +451,8 @@ github  acme/api build  2vcpu-4gb  14    2.0/2     0.5/4 GB  undersized: tasks w
 gitlab  g/app lint      4vcpu-8gb  31    0.9/4     0.6/8 GB  oversized: at most 0.9 of 4 CPUs busy; used at most 0.6 GB of 8 GB memory; try 2 vCPU, 1 GB
 ```
 
-The runs are kept in `usage_file` (default `usage.jsonl` in `state_dir`).
+The runs are kept in a SQLite database, `usage_file` (default `usage.db` in
+`state_dir`), the last 1000 of each job.
 The figures by class are Prometheus metrics too, at `metrics_listen` (or a
 fleet controller's `/metrics`), with a "Job sizing" row in the Grafana
 dashboard.
