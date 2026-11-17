@@ -41,12 +41,21 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-OUT = os.path.expanduser("~/.local/share/fleetci-cachelab/load")
-GH = "WireZone/fleetci-playground"
-GL = "Nesty92%2Ffleetci-playground"
-REMOTE = {"github": "git@github.com:WireZone/fleetci-playground.git",
-          "gitlab": "https://gitlab.com/Nesty92/fleetci-playground.git"}
+# The lab's repos and classes, unless the environment names others:
+# LOAD_GITHUB_REPO (owner/name), LOAD_GITLAB_PROJECT (group/name), and
+# LOAD_CLASS_GO / LOAD_CLASS_WEB, which name each job's class whatever the
+# mode (the mode then only turns the jobs' caches on or off). LOAD_OUT is
+# where the records go; LOAD_GIT_NAME and LOAD_GIT_EMAIL sign the commits.
+OUT = os.path.expanduser(os.environ.get("LOAD_OUT", "~/.local/share/fleetci-cachelab/load"))
+GH = os.environ.get("LOAD_GITHUB_REPO", "WireZone/fleetci-playground")
+GL_PATH = os.environ.get("LOAD_GITLAB_PROJECT", "Nesty92/fleetci-playground")
+GL = GL_PATH.replace("/", "%2F")
+REMOTE = {"github": f"git@github.com:{GH}.git",
+          "gitlab": f"https://gitlab.com/{GL_PATH}.git"}
 CLASSES = {"go": "4vcpu-4gb", "web": "2vcpu-4gb"}
+CLASS_SET = {j: os.environ.get(f"LOAD_CLASS_{j.upper()}") for j in CLASSES}
+GIT_ID = ["-c", "user.name=" + os.environ.get("LOAD_GIT_NAME", "nesty92"),
+          "-c", "user.email=" + os.environ.get("LOAD_GIT_EMAIL", "nesty92@users.noreply.github.com")]
 # GitLab over HTTPS with glab's login: the SSH key may be another account's.
 CRED = ["-c", "credential.https://gitlab.com.helper=", "-c", "credential.https://gitlab.com.helper=!glab auth git-credential"]
 # Where the GitHub jobs' caches must go, as the lab controller is set:
@@ -92,7 +101,7 @@ class Load:
         self.checked = False
         self.forge, self.mode, self.run, self.prs, self.every = forge, mode, run, prs, every
         self.dir = os.path.join(OUT, "work", f"{forge}-{run}")
-        self.git = ["git", "-C", self.dir, "-c", "user.name=nesty92", "-c", "user.email=nesty92@users.noreply.github.com"] + CRED
+        self.git = ["git", "-C", self.dir] + GIT_ID + CRED
         os.makedirs(OUT, exist_ok=True)
         self.out = open(os.path.join(OUT, f"{run}.jsonl"), "a")
         with open(os.path.join(HERE, "commits.json")) as f:
@@ -100,6 +109,8 @@ class Load:
         self.merged = -1
 
     def cls(self, job):
+        if CLASS_SET[job]:
+            return CLASS_SET[job]
         return CLASSES[job] + ("" if self.mode == "disk" else "-nodisk")
 
     def setup(self):

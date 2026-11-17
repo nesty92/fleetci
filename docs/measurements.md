@@ -706,6 +706,14 @@ fleetci's job usage measurement ([job-usage.md](job-usage.md)) on a 2 vCPU /
 mostly idle, right-sized and disk-bound. Each was judged as expected. The
 table is in [job-usage.md](job-usage.md#checked-on-a-real-vm).
 
+## EC2: microVMs on a nested host against a VM per job
+
+Not measured yet. [hack/ec2-host](../hack/ec2-host) is the kit: one EC2
+instance with nested virtualization running fleetingd microVMs, against
+one EC2 VM of the same family per job, under the same load. It compares
+the cost per job, the queue time, nested virtualization's overhead on
+each phase, and what cache disks add.
+
 ## Tried, not kept
 
 Kept for the record; none of these is in fleetci today.

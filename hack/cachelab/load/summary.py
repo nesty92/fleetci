@@ -18,7 +18,7 @@ import os
 import re
 import sys
 
-OUT = os.path.expanduser("~/.local/share/fleetci-cachelab/load")
+OUT = os.path.expanduser(os.environ.get("LOAD_OUT", "~/.local/share/fleetci-cachelab/load"))
 SAMPLE = re.compile(r'^([a-z_]+)(\{[^}]*\})? ([0-9.e+-]+|NaN|\+Inf)$')
 
 

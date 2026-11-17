@@ -3,6 +3,10 @@ hack/aws/.terraform/
 hack/aws/*.tfstate*
 hack/aws/terraform.tfvars
 hack/aws/tfplan
+hack/ec2-host/.terraform/
+hack/ec2-host/*.tfstate*
+hack/ec2-host/terraform.tfvars
+hack/ec2-host/tfplan
 dist/
 __pycache__/
 internal/github/actionscachebin/*.gz
