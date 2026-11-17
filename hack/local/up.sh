@@ -44,6 +44,9 @@ REUSE=${FLEETCI_LOCAL_REUSE:-}
 # [host] for fleetci.toml, such as 'cpus = 5, memory = "10GB"': a budget
 # smaller than this machine, so jobs wait for room. Unset, it is detected.
 HOST=${FLEETCI_LOCAL_HOST:-}
+# A port on this machine's loopback, such as 9402: fleetci's metrics, the
+# plugin's at http://127.0.0.1:9402/metrics.
+METRICS=${FLEETCI_LOCAL_METRICS:-}
 
 case $VMS in
   microvm) small=microvm big=microvm ;;
@@ -150,7 +153,8 @@ TOML
 fi
 cat > "$DATA/fleetci.toml" <<TOML
 default_class = "1vcpu-2gb"${HOST:+
-host = { $HOST \}}
+host = { $HOST \}}${METRICS:+
+metrics_listen = \"0.0.0.0:9402\"}
 
 $(class "$small" 1vcpu-2gb vm1 1 2048 3 172.16.121.)
 $(if [ "$OVERFLOW" = true ]; then
@@ -170,6 +174,8 @@ docker rm -f fleetci-local >/dev/null 2>&1 || true
 # Same paths inside as outside, so the generated configs work in both.
 host="--network $NET -v $DATA:$DATA -v /var/run/docker.sock:/var/run/docker.sock"
 [ -n "$GITHUB_REPOS" ] && host="$host -v $GITHUB_TOKEN_FILE:$GITHUB_TOKEN_FILE:ro"
+publish=
+[ -n "$METRICS" ] && publish="-p 127.0.0.1:$METRICS:9402"
 [ "$big" = microvm ] && host="$host --device /dev/kvm --device /dev/net/tun --cap-add NET_ADMIN --sysctl net.ipv4.ip_forward=1"
 for config in fleetci.toml fleetci-github.toml; do
   [ -f "$DATA/$config" ] || continue
@@ -182,7 +188,7 @@ done
 # tini reaps what gitlab-runner leaves; gitlab-runner runs in a loop with
 # fleetci's watchdog beside it, which stops it when its fleetci plugin is
 # gone (gitlab-runner never starts a dead plugin again).
-docker run -d --init --name fleetci-local $host --entrypoint sh fleetci-local-host -c '
+docker run -d --init --name fleetci-local $host $publish --entrypoint sh fleetci-local-host -c '
   "$0/bin/fleetci" watchdog -plugin "$0/bin/fleeting-plugin-fleetci" \
     -restart "p=\$(pgrep -x gitlab-runner); kill \$p; sleep 15; kill -9 \$p 2>/dev/null || true" &
   if [ -f "$0/fleetci-github.toml" ]; then
@@ -192,5 +198,6 @@ docker run -d --init --name fleetci-local $host --entrypoint sh fleetci-local-ho
 ' "$DATA" >/dev/null
 
 echo "running ($VMS): docker logs -f fleetci-local"
+[ -n "$METRICS" ] && echo "  metrics: http://127.0.0.1:$METRICS/metrics"
 [ "$big" = microvm ] && echo "  the first microVM waits for fleetingd's image build (several minutes, once)"
 exit 0
