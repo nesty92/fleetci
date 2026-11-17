@@ -113,7 +113,7 @@ jobs:
 ```yaml
 # GitLab
 include:
-  - remote: https://raw.githubusercontent.com/nesty92/fleetci/v0.9.0/templates/gitlab-ci.yml
+  - remote: https://raw.githubusercontent.com/nesty92/fleetci/v0.9.1/templates/gitlab-ci.yml
 build:
   extends: .fleetci-4vcpu-8gb
 ```
