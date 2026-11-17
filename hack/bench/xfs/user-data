@@ -1,0 +1,28 @@
+#cloud-config
+# Prepares the bench image once: fio, a data set, the bench service, and
+# nothing else that writes to the disk at boot.
+package_update: true
+packages: [fio, jq]
+write_files:
+  - path: /etc/systemd/system/bench.service
+    content: |
+      [Unit]
+      Description=fleetci disk bench
+      ConditionKernelCommandLine=bench.vm
+      After=local-fs.target
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/bench.sh
+      [Install]
+      WantedBy=multi-user.target
+runcmd:
+  - [sh, -c, 'apt-get purge -y -q snapd unattended-upgrades || true']
+  - [sh, -c, 'systemctl disable apt-daily.timer apt-daily-upgrade.timer man-db.timer fstrim.timer e2scrub_all.timer motd-news.timer || true']
+  - [sh, -c, 'mount /dev/vdc /mnt && install -m 755 /mnt/guest.sh /usr/local/bin/bench.sh && umount /mnt']
+  - [systemctl, enable, bench.service]
+  - [sh, -c, 'mkdir -p /data/tree && cp -a /usr/lib /usr/share /usr/bin /data/tree/']
+  - [sh, -c, 'dd if=/dev/urandom of=/data/big.bin bs=1M count=1024 status=none']
+  - [sh, -c, 'echo "tree: $(du -sh /data/tree | cut -f1), $(find /data/tree | wc -l) files" > /dev/ttyS0']
+  - [touch, /etc/cloud/cloud-init.disabled]
+  - [sh, -c, 'fstrim -av; sync; echo PREP-DONE > /dev/ttyS0']
+  - [systemctl, poweroff]

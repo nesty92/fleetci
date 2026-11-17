@@ -1,7 +1,11 @@
 # Raw disks on reflinks
 
-Status: measured; not built. The change is in fleetingd's plugin
-(fleeting-plugin-fleetingd), plus a filesystem on the host.
+Status: measured; not to be built as it stands. VM disks stay qcow2
+overlays. A raw reflink clone writes several times faster, but with
+several VMs on one image it reads that image 1.7–3× slower, and most of a
+CI job's disk time is reading its image's tools
+([several VMs at once](#several-vms-at-once)). The design below is kept for
+a write-heavy class, should one need it.
 
 ## Why
 
@@ -46,6 +50,59 @@ partition removes that layer, so it should be at least as fast.
 
 The clone grew to 7.4 GB after the benchmark: the job's 2 GB fio file and
 untar runs. That space is freed when the VM's disk is deleted.
+
+## Several VMs at once
+
+The figures above are one VM. A worker runs many, all booted from the same
+image, and that changes the result. Two GitHub-hosted runners (4 vCPU,
+16 GB, on AWS; root ext4 on EBS, its writes on local NVMe), 1 and 4 VMs
+booted at once (1 vCPU, 2 GB each), each on a new disk made from one
+prepared image holding a 1.5 GB tree of 61,836 files and a 1 GB file. Three
+disks: qcow2 overlays on the root's ext4 (fleetci today), qcow2 overlays on
+XFS, raw reflink clones on XFS. The runners have no second disk, so XFS was
+on a loop device with direct I/O over a preallocated file: no second page
+cache beneath XFS. The host's page cache was warm (the base image just
+read, as after earlier jobs) or dropped. 3 rounds in random order; medians,
+the two runners' range. Harness and full tables: `hack/bench/xfs/`.
+
+4 VMs at once, warm cache:
+
+| | qcow2 on ext4 (today) | qcow2 on XFS | reflink on XFS |
+| --- | --- | --- | --- |
+| read the image's tree | 13.0–13.5 s | 13.1 s | 22.4–24.7 s |
+| read the 1 GB file | 1.3 s | 1.3 s | 3.6–4.1 s |
+| copy the tree, sync | 28.8–29.0 s | 29.4–29.8 s | 30.1–31.4 s |
+| random 4k writes, qd32 | 1.8k IOPS, p99 50 ms | 1.7–2.1k IOPS, p99 117–133 ms | 13.9–15.2k IOPS, p99 18–21 ms |
+| synced 4k writes | 85–91 IOPS | 40–46 IOPS | 56–198 IOPS |
+| the whole run, per VM | 74 s | 75–76 s | 91–93 s |
+| make the disk | 6–7 ms | 7 ms | 16–17 ms |
+
+One VM: reflink wrote 3–4× faster at random and read the warm image
+1.6–1.9× slower; the whole run took 8% longer. With the cache dropped, one
+VM read slightly faster from a clone, four 1.3–2.8× slower.
+
+Why the reads lose: an overlay reads the image through its backing file,
+one file shared by every VM, so once one VM has read a block the others
+find it in the host's page cache. Each reflink clone is a file of its own
+with a page cache of its own, though the blocks on disk are shared: every
+VM reads the image from the disk again. okou measured the same for
+Firecracker microVMs: reads of a fresh image 10× slower from XFS reflink
+clones than from a copy-on-write layer over a shared file, and their p99
+10× worse with four VMs ([okou-ai/okou#40688](https://github.com/okou-ai/okou/issues/40688)).
+Teams that use reflink clones (fast-sandbox, PandaStack) do so to make
+disks fast, which qcow2 overlays already are.
+
+The writes are qcow2's weak spot: allocating clusters under several
+writers. The whole run understates the gain, since the fio tests run for a
+fixed time. XFS itself helps qcow2 nothing; the loop device costs it, with
+p99 2× worse than on ext4.
+
+So reflink clones would pay only for a class whose jobs mostly write at
+random into new space (databases, some test suites) and read little of
+their image. The job usage measurement (`docs/job-usage.md`) shows which
+jobs wait on their disk. Cheaper to try first, not yet measured: qcow2
+overlays with larger clusters, or a separate raw scratch disk for such a
+job's writes, keeping the image's reads on the shared overlay.
 
 ## What the host needs
 
@@ -120,8 +177,7 @@ the layers are the unit both of keeping and of sharing:
   blocks that changed (`FIEMAP` against the clone's parent), or keep qcow2
   for transfer and convert on arrival.
 
-Do the root disk first, and measure what a raw cache disk gains on real
-jobs before redesigning it.
+Measure what a raw cache disk gains on real jobs before redesigning it.
 
 Measured since, on the lab's real caches: a raw reflink clone on XFS in a
 file was no faster than the qcow2 chain, and 18% slower at synced writes

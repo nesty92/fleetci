@@ -854,6 +854,15 @@ Docker's default seccomp profile blocks io_uring. In a container,
 Cloud Hypervisor then logs "io_uring runtime probe failed" and uses a
 synchronous backend.
 
+### Several VMs at once, on GitHub's runners
+
+With 4 VMs booted at once on one image, a reflink clone on XFS read the
+image 1.7–3.2× slower than a qcow2 overlay, and wrote at random 7–9×
+faster (14–15k against 1.8k IOPS). The whole run took about 21% longer.
+Reflink clones don't share the host's page cache, overlays on one backing
+file do. Tables and method:
+[design/raw-reflink-disks.md](design/raw-reflink-disks.md#several-vms-at-once).
+
 ### The cache disk: qcow2 layers, a raw copy, a reflink clone
 
 The lab's two real caches of main, GitHub jobs on the VM: go (6 layers,
