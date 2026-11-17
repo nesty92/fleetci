@@ -706,6 +706,25 @@ fleetci's job usage measurement ([job-usage.md](job-usage.md)) on a 2 vCPU /
 mostly idle, right-sized and disk-bound. Each was judged as expected. The
 table is in [job-usage.md](job-usage.md#checked-on-a-real-vm).
 
+## Class metrics in plugin mode
+
+The local kit (`hack/local`, container VMs, `FLEETCI_LOCAL_METRICS`) as
+gitlab-runner's plugin, scraped every 3 s: four 20 s jobs on 1vcpu-2gb
+(max 3) and four 40 s jobs on 4vcpu-8gb (max 2, overflow 4vcpu-8gb-cloud),
+on a host budget of 15 CPUs and 24.4 GB.
+
+- `fleetci_class_jobs`: 4vcpu-8gb at 2 running and 2 waiting until the
+  first two ended, 1vcpu-2gb at 3 and 1. The overflow took none: the cloud
+  class runs on the same host here, and a third 8 GB VM is over its memory
+  budget, so `fleetci_overflow_total` stayed 0, as it should.
+- `fleetci_vm_wait_seconds`: 4 jobs each; 4vcpu-8gb's sum of 94 s is two
+  waits of a few seconds and two of about 45 s for room.
+- `fleetci_vms_acquired_total`: all 8 `cold` (no `idle_count`); boot,
+  readiness, held and lifetime histograms 4 samples a class.
+
+The first run found the waiting gauge blind to jobs held for room (it
+counted only those with a slot, booting); it counts them now.
+
 ## Tried, not kept
 
 Kept for the record; none of these is in fleetci today.

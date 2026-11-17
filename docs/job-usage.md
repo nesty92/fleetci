@@ -126,10 +126,11 @@ Where they're served:
   fleetci.toml, e.g. `metrics_listen = "127.0.0.1:9483"`, plain HTTP at
   `/metrics`.
 
-The fleet dashboard (`docs/grafana/fleetci-fleet.json`) has a "Job sizing"
-row: jobs by fit, the share of each class undersized or oversized over a
-day, the p90 waits and peaks by class, and the jobs outgrowing their class.
-Alert on the share undersized, for example:
+Both dashboards, `docs/grafana/fleetci.json` (serve and the plugin) and
+`docs/grafana/fleetci-fleet.json`, have a "Job sizing" row: jobs by fit,
+the share of each class undersized or oversized over a day, the p90 waits
+and peaks by class, and the jobs outgrowing their class.
+[metrics.md](metrics.md) lists the other metrics. Alert on the share undersized, for example:
 
 ```promql
 sum by (class) (increase(fleetci_job_fit_total{fit="undersized"}[1d]))

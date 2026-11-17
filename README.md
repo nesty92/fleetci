@@ -455,7 +455,9 @@ The runs are kept in a SQLite database, `usage_file` (default `usage.db` in
 `state_dir`), the last 1000 of each job.
 The figures by class are Prometheus metrics too, at `metrics_listen` (or a
 fleet controller's `/metrics`), with a "Job sizing" row in the Grafana
-dashboard.
+dashboards. [docs/metrics.md](docs/metrics.md) lists the rest: jobs waiting
+and running by class, the wait for a VM, warm and cold starts, overflow,
+boot and readiness times, the host's budget, GitHub's API.
 See [docs/job-usage.md](docs/job-usage.md) for the rules and how they were
 checked.
 
