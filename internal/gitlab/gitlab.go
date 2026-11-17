@@ -36,6 +36,7 @@ import (
 	"github.com/nesty92/fleetci/internal/fleet"
 	"github.com/nesty92/fleetci/internal/shell"
 	"github.com/nesty92/fleetci/internal/source"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // RunnerVersion is the gitlab-runner release fleetci's copy of the job loop
@@ -148,6 +149,13 @@ func (s *Source) Init(ctx context.Context, config []byte, capacity source.Capaci
 
 // Run takes and runs jobs until ctx ends.
 func (s *Source) Run(ctx context.Context) error { return s.loop.Run(ctx) }
+
+// Metrics are gitlab-runner's own about the loop's jobs and runners, as
+// its listen_address serves them: gitlab_runner_jobs,
+// gitlab_runner_job_queue_duration_seconds and the others. Init first.
+func (s *Source) Metrics() []prometheus.Collector {
+	return []prometheus.Collector{&s.loop.mr.buildsHelper, &s.loop.mr.healthHelper}
+}
 
 // New builds the loop: the runners' configs, the GitLab client and the
 // executor provider over capacity.

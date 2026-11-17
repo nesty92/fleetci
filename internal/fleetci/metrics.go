@@ -17,16 +17,18 @@ import (
 )
 
 // ServeMetrics serves the recorder's metrics, with the process's own, at
-// metrics_listen until ctx ends. Without metrics_listen it does nothing.
-func (c *Config) ServeMetrics(ctx context.Context, rec *usage.Recorder, log hclog.Logger) error {
-	if c.MetricsListen == "" {
-		return nil
-	}
+// metrics_listen until ctx ends, and returns the registry they are in, for
+// the backend's and the job sources' metrics once they start. Without
+// metrics_listen the registry is served nowhere.
+func (c *Config) ServeMetrics(ctx context.Context, rec *usage.Recorder, log hclog.Logger) (*prometheus.Registry, error) {
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(rec.Metrics(), collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+	if c.MetricsListen == "" {
+		return reg, nil
+	}
 	lis, err := net.Listen("tcp", c.MetricsListen)
 	if err != nil {
-		return fmt.Errorf("metrics_listen: %w", err)
+		return nil, fmt.Errorf("metrics_listen: %w", err)
 	}
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
@@ -41,5 +43,5 @@ func (c *Config) ServeMetrics(ctx context.Context, rec *usage.Recorder, log hclo
 		}
 	}()
 	log.Info("serving metrics", "addr", lis.Addr().String())
-	return nil
+	return reg, nil
 }

@@ -16,7 +16,7 @@ func TestDeaths(t *testing.T) {
 	now := time.Now()
 	d.nowFunc = func() time.Time { return now }
 	r := &reporting{id: "i-1", state: provider.StateDeleted}
-	g := vmGroup{r, newVMConns(newCloud(), false, hclog.NewNullLogger()), nil, d}
+	g := vmGroup{r, newVMConns(newCloud(), false, hclog.NewNullLogger()), nil, d, nil}
 	update := func() { _ = g.Update(context.Background(), func(string, provider.State) {}) }
 
 	update()

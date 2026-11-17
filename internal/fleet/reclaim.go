@@ -79,9 +79,11 @@ type reclaimWatch struct {
 
 	mu      sync.Mutex
 	notices map[string]string // VM id → the notice, while watched
-	stops   map[string]context.CancelFunc
-	closed  bool
-	wg      sync.WaitGroup
+	// noted, if set, is told the kind of each notice, once per VM.
+	noted  func(kind string)
+	stops  map[string]context.CancelFunc
+	closed bool
+	wg     sync.WaitGroup
 }
 
 func newReclaimWatch(open opener, rebalance bool, log hclog.Logger) *reclaimWatch {
@@ -230,12 +232,36 @@ func (w *reclaimWatch) saw(id, kind, value string, log hclog.Logger) {
 		// Noted once: a seen recommendation is kept as "", not as a notice.
 		if _, noted := w.notices[id]; !noted {
 			w.notices[id] = ""
+			w.tell(kind)
 			log.Info("rebalance recommendation; the class does not act on it", "recommendation", value)
 		}
 		return
 	}
 	w.notices[id] = kind + " " + value
+	w.tell(kind)
 	log.Warn("the cloud is taking this vm back; no new jobs on it, running ones go on", "notice", kind, "detail", value)
+}
+
+func (w *reclaimWatch) tell(kind string) {
+	if w.noted != nil {
+		w.noted(kind)
+	}
+}
+
+// draining is how many watched VMs have a notice: they take no new jobs.
+func (w *reclaimWatch) draining() int {
+	if w == nil {
+		return 0
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	n := 0
+	for _, v := range w.notices {
+		if v != "" {
+			n++
+		}
+	}
+	return n
 }
 
 // notice is what the cloud said about id, or "".
@@ -382,6 +408,7 @@ type vmGroup struct {
 	conns *vmConns
 	w     *reclaimWatch // nil: the class isn't watched
 	died  *deaths       // nil: not counted
+	ups   *upTimes      // nil: not kept
 }
 
 func (g vmGroup) Heartbeat(ctx context.Context, id string) error {
@@ -422,6 +449,9 @@ func (g vmGroup) forget(id string) {
 		g.w.stop(id)
 	}
 	g.conns.drop(id)
+	if g.ups != nil {
+		g.ups.forget(id)
+	}
 }
 
 // deaths counts a class's instances that the plugin reports deleted

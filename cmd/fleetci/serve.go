@@ -14,6 +14,7 @@ import (
 
 	"github.com/nesty92/fleetci/internal/fleet"
 	"github.com/nesty92/fleetci/internal/fleetci"
+	"github.com/nesty92/fleetci/internal/forgemetrics"
 	"github.com/nesty92/fleetci/internal/github"
 	"github.com/nesty92/fleetci/internal/gitlab"
 	"github.com/nesty92/fleetci/internal/source"
@@ -51,7 +52,8 @@ func serve(args []string) error {
 
 	rec := c.UsageRecorder(log.Named("usage"))
 	jobusage.SetDefault(rec)
-	if err := c.ServeMetrics(ctx, rec, log); err != nil {
+	reg, err := c.ServeMetrics(ctx, rec, log)
+	if err != nil {
 		return err
 	}
 	var opts []fleet.Option
@@ -64,6 +66,9 @@ func serve(args []string) error {
 	if err != nil {
 		return err
 	}
+	reg.MustRegister(backend.Metrics())
+	forge := forgemetrics.New("fleetci_")
+	reg.MustRegister(forge.Collectors()...)
 	defer func() {
 		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
@@ -85,7 +90,7 @@ func serve(args []string) error {
 	}
 	var sources []named
 	if c.GitHub != nil {
-		sources = append(sources, named{"github", &github.Source{}, c.GitHub})
+		sources = append(sources, named{"github", &github.Source{Metrics: forge}, c.GitHub})
 	}
 	if c.GitLab != nil {
 		sources = append(sources, named{"gitlab", &gitlab.Source{}, c.GitLab})
@@ -97,6 +102,9 @@ func serve(args []string) error {
 		}
 		if err := s.src.Init(ctx, config, capacity, log.Named(s.name)); err != nil {
 			return err
+		}
+		if gl, ok := s.src.(*gitlab.Source); ok {
+			reg.MustRegister(gl.Metrics()...)
 		}
 	}
 	log.Info("fleetci serving", "classes", len(c.Classes), "default_class", c.DefaultClass, "github", c.GitHub != nil, "gitlab", c.GitLab != nil)

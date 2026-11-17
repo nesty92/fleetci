@@ -53,6 +53,7 @@ type hostQueue struct {
 	Placement     string
 	clock         clock.PassiveClock
 	log           hclog.Logger
+	nominated     func(class string) // nil: not told
 
 	mu      sync.Mutex
 	hosts   map[string]*host
@@ -209,6 +210,9 @@ func (q *hostQueue) nominate() {
 			continue // its hosts hold others' nominations
 		}
 		x.on, best.nominated = best, x
+		if q.nominated != nil {
+			q.nominated(x.class)
+		}
 		q.log.Info("job nominated: the host holds the room that frees for it", "class", x.class, "host", best.name, "size", x.need.String(), "waited", waited.Round(time.Second).String())
 	}
 }

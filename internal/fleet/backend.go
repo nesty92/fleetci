@@ -50,6 +50,7 @@ type pool struct {
 	reclaim *reclaimWatch // nil when the class isn't watched
 	conns   *vmConns      // one shared connection per instance
 	died    *deaths       // its instances that went without being removed
+	ups     upTimes       // when its instances were admitted
 	ts      taskscaler.Taskscaler
 	timeout time.Duration
 	// stored: the class's taskscaler state is kept on disk, so its VMs
@@ -69,6 +70,14 @@ type pool struct {
 
 	mu   sync.Mutex
 	jobs int // jobs on the class's VMs or waiting for one
+	held int // jobs of the class Create holds until it, its overflow or a host has room
+}
+
+// hold counts a job in or out of those Create holds for room.
+func (p *pool) hold(n int) {
+	p.mu.Lock()
+	p.held += n
+	p.mu.Unlock()
 }
 
 // take counts a job in on one of a class's pools, one per host it runs on:
@@ -157,8 +166,12 @@ type Backend struct {
 	pools    map[string][]*pool // class → its pools, one per host it runs on
 	shutdown sync.Once
 
+	metrics *metrics
+
 	mu  sync.Mutex
 	vms map[string]*pool // VM id (= acquisition key) → its pool
+	// since is when each VM was acquired.
+	since map[string]time.Time
 	// instance, by VM id: the machine each VM is on. handed and adopted
 	// are VMs left to the next fleetci: handed over by a job source, and
 	// taken from an earlier fleetci and still running their job.
@@ -212,7 +225,7 @@ func WithStateDir(dir string) Option {
 // New starts every class's plugin and taskscaler. host is fleetci.toml's
 // [host], or nil for its defaults.
 func New(ctx context.Context, classes map[string]Class, host *HostConfig, log hclog.Logger, opts ...Option) (*Backend, error) {
-	b := &Backend{log: log, pools: map[string][]*pool{}, vms: map[string]*pool{}}
+	b := &Backend{log: log, pools: map[string][]*pool{}, vms: map[string]*pool{}, metrics: newMetrics()}
 	for _, o := range opts {
 		o(b)
 	}
@@ -223,6 +236,7 @@ func New(ctx context.Context, classes map[string]Class, host *HostConfig, log hc
 	}
 	if hq != nil {
 		hq.log = log
+		hq.nominated = b.metrics.nominate
 		local := hq.hosts[localHost]
 		log.Info("host budget", "host", local.name, "budget", local.Budget.String(), "reserved", local.fixed.String(), "nominate_after", hq.NominateAfter.String(), "placement", hq.Placement)
 	}
@@ -239,7 +253,7 @@ func New(ctx context.Context, classes map[string]Class, host *HostConfig, log hc
 			_ = b.Shutdown(ctx)
 			return nil, fmt.Errorf("class %q: %w", name, err)
 		}
-		p, err := startPool(ctx, name, c, groups, st, b.adopt, log.Named("class."+name))
+		p, err := startPool(ctx, name, c, groups, st, b.adopt, b.metrics, log.Named("class."+name))
 		if err != nil {
 			_ = b.Shutdown(ctx)
 			return nil, fmt.Errorf("class %q: %w", name, err)
@@ -347,7 +361,7 @@ func checkOverflow(name string, classes map[string]Class) error {
 //
 // With st, the class's state is kept there, and adopt is called for each
 // job an earlier fleetci left running on one of its VMs.
-func startPool(ctx context.Context, name string, c Class, groups map[string]string, st storage.Storage, adopt func(p *pool, key, instance string), log hclog.Logger) (*pool, error) {
+func startPool(ctx context.Context, name string, c Class, groups map[string]string, st storage.Storage, adopt func(p *pool, key, instance string), m *metrics, log hclog.Logger) (*pool, error) {
 	settings, err := c.Connector.settings()
 	if err != nil {
 		return nil, err
@@ -386,8 +400,12 @@ func startPool(ctx context.Context, name string, c Class, groups map[string]stri
 		ready = adoptUp(dockerUp(group, c.Connector.UseExternalAddr, c.RegistryMirrors, log), func(key, instance string) { adopt(p, key, instance) })
 	}
 	p.died = newDeaths(log)
-	scaled, up, reclaim := withReclaim(c, group, conns, p.died, ready, sshTunnel(conns), log)
+	scaled, up, reclaim := withReclaim(c, group, conns, p.died, &p.ups, ready, sshTunnel(conns), log)
 	p.reclaim = reclaim
+	if reclaim != nil {
+		reclaim.noted = m.notice(name)
+	}
+	up = admittedAt(up, &p.ups)
 	stop := func() {
 		if reclaim != nil {
 			reclaim.close()
@@ -396,7 +414,11 @@ func startPool(ctx context.Context, name string, c Class, groups map[string]stri
 		group.Close()
 	}
 
-	ts, err := taskscaler.New(ctx, initialised{scaled, info}, scalerOptions(c, settings, up, st, log)...)
+	opts := scalerOptions(c, settings, up, st, log)
+	if m != nil {
+		opts = append(opts, taskscaler.WithMetricsCollector(m.scaler(name)), taskscaler.WithFleetingMetricsCollector(m.provisioner(name)))
+	}
+	ts, err := taskscaler.New(ctx, initialised{scaled, info}, opts...)
 	if err != nil {
 		stop()
 		return nil, fmt.Errorf("starting taskscaler: %w", err)
@@ -418,12 +440,24 @@ func startPool(ctx context.Context, name string, c Class, groups map[string]stri
 // dropped and, for a class watched for reclaim, so the heartbeat of a VM
 // with a notice fails and up starts watching a VM once it is admitted.
 // reclaim is nil for a class that isn't watched.
-func withReclaim(c Class, group provider.InstanceGroup, conns *vmConns, died *deaths, up taskscaler.UpFunc, open opener, log hclog.Logger) (provider.InstanceGroup, taskscaler.UpFunc, *reclaimWatch) {
+func withReclaim(c Class, group provider.InstanceGroup, conns *vmConns, died *deaths, ups *upTimes, up taskscaler.UpFunc, open opener, log hclog.Logger) (provider.InstanceGroup, taskscaler.UpFunc, *reclaimWatch) {
 	if !c.watchesReclaim() {
-		return vmGroup{group, conns, nil, died}, up, nil
+		return vmGroup{group, conns, nil, died, ups}, up, nil
 	}
 	w := newReclaimWatch(open, c.Reclaim.Rebalance, log.Named("reclaim"))
-	return vmGroup{group, conns, w, died}, watchOnceUp(up, w), w
+	return vmGroup{group, conns, w, died, ups}, watchOnceUp(up, w), w
+}
+
+// admittedAt notes when up admits each instance, so a job's VM can be
+// told warm from cold.
+func admittedAt(up taskscaler.UpFunc, ups *upTimes) taskscaler.UpFunc {
+	return func(ts taskscaler.Taskscaler, inst taskscaler.UpFuncInstance) error {
+		if err := up(ts, inst); err != nil {
+			return err
+		}
+		ups.up(inst.ID, time.Now())
+		return nil
+	}
 }
 
 // watchOnceUp starts watching an instance for reclaim once up admits it.
@@ -598,6 +632,7 @@ func (b *Backend) Create(ctx context.Context, class string) (VM, error) {
 			}
 			w = first.queue.enqueue(class, first.size, hosts...)
 		}
+		first.hold(1)
 		for p == nil {
 			wake := b.woken()
 			if p = take(w, pools); p == nil {
@@ -608,6 +643,8 @@ func (b *Backend) Create(ctx context.Context, class string) (VM, error) {
 			}
 			select {
 			case <-actx.Done():
+				first.hold(-1)
+				b.metrics.gotNone(class, actx.Err())
 				held := ""
 				if w != nil {
 					held = first.queue.heldFor(w)
@@ -618,6 +655,7 @@ func (b *Backend) Create(ctx context.Context, class string) (VM, error) {
 			case <-time.After(overflowPoll):
 			}
 		}
+		first.hold(-1)
 		if w != nil {
 			first.queue.dequeue(w)
 		}
@@ -685,13 +723,16 @@ func (b *Backend) acquire(actx context.Context, p *pool, class string, start tim
 	id := "fleetci-" + p.name + "-" + randomHex(4)
 	acq, err := p.ts.Acquire(actx, id)
 	if err != nil {
+		b.metrics.gotNone(class, err)
 		p.done()
 		b.notify()
 		return VM{}, fmt.Errorf("acquiring a %s vm: %w", p.name, err)
 	}
 
+	b.metrics.got(p, class, start, p.ups.before(acq.InstanceID(), start))
 	b.mu.Lock()
 	b.vms[id] = p
+	set(&b.since, id, time.Now())
 	if p.stored {
 		set(&b.instance, id, acq.InstanceID())
 	}
@@ -734,13 +775,16 @@ func full(class string, pools, overflow []*pool, held string) string {
 func (b *Backend) Delete(_ context.Context, id string) error {
 	b.mu.Lock()
 	p, ok := b.vms[id]
+	since := b.since[id]
 	delete(b.vms, id)
+	delete(b.since, id)
 	delete(b.instance, id)
 	delete(b.adopted, id)
 	b.mu.Unlock()
 	if !ok {
 		return nil
 	}
+	b.metrics.released(p.name, since)
 	// Before fleeting removes the VM: the disk is taken out whole.
 	b.detachCache(id)
 	p.ts.Release(id)
@@ -762,6 +806,7 @@ func (b *Backend) HandOver(id string) bool {
 		return false
 	}
 	delete(b.vms, id)
+	delete(b.since, id)
 	set(&b.handed, id, b.instance[id])
 	delete(b.instance, id)
 	b.log.Info("vm left to the next fleetci with its job", "vm", id, "class", p.name)
@@ -854,9 +899,9 @@ func (b *Backend) follow(p *pool, key, instance string) {
 }
 
 // set sets m[k], making m if it is nil.
-func set(m *map[string]string, k, v string) {
+func set[V any](m *map[string]V, k string, v V) {
 	if *m == nil {
-		*m = map[string]string{}
+		*m = map[string]V{}
 	}
 	(*m)[k] = v
 }
