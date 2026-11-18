@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/nesty92/fleetci/compare/v0.9.1...v0.10.0) (2026-11-18)
+
+
+### Features
+
+* class metrics in serve and plugin modes ([#50](https://github.com/nesty92/fleetci/issues/50)) ([24e86bd](https://github.com/nesty92/fleetci/commit/24e86bdb1c9fc606086bc6e99ae880d00b59f0e8))
+
 ## [0.9.1](https://github.com/nesty92/fleetci/compare/v0.9.0...v0.9.1) (2026-11-16)
 
 
