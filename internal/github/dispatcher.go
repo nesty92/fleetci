@@ -33,6 +33,7 @@ import (
 	"github.com/nesty92/fleetci/internal/cachebucket"
 	"github.com/nesty92/fleetci/internal/cachedisk"
 	"github.com/nesty92/fleetci/internal/fleet"
+	"github.com/nesty92/fleetci/internal/forgemetrics"
 	"github.com/nesty92/fleetci/internal/proxy"
 	"github.com/nesty92/fleetci/internal/source"
 	"github.com/nesty92/fleetci/internal/usage"
@@ -194,7 +195,13 @@ type VM struct {
 type StartFunc func(ctx context.Context, vm VM, jitConfig string, took func(job string)) error
 
 // Source is the GitHub job source: Init builds the dispatcher, Run runs it.
-type Source struct{ d *Dispatcher }
+type Source struct {
+	// Metrics, if set before Init, get the dispatcher's API calls, queue
+	// waits and pickups.
+	Metrics *forgemetrics.Metrics
+
+	d *Dispatcher
+}
 
 var _ source.Source = (*Source)(nil)
 
@@ -205,12 +212,23 @@ func (s *Source) Init(ctx context.Context, config []byte, capacity source.Capaci
 	if err := json.Unmarshal(config, &c); err != nil {
 		return fmt.Errorf("github: config: %w", err)
 	}
+	c.SetMetrics(s.Metrics)
 	d, err := New(ctx, c, capacity, nil, log)
 	if err != nil {
 		return err
 	}
 	s.d = d
 	return nil
+}
+
+// SetMetrics has the dispatcher report to m; nil leaves it unreported.
+func (c *Config) SetMetrics(m *forgemetrics.Metrics) {
+	if m == nil {
+		return
+	}
+	c.Transport = m.GitHubTransport(c.Transport)
+	c.QueueWait = m.QueueWait("github")
+	c.Pickup = m.Pickup("github")
 }
 
 // Run serves jobs until ctx ends.

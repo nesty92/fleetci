@@ -1,14 +1,14 @@
 package cluster
 
 import (
-	"cmp"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/nesty92/fleetci/internal/forgemetrics"
 )
 
 // metricsHandler serves /metrics.
@@ -36,11 +36,7 @@ type metrics struct {
 
 	cacheFrom     *prometheus.CounterVec
 	leaderChanges prometheus.Counter
-	queueWait     *prometheus.HistogramVec
-	pickup        *prometheus.HistogramVec
-	ghRequests    *prometheus.CounterVec
-	ghSeconds     prometheus.Histogram
-	ghRemaining   *prometheus.GaugeVec
+	forge         *forgemetrics.Metrics // queue wait, pickup, GitHub's API
 }
 
 func newMetrics(c *Controller) *metrics {
@@ -68,27 +64,11 @@ func newMetrics(c *Controller) *metrics {
 		leaderChanges: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "fleetci_fleet_leader_changes_total", Help: "Times this controller saw the lead change hands.",
 		}),
-		queueWait: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name: "fleetci_fleet_queue_wait_seconds", Help: "From the forge queuing a job to its VM being up, as this controller led.",
-			Buckets: []float64{1, 2, 5, 10, 20, 30, 60, 120, 300, 600, 1800, 3600},
-		}, []string{"forge", "class"}),
-		pickup: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name: "fleetci_fleet_pickup_seconds", Help: "From the forge queuing a job to fleetci first taking it, by how it came (poll or webhook), as this controller led: fleetci's own part of the queue wait.",
-			Buckets: []float64{0.5, 1, 2, 5, 10, 20, 30, 60, 120, 300},
-		}, []string{"forge", "class", "via"}),
-		ghRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "fleetci_github_api_requests_total", Help: "Calls to GitHub's API, by HTTP status; code 0 for those that got no answer.",
-		}, []string{"code"}),
-		ghSeconds: prometheus.NewHistogram(prometheus.HistogramOpts{
-			Name: "fleetci_github_api_request_seconds", Help: "How long GitHub's API took to answer.",
-			Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30},
-		}),
-		ghRemaining: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "fleetci_github_api_ratelimit_remaining", Help: "The calls GitHub's rate limit had left, as its last answer said, by resource.",
-		}, []string{"resource"}),
+		forge: forgemetrics.New("fleetci_fleet_"),
 	}
-	m.reg.MustRegister(m.jobs, m.vms, m.duration, m.boot, m.cacheFrom, m.leaderChanges, m.queueWait, m.pickup, m.ghRequests, m.ghSeconds, m.ghRemaining, fleetCollector{c},
+	m.reg.MustRegister(m.jobs, m.vms, m.duration, m.boot, m.cacheFrom, m.leaderChanges, fleetCollector{c},
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+	m.reg.MustRegister(m.forge.Collectors()...)
 	return m
 }
 
@@ -219,46 +199,17 @@ func (f fleetCollector) Collect(ch chan<- prometheus.Metric) {
 // GitHubMetrics are what the GitHub dispatcher reports to the metrics: its
 // API calls, through the transport, and each job's wait for a VM.
 func (c *Controller) GitHubMetrics() (http.RoundTripper, func(class string, wait time.Duration)) {
-	m := c.metrics
-	return githubTransport{m: m, next: http.DefaultTransport}, func(class string, wait time.Duration) {
-		m.queueWait.WithLabelValues("github", class).Observe(wait.Seconds())
-	}
+	return c.metrics.forge.GitHubTransport(nil), c.metrics.forge.QueueWait("github")
 }
 
 // GitHubPickup is what the GitHub dispatcher tells how long each job took
 // to reach it.
 func (c *Controller) GitHubPickup() func(class, via string, wait time.Duration) {
-	return func(class, via string, wait time.Duration) {
-		c.metrics.pickup.WithLabelValues("github", class, via).Observe(wait.Seconds())
-	}
+	return c.metrics.forge.Pickup("github")
 }
 
 // GitLabQueueWait is what the GitLab dispatcher tells how long each job
 // waited, from GitLab queuing it to its VM being up.
 func (c *Controller) GitLabQueueWait() func(class string, wait time.Duration) {
-	return func(class string, wait time.Duration) {
-		c.metrics.queueWait.WithLabelValues("gitlab", class).Observe(wait.Seconds())
-	}
-}
-
-// githubTransport counts and times GitHub's API calls, and keeps what the
-// rate limit has left.
-type githubTransport struct {
-	m    *metrics
-	next http.RoundTripper
-}
-
-func (t githubTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	start := time.Now()
-	resp, err := t.next.RoundTrip(r)
-	t.m.ghSeconds.Observe(time.Since(start).Seconds())
-	if err != nil {
-		t.m.ghRequests.WithLabelValues("0").Inc()
-		return resp, err
-	}
-	t.m.ghRequests.WithLabelValues(strconv.Itoa(resp.StatusCode)).Inc()
-	if left, err := strconv.ParseFloat(resp.Header.Get("X-RateLimit-Remaining"), 64); err == nil {
-		t.m.ghRemaining.WithLabelValues(cmp.Or(resp.Header.Get("X-RateLimit-Resource"), "core")).Set(left)
-	}
-	return resp, nil
+	return c.metrics.forge.QueueWait("gitlab")
 }

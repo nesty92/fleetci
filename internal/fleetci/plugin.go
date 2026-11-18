@@ -21,6 +21,7 @@ import (
 	"gitlab.com/gitlab-org/fleeting/nesting/api"
 
 	"github.com/nesty92/fleetci/internal/fleet"
+	"github.com/nesty92/fleetci/internal/forgemetrics"
 	"github.com/nesty92/fleetci/internal/gateway"
 	"github.com/nesty92/fleetci/internal/github"
 	"github.com/nesty92/fleetci/internal/gitlab"
@@ -112,7 +113,8 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 	rec := g.UsageRecorder(log.Named("usage"))
 	usage.SetDefault(rec)
 	mctx, mstop := context.WithCancel(context.Background())
-	if err := g.ServeMetrics(mctx, rec, log); err != nil {
+	reg, err := g.ServeMetrics(mctx, rec, log)
+	if err != nil {
 		mstop()
 		return provider.ProviderInfo{}, err
 	}
@@ -135,6 +137,9 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 			_ = backend.Shutdown(context.WithoutCancel(ctx))
 		}
 	}()
+	// gitlab-runner's own fleeting metrics see only the gateway, its one
+	// instance: the classes' VMs are in the backend's.
+	reg.MustRegister(backend.Metrics())
 
 	// The nesting API listens on a socket only this user can reach. The
 	// runner gets to it through the gateway, never directly.
@@ -151,7 +156,11 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 
 	var gh *github.Dispatcher
 	if g.GitHub != nil {
-		gh, err = github.New(ctx, *g.GitHub, source.NewCapacity(backend, g.Classes, g.DefaultClass), nil, log.Named("github"))
+		forge := forgemetrics.New("fleetci_")
+		reg.MustRegister(forge.Collectors()...)
+		gcfg := *g.GitHub
+		gcfg.SetMetrics(forge)
+		gh, err = github.New(ctx, gcfg, source.NewCapacity(backend, g.Classes, g.DefaultClass), nil, log.Named("github"))
 		if err != nil {
 			return provider.ProviderInfo{}, err
 		}

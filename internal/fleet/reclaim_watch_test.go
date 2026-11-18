@@ -249,7 +249,7 @@ func TestANoticeReadThroughTheTunnelFailsTheHeartbeat(t *testing.T) {
 	vm := newVMSSH(t, addr, 0)
 	w := fastWatch(vm.open, false)
 	defer w.close()
-	g := vmGroup{newCloud("i-1"), newVMConns(newCloud(), false, hclog.NewNullLogger()), w, nil}
+	g := vmGroup{newCloud("i-1"), newVMConns(newCloud(), false, hclog.NewNullLogger()), w, nil, nil}
 
 	w.start("i-1")
 	eventually(t, "never read the metadata", func() bool {
@@ -381,7 +381,7 @@ func TestTheWatchAndTheConnectionEndWithTheVM(t *testing.T) {
 	defer w.close()
 	conns := newVMConns(newReachable(t, vm.addr), false, hclog.NewNullLogger())
 	defer conns.close()
-	g := vmGroup{newCloud("i-1", "i-2"), conns, w, nil}
+	g := vmGroup{newCloud("i-1", "i-2"), conns, w, nil, nil}
 
 	w.start("i-1")
 	w.start("i-2")
@@ -557,7 +557,7 @@ func TestTheWatchAndConnectionEndWhenThePluginReportsTheVMDeleted(t *testing.T) 
 	}{{provider.StateRunning, true}, {provider.StateDeleting, true}, {provider.StateDeleted, false}} {
 		w.start("i-1")
 		conn := conns.get("i-1")
-		g := vmGroup{&reporting{id: "i-1", state: c.state}, conns, w, nil}
+		g := vmGroup{&reporting{id: "i-1", state: c.state}, conns, w, nil, nil}
 		var got provider.State
 		if err := g.Update(context.Background(), func(_ string, s provider.State) { got = s }); err != nil {
 			t.Fatal(err)
@@ -605,7 +605,7 @@ func TestAWatchedClassCordonsAVMWithANotice(t *testing.T) {
 	on := true
 
 	group, admit, w := withReclaim(Class{Plugin: "fleeting-plugin-x", Reclaim: Reclaim{Watch: &on}},
-		newCloud("i-1"), newVMConns(newCloud(), false, hclog.NewNullLogger()), nil, up, vm.open, hclog.NewNullLogger())
+		newCloud("i-1"), newVMConns(newCloud(), false, hclog.NewNullLogger()), nil, nil, up, vm.open, hclog.NewNullLogger())
 	if w == nil {
 		t.Fatal("no watch for a class that asks for one")
 	}
@@ -626,7 +626,7 @@ func TestAnUnwatchedClassStillDropsAGoneInstancesConnection(t *testing.T) {
 	called := false
 	up := func(taskscaler.Taskscaler, taskscaler.UpFuncInstance) error { called = true; return nil }
 
-	group, admit, w := withReclaim(Class{Plugin: "fleeting-plugin-dockervm"}, newCloud("i-1"), conns, nil, up,
+	group, admit, w := withReclaim(Class{Plugin: "fleeting-plugin-dockervm"}, newCloud("i-1"), conns, nil, nil, up,
 		func(context.Context, string) (tunnel, error) { t.Fatal("opened a tunnel"); return tunnel{}, nil },
 		hclog.NewNullLogger())
 	if w != nil {

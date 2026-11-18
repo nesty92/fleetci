@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/hashicorp/go-hclog"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/nesty92/fleetci/internal/usage"
 )
@@ -27,9 +28,15 @@ func TestServeMetrics(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	c := &Config{MetricsListen: addr}
-	if err := c.ServeMetrics(ctx, rec, hclog.NewNullLogger()); err != nil {
+	reg, err := c.ServeMetrics(ctx, rec, hclog.NewNullLogger())
+	if err != nil {
 		t.Fatal(err)
 	}
+	// What starts after the endpoint, the backend and the job sources,
+	// joins it.
+	later := prometheus.NewCounter(prometheus.CounterOpts{Name: "fleetci_later_total", Help: "x"})
+	later.Inc()
+	reg.MustRegister(later)
 	resp, err := http.Get("http://" + addr + "/metrics")
 	if err != nil {
 		t.Fatal(err)
@@ -40,6 +47,7 @@ func TestServeMetrics(t *testing.T) {
 		`fleetci_job_fit_total{class="small",fit="undersized",forge="github"} 1`,
 		`fleetci_job_memory_peak_ratio_count{class="small",forge="github"} 1`,
 		`go_goroutines`,
+		`fleetci_later_total 1`,
 	} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("/metrics has no %s", want)
@@ -47,7 +55,8 @@ func TestServeMetrics(t *testing.T) {
 	}
 	http.DefaultClient.CloseIdleConnections()
 
-	if err := (&Config{}).ServeMetrics(ctx, rec, hclog.NewNullLogger()); err != nil {
-		t.Fatalf("without metrics_listen: %v", err)
+	reg, err = (&Config{}).ServeMetrics(ctx, rec, hclog.NewNullLogger())
+	if err != nil || reg == nil {
+		t.Fatalf("without metrics_listen: %v, %v", reg, err)
 	}
 }
