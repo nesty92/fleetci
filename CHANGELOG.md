@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.1](https://github.com/nesty92/fleetci/compare/v0.10.0...v0.10.1) (2026-11-21)
+
+
+### Bug Fixes
+
+* **deps:** x/crypto 0.59.0 for dials that hang on a dropped ssh connection ([#52](https://github.com/nesty92/fleetci/issues/52)) ([e9c98b6](https://github.com/nesty92/fleetci/commit/e9c98b66c776e80fc35d8374828115d37e9872ee))
+
 ## [0.10.0](https://github.com/nesty92/fleetci/compare/v0.9.1...v0.10.0) (2026-11-18)
 
 
